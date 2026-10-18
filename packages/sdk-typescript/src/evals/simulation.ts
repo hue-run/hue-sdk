@@ -251,6 +251,9 @@ export interface RunSimulationOptions {
     inputs: JsonValue,
     context: SimulationTargetContext,
   ): JsonValue | TargetResult | undefined | Promise<JsonValue | TargetResult | undefined>;
+  /** Called after outputs upload and before the attempt is marked completed. A failure leaves
+   * the uploaded attempt resumable. The callback may be repeated after an interruption. */
+  onUploaded?(report: SimulationReport): void | Promise<void>;
   /** Receives bounded nonsecret lifecycle progress. */
   onProgress?(event: SimulationProgress): void | Promise<void>;
 }
@@ -868,6 +871,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
         }),
     });
     const complete: SimulationReport = { ...report, experimentId, runUrl };
+    await options.onUploaded?.(complete);
     attempt.stage = "completed";
     attempt.report = complete;
     await store.write("active-attempt", attempt);

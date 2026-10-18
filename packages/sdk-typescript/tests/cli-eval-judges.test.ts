@@ -83,6 +83,7 @@ function standIn(
           idempotencyKey: string;
           jobs: { evaluationItemId: string; scorerVersionId: string }[];
         };
+        if (options.blocked) return new Response(null, { status: 402 });
         jobs.push({ key: parsed.idempotencyKey, body, runId, pairs: parsed.jobs });
         if (options.retry && postAttempts++ === 0) return new Response(null, { status: 503 });
         return Response.json({ ids: parsed.jobs.map(() => randomUUID()) });
@@ -153,13 +154,14 @@ describe("CLI hosted judge dispatch", () => {
     }
   });
 
-  test("an unavailable project budget prevents every dispatch", async () => {
+  test("server budget admission refuses new jobs with a clear error", async () => {
     const f = standIn({ blocked: true });
     try {
       await expect(dispatchPinnedJudges(f.client, f.experimentId, f.subjects)).rejects.toThrow(
         "check its judge budget",
       );
       expect(f.jobs).toEqual([]);
+      expect(f.budgetReads()).toBe(0);
     } finally {
       f.stop();
     }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -172,8 +172,13 @@ function documentStandIn(
     ignoreExecutionState?: boolean;
     /** A separately dispatched model judge, with no real provider. */
     hostedJudge?: { pending?: boolean; blocked?: boolean };
+    /** Synthetic server-owned verifier program, deliberately unknown to local bindings. */
+    verifierBundle?: boolean;
     /** Accept a judge dispatch, then drop this many response bodies. */
     lostJudgeAcknowledgements?: number;
+    /** Fault injected after upload but before the runner returns its completed report. */
+    beforeFinish?(): Promise<void>;
+    beforeQueueCompletion?(): Response | undefined;
     /** Scorer versions (by index) Hue records as not applicable to the case; `forged` answers the
      * same skipped result and evidence without Hue's `notApplicable` flag. */
     notApplicable?: { versions: number[]; forged?: boolean };
@@ -368,6 +373,14 @@ function documentStandIn(
             ...scorerVersions[index]!.definition,
             kind: "hosted_code",
           }) as unknown as ScorerVersion["definition"];
+  if (options.verifierBundle)
+    scorerVersions[0]!.definition = {
+      kind: "hosted_code",
+      program: "verifier_bundle",
+      bundleId: randomUUID(),
+      sourceDigest: "a".repeat(64),
+      metrics: [{ name: "passed", type: "boolean" }],
+    } as unknown as ScorerVersion["definition"];
   const experiments = new Map<string, Experiment & { versionId: string }>();
   const executions = new Map<string, Execution & { experimentId: string; caseId: string }>();
   const subjects = new Map<string, Subject>();
@@ -380,6 +393,7 @@ function documentStandIn(
   const reservations = new Map<string, string>();
   let failCompletions = options.failCompletions ?? 0;
   let lostJudgeAcknowledgements = options.lostJudgeAcknowledgements ?? 0;
+  let judgeBudgetEnabled = true;
   const acceptedJudgeRequests = new Map<string, string[]>();
   const calls = {
     requests: [] as string[],
@@ -433,7 +447,7 @@ function documentStandIn(
       if (path === "/judge-budget")
         return Response.json({
           configured: true,
-          enabled: true,
+          enabled: judgeBudgetEnabled,
           blocked: options.hostedJudge?.blocked ?? false,
         });
       const judgeJobs = /^\/evaluation-runs\/([^/]+)\/judge-jobs$/.exec(path);
@@ -443,6 +457,9 @@ function documentStandIn(
         calls.judgeJobs.push({ runId, idempotencyKey: String(body.idempotencyKey), jobs });
         const requestKey = String(body.idempotencyKey);
         const prior = acceptedJudgeRequests.get(requestKey);
+        // Match server admission: an already accepted request replays before budget checks.
+        if (!prior && (!judgeBudgetEnabled || options.hostedJudge?.blocked))
+          return new Response(null, { status: 402 });
         const ids = prior ?? jobs.map(() => randomUUID());
         acceptedJudgeRequests.set(requestKey, ids);
         if (!prior && !options.hostedJudge?.pending)
@@ -530,6 +547,7 @@ function documentStandIn(
           frozenCases.find((item) => item.id === experimentMatch[2]) ?? frozenCases[0]!;
         if (experimentMatch[4]) {
           experiment.finishedAt = new Date().toISOString();
+          await options.beforeFinish?.();
           return Response.json({ id: experiment.id, finishedAt: experiment.finishedAt });
         }
         if (experimentMatch[3]) {
@@ -678,6 +696,8 @@ function documentStandIn(
       if (path === "/local-agent-worker/runs/heartbeat")
         return Response.json({ runId: body.runId, active: true });
       if (path === "/local-agent-worker/runs/complete") {
+        const interrupted = options.beforeQueueCompletion?.();
+        if (interrupted) return interrupted;
         calls.localRuns.push(body);
         if (failWorkerCompletions > 0) {
           failWorkerCompletions--;
@@ -949,21 +969,36 @@ function documentStandIn(
     server,
     baseUrl: `http://127.0.0.1:${server.port}`,
     calls,
+    projectId,
     dataset,
     scorerVersions,
     artifacts,
     worlds,
+    disableJudgeBudget: () => {
+      judgeBudgetEnabled = false;
+    },
+    acceptedJudgeJobs: () =>
+      [...acceptedJudgeRequests.values()].reduce((sum, ids) => sum + ids.length, 0),
     stop: () => server.stop(true),
   };
 }
 
-function hue(args: string[], options: { cwd: string; env?: Record<string, string> }) {
+function hue(
+  args: string[],
+  options: {
+    cwd: string;
+    env?: Record<string, string>;
+    installed?: boolean;
+    onSpawn?(child: ChildProcess): void;
+  },
+) {
   const { HUE_API_KEY: _key, HUE_BASE_URL: _origin, ...inherited } = process.env;
   return new Promise<{ status: number | null; stdout: string; stderr: string }>(
     (resolve, reject) => {
       // Worker and judge-dispatch checks exercise the installed Node executable.
       const installed =
-        cli.endsWith(".js") && (args.includes("--worker") || args.includes("--judges"));
+        cli.endsWith(".js") &&
+        (options.installed || args.includes("--worker") || args.includes("--judges"));
       const child = spawn(
         installed ? cli : process.execPath,
         [...(installed ? [] : [cli]), "eval", ...args],
@@ -973,6 +1008,7 @@ function hue(args: string[], options: { cwd: string; env?: Record<string, string
           stdio: ["ignore", "pipe", "pipe"],
         },
       );
+      options.onSpawn?.(child);
       let stdout = "";
       let stderr = "";
       child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
@@ -1077,6 +1113,43 @@ const inheritedWorld = {
 };
 
 describe("hue eval hosted judge opt-in", () => {
+  test(
+    "a hosted verifier bundle is left to Hue without opting into model judges",
+    async () => {
+      const standIn = documentStandIn({ verifierBundle: true });
+      const cwd = await mkdtemp(join(tmpdir(), "hue-hosted-verifier-"));
+      await writeFile(join(cwd, "agent.mjs"), agentSource);
+      try {
+        const result = await hue(
+          [
+            "--set",
+            standIn.dataset.id,
+            "--scorer-version",
+            standIn.scorerVersions[0]!.id,
+            "--command",
+            `node ${join(cwd, "agent.mjs")}`,
+            "--wait",
+            "0",
+            "--json",
+          ],
+          { cwd, installed: true, env: { HUE_BASE_URL: standIn.baseUrl } },
+        );
+        if (result.status !== 0) throw new Error(result.stderr);
+        expect(result.status).toBe(0);
+        expect(standIn.calls.starts).toBe(1);
+        expect(standIn.calls.completions).toHaveLength(1);
+        expect(standIn.calls.judgeJobs).toEqual([]);
+        expect(standIn.calls.requests.includes("GET /judge-budget")).toBe(false);
+        expect(standIn.calls.requests.some((path) => path.endsWith("/results"))).toBe(true);
+        const document = JSON.parse(result.stdout) as { totals: { passed: number } };
+        expect(document.totals.passed).toBe(1);
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
   test("--judges refuses --no-output before creating a run", async () => {
     const standIn = documentStandIn();
     const cwd = await mkdtemp(join(tmpdir(), "hue-eval-judges-"));
@@ -1123,7 +1196,7 @@ describe("hue eval hosted judge opt-in", () => {
           if (result.status !== status) throw new Error(result.stderr);
           expect(result.status).toBe(status);
           expect(standIn.calls.judgeJobs).toHaveLength(enabled ? 1 : 0);
-          expect(standIn.calls.requests.includes("GET /judge-budget")).toBe(enabled);
+          expect(standIn.calls.requests.includes("GET /judge-budget")).toBe(false);
           if (enabled) {
             const document = JSON.parse(result.stdout) as { runId: string };
             expect(standIn.calls.judgeJobs[0]).toMatchObject({
@@ -1174,7 +1247,7 @@ describe("hue eval hosted judge opt-in", () => {
 
   for (const worker of [false, true])
     test(
-      `lost judge acknowledgement resumes uploaded ${worker ? "worker" : "direct"} outputs without another agent call`,
+      `lost judge acknowledgement resumes uploaded ${worker ? "worker" : "direct"} outputs after the budget is disabled`,
       async () => {
         const standIn = documentStandIn({
           hostedJudge: {},
@@ -1206,17 +1279,194 @@ describe("hue eval hosted judge opt-in", () => {
           const first = await hue(args, options);
           expect(first.status).toBe(1);
           expect(standIn.calls.judgeJobs).toHaveLength(4);
+          expect(standIn.acceptedJudgeJobs()).toBe(1);
+          standIn.disableJudgeBudget();
           const repeated = await hue(args, options);
           expect(repeated.status).toBe(0);
           expect(repeated.stdout).toContain("Resuming hosted checks:");
           expect(standIn.calls.starts).toBe(1);
           expect(standIn.calls.experiments).toHaveLength(1);
           expect(standIn.calls.judgeJobs).toHaveLength(5);
+          expect(standIn.acceptedJudgeJobs()).toBe(1);
+          expect(standIn.calls.requests.includes("GET /judge-budget")).toBe(false);
           expect(
             standIn.calls.judgeJobs.every(
               (job) => JSON.stringify(job) === JSON.stringify(standIn.calls.judgeJobs[0]),
             ),
           ).toBe(true);
+        } finally {
+          standIn.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT,
+    );
+
+  for (const mode of ["direct", "simulation", "worker"] as const)
+    test(
+      `hosted judge pending handoff completes the interrupted ${mode} completion`,
+      async () => {
+        const cwd = await workerWorkspace();
+        const checkpoint = join(cwd, "checkpoints");
+        let interruptCompletion = true;
+        let child: ChildProcess | undefined;
+        let attemptDirectory = "";
+        let originalAttempt = "";
+        const standIn = documentStandIn({
+          hostedJudge: {},
+          ...(mode === "direct" ? {} : { workerKinds: [mode === "worker" ? "direct" : "world"] }),
+          async beforeFinish() {
+            if (interruptCompletion && mode !== "worker") {
+              const marker = join(attemptDirectory, "active-attempt.json");
+              originalAttempt = await readFile(marker, "utf8");
+              await rm(marker);
+              await mkdir(marker);
+            }
+          },
+          beforeQueueCompletion() {
+            if (!interruptCompletion || mode !== "worker") return;
+            child!.kill("SIGKILL");
+            return new Response(null, { status: 503 });
+          },
+        });
+        attemptDirectory = join(
+          checkpoint,
+          standIn.projectId,
+          mode,
+          ...(mode === "worker" ? ["dual-cases-v1"] : []),
+        );
+        await writeFile(join(cwd, "agent.mjs"), mode === "simulation" ? workerSource : agentSource);
+        try {
+          const args =
+            mode === "worker"
+              ? [...workerArgs(cwd), "--judges", "--wait", "0"]
+              : [
+                  "--set",
+                  standIn.dataset.id,
+                  "--set-version",
+                  "1",
+                  "--scorer-version",
+                  standIn.scorerVersions[0]!.id,
+                  "--command",
+                  `node ${join(cwd, "agent.mjs")}`,
+                  "--judges",
+                  "--wait",
+                  "0",
+                  "--checkpoint-dir",
+                  checkpoint,
+                ];
+          const options = {
+            cwd,
+            onSpawn: (value: ChildProcess) => {
+              child = value;
+            },
+            env: { HUE_BASE_URL: standIn.baseUrl, WORKER_INVOCATIONS: join(cwd, "calls.txt") },
+          };
+          const first = await hue(args, options);
+          expect(first.status).not.toBe(0);
+          expect(standIn.calls.starts).toBe(1);
+          expect(standIn.calls.judgeJobs).toEqual([]);
+          const pending = JSON.parse(
+            await readFile(join(attemptDirectory, "judge-dispatch", "pending.json"), "utf8"),
+          );
+          expect(pending.value.completion.kind).toBe(mode === "worker" ? "worker" : "attempt");
+          interruptCompletion = false;
+          if (mode !== "worker") {
+            const marker = join(attemptDirectory, "active-attempt.json");
+            await rm(marker, { recursive: true });
+            await writeFile(marker, originalAttempt, { mode: 0o600 });
+          }
+          const repeated = await hue(args, options);
+          if (repeated.status !== 0) throw new Error(repeated.stderr + repeated.stdout);
+          expect(repeated.stdout).toContain("Resuming hosted checks:");
+          expect(standIn.calls.starts).toBe(1);
+          expect(standIn.calls.experiments).toHaveLength(1);
+          expect(standIn.acceptedJudgeJobs()).toBe(1);
+          if (mode === "worker") expect(standIn.calls.localRuns).toHaveLength(1);
+          else {
+            const attempt = JSON.parse(
+              await readFile(join(attemptDirectory, "active-attempt.json"), "utf8"),
+            );
+            expect(attempt.value.stage).toBe("completed");
+          }
+        } finally {
+          standIn.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT,
+    );
+
+  for (const mode of ["direct", "simulation", "worker"] as const)
+    test(
+      `hosted judge handoff write failure resumes ${mode} outputs before completion`,
+      async () => {
+        const cwd = await workerWorkspace();
+        const checkpoint = join(cwd, "checkpoints");
+        let pending = "";
+        let failHandoff = true;
+        const standIn = documentStandIn({
+          hostedJudge: {},
+          ...(mode === "direct" ? {} : { workerKinds: [mode === "worker" ? "direct" : "world"] }),
+          async beforeFinish() {
+            // The pending read has already succeeded. Block its first atomic rename only
+            // after the actual execution and output upload have completed.
+            if (failHandoff) await mkdir(pending);
+          },
+        });
+        const attemptDirectory = join(
+          checkpoint,
+          standIn.projectId,
+          mode,
+          ...(mode === "worker" ? ["dual-cases-v1"] : []),
+        );
+        pending = join(attemptDirectory, "judge-dispatch", "pending.json");
+        await writeFile(join(cwd, "agent.mjs"), mode === "simulation" ? workerSource : agentSource);
+        try {
+          const args =
+            mode === "worker"
+              ? [...workerArgs(cwd), "--judges", "--wait", "0"]
+              : [
+                  "--set",
+                  standIn.dataset.id,
+                  "--set-version",
+                  "1",
+                  "--scorer-version",
+                  standIn.scorerVersions[0]!.id,
+                  "--command",
+                  `node ${join(cwd, "agent.mjs")}`,
+                  "--judges",
+                  "--wait",
+                  "0",
+                  "--checkpoint-dir",
+                  checkpoint,
+                ];
+          const options = {
+            cwd,
+            env: { HUE_BASE_URL: standIn.baseUrl, WORKER_INVOCATIONS: join(cwd, "calls.txt") },
+          };
+          const first = await hue(args, options);
+          expect(first.status).toBe(1);
+          if (!standIn.calls.starts) throw new Error(first.stderr);
+          expect(standIn.calls.starts).toBe(1);
+          expect(standIn.calls.completions).toHaveLength(1);
+          expect(standIn.calls.judgeJobs).toHaveLength(0);
+          expect(standIn.calls.localRuns).toHaveLength(0);
+          const attempt =
+            mode === "worker"
+              ? undefined
+              : JSON.parse(await readFile(join(attemptDirectory, "active-attempt.json"), "utf8"));
+          if (attempt) expect(attempt.value.stage).toBe("running");
+          failHandoff = false;
+          await rm(pending, { recursive: true });
+          const repeated = await hue(args, options);
+          if (repeated.status !== 0) throw new Error(repeated.stderr + repeated.stdout);
+          expect(repeated.status).toBe(0);
+          expect(standIn.calls.starts).toBe(1);
+          expect(standIn.calls.experiments).toHaveLength(1);
+          expect(standIn.calls.completions).toHaveLength(1);
+          expect(standIn.acceptedJudgeJobs()).toBe(1);
+          if (mode === "worker") expect(standIn.calls.localRuns).toHaveLength(1);
         } finally {
           standIn.stop();
           await rm(cwd, { recursive: true, force: true });

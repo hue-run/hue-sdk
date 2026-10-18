@@ -54,6 +54,7 @@ import { collectDirectOutputs, stageDirectCase } from "./eval-direct.js";
 import {
   runSimulation,
   type SimulationProgress,
+  type SimulationReport,
   type SimulationTargetContext,
 } from "../evals/simulation.js";
 import {
@@ -1260,10 +1261,7 @@ function withTelemetryFailures(
 /** Requests only the run's pinned model judges. Stable batches let an interrupted CLI resume
  * dispatch without creating a second paid job for the same scoring item and evaluator. */
 export async function dispatchPinnedJudges(
-  client: Pick<
-    EvaluationClient,
-    "getExperiment" | "listEvaluationItems" | "getJudgeBudget" | "createJudgeJobs"
-  >,
+  client: Pick<EvaluationClient, "getExperiment" | "listEvaluationItems" | "createJudgeJobs">,
   experimentId: string,
   subjectIds: string[],
   signal?: AbortSignal,
@@ -1290,19 +1288,25 @@ export async function dispatchPinnedJudges(
     after = page.nextCursor ?? undefined;
   } while (after);
   if (!items.size) return 0;
-  const budget = await client.getJudgeBudget();
-  if (!budget.configured || !budget.enabled || budget.blocked)
-    throw new Error(
-      "Hosted judges are unavailable for this project; check its judge budget in Hue",
-    );
   let count = 0;
   let jobs: { evaluationItemId: string; scorerVersionId: string }[] = [];
   const dispatch = async () => {
     signal?.throwIfAborted();
-    await client.createJudgeJobs(run.id, {
-      idempotencyKey: `cli-judges-${digest({ runId: run.id, jobs })}`,
-      jobs,
-    });
+    try {
+      // Admission belongs to the server: an accepted keyed request must remain replayable
+      // even if the project's budget is disabled before its acknowledgement reaches us.
+      await client.createJudgeJobs(run.id, {
+        idempotencyKey: `cli-judges-${digest({ runId: run.id, jobs })}`,
+        jobs,
+      });
+    } catch (error) {
+      if (error instanceof HueApiError && error.status === 402)
+        throw new Error(
+          "Hosted judges are unavailable for this project; check its judge budget in Hue",
+          { cause: error },
+        );
+      throw error;
+    }
     count += jobs.length;
     jobs = [];
   };
@@ -1326,10 +1330,65 @@ interface UploadedRun {
 interface PendingJudgeDispatch {
   selectionDigest: string;
   run: UploadedRun;
+  completion: { kind: "attempt" } | { kind: "worker"; runId: string; workerId: string };
 }
 interface JudgeCheckpoint {
   store: CheckpointStore;
   selectionDigest: string;
+  source: {
+    directory: string;
+    identity: {
+      kind: "direct" | "simulation" | "local-agent-worker";
+      projectId: string;
+      baseUrl: string;
+      agent?: { key: string; revision: string };
+    };
+  };
+}
+
+/** Durable handoff before the original attempt marker or queue acknowledgement. */
+async function checkpointJudges(
+  judging: JudgeCheckpoint,
+  run: UploadedRun,
+  completion: PendingJudgeDispatch["completion"],
+): Promise<void> {
+  await judging.store.write("pending", {
+    selectionDigest: judging.selectionDigest,
+    run: {
+      experimentId: run.experimentId,
+      subjectIds: run.subjectIds,
+      runUrl: run.runUrl,
+      ...(run.extra ? { extra: run.extra } : {}),
+      ...(run.telemetryNotAccepted ? { telemetryNotAccepted: run.telemetryNotAccepted } : {}),
+    },
+    completion,
+  });
+}
+
+/** Finish the original handoff if the process stopped between the two durable writes. */
+async function completeJudgeHandoff(
+  client: EvaluationClient,
+  judging: JudgeCheckpoint,
+  pending: PendingJudgeDispatch,
+): Promise<void> {
+  const store = await CheckpointStore.acquire(judging.source.directory, judging.source.identity);
+  try {
+    if (pending.completion.kind === "worker") {
+      await client.completeLocalAgentRun({
+        runId: pending.completion.runId,
+        workerId: pending.completion.workerId,
+        state: "completed",
+      });
+    } else {
+      const attempt = await store.read<{ experimentId?: string; stage: string }>("active-attempt");
+      if (!attempt || attempt.experimentId !== pending.run.experimentId)
+        throw new Error("Hosted judge checkpoint does not match the uploaded attempt");
+      if (attempt.stage !== "completed")
+        await store.write("active-attempt", { ...attempt, stage: "completed" });
+    }
+  } finally {
+    await store.release();
+  }
 }
 
 /** Waits for Hue's verdicts, prints them (table or JSON, with the optional baseline) and returns the exit code. */
@@ -1345,16 +1404,6 @@ async function reportVerdicts(
   const wait = integer("wait", values.wait, 300, 0, 86_400);
   if (values.judges) {
     if (!judging) throw new Error("Hosted judge recovery checkpoint is unavailable");
-    await judging.store.write("pending", {
-      selectionDigest: judging.selectionDigest,
-      run: {
-        experimentId: run.experimentId,
-        subjectIds: run.subjectIds,
-        runUrl: run.runUrl,
-        ...(run.extra ? { extra: run.extra } : {}),
-        ...(run.telemetryNotAccepted ? { telemetryNotAccepted: run.telemetryNotAccepted } : {}),
-      },
-    });
     const count = await dispatchPinnedJudges(client, run.experimentId, run.subjectIds, signal);
     await judging.store.write("pending", null);
     if (count) output.log(`Requested ${count} hosted judge check${count === 1 ? "" : "s"}.`);
@@ -1448,18 +1497,16 @@ async function runOnce(
   }
   const runName = values.name ?? defaultRunName(agent);
   const project = await client.checkConnection();
-  const judging = values.judges
+  const checkpointDirectory = await prepareCheckpointDirectory(
+    values["checkpoint-dir"],
+    agent.key,
+    project.id,
+    selection.direct ? "direct" : "simulation",
+  );
+  const judging: JudgeCheckpoint | undefined = values.judges
     ? {
         store: await CheckpointStore.acquire(
-          checkpointPath(
-            await prepareCheckpointDirectory(
-              values["checkpoint-dir"],
-              agent.key,
-              project.id,
-              selection.direct ? "direct" : "simulation",
-            ),
-            ["judge-dispatch", "judge checkpoint"],
-          ),
+          checkpointPath(checkpointDirectory, ["judge-dispatch", "judge checkpoint"]),
           { kind: "cli-judge-dispatch", projectId: project.id, baseUrl: connection.baseUrl },
         ),
         selectionDigest: digest({
@@ -1467,6 +1514,14 @@ async function runOnce(
           scorerVersionIds: [...pins.scorerVersionIds].sort(),
           agent,
         }),
+        source: {
+          directory: checkpointDirectory,
+          identity: {
+            kind: selection.direct ? "direct" : "simulation",
+            projectId: project.id,
+            baseUrl: connection.baseUrl,
+          },
+        },
       }
     : undefined;
   try {
@@ -1477,6 +1532,7 @@ async function runOnce(
           "Recover the pending judge dispatch with the unchanged command or use another --checkpoint-dir",
         );
       output.log(`Resuming hosted checks: ${pending.run.runUrl}`);
+      await completeJudgeHandoff(client, judging!, pending);
       return await reportVerdicts(client, values, pending.run, baselineId, output, signal, judging);
     }
     if (selection.direct)
@@ -1499,12 +1555,6 @@ async function runOnce(
         connection,
       );
     const environmentClient = createEnvironmentClient(connection);
-    const checkpointDirectory = await prepareCheckpointDirectory(
-      values["checkpoint-dir"],
-      agent.key,
-      project.id,
-      "simulation",
-    );
     const caseKeys = new Map<string, string>();
     let runUrl = "";
     const telemetry = telemetryReporter(output);
@@ -1533,6 +1583,12 @@ async function runOnce(
       deprecationWarnings: false,
       signal,
       target: agents.simulation,
+      ...(judging
+        ? {
+            onUploaded: (report: SimulationReport) =>
+              checkpointJudges(judging, report, { kind: "attempt" }),
+          }
+        : {}),
       async onProgress(event: SimulationProgress) {
         if (event.type === "run_created") {
           runUrl = event.runUrl;
@@ -1774,6 +1830,18 @@ async function runDirect(
         return result;
       },
     });
+    if (run.judging)
+      await checkpointJudges(
+        run.judging,
+        {
+          experimentId,
+          subjectIds: report.subjectIds,
+          runUrl,
+          extra: { mode: "direct", deferredScorerVersionIds: report.deferredScorerVersionIds },
+          telemetryNotAccepted: report.telemetryNotAccepted,
+        },
+        { kind: "attempt" },
+      );
     attempt.stage = "completed";
     await store.write("active-attempt", attempt);
   } finally {
@@ -1826,7 +1894,7 @@ async function runWorker(
     "worker",
     slug(agent.revision) || "dev",
   );
-  const judging = values.judges
+  const judging: JudgeCheckpoint | undefined = values.judges
     ? {
         store: await CheckpointStore.acquire(
           checkpointPath(checkpointDirectory, ["judge-dispatch", "judge checkpoint"]),
@@ -1837,6 +1905,15 @@ async function runWorker(
           },
         ),
         selectionDigest: digest(agent),
+        source: {
+          directory: checkpointDirectory,
+          identity: {
+            kind: "local-agent-worker",
+            projectId: project.id,
+            baseUrl: connection.baseUrl,
+            agent: { key: agent.key, revision: agent.revision },
+          },
+        },
       }
     : undefined;
   try {
@@ -1847,6 +1924,7 @@ async function runWorker(
           "Recover the pending judge dispatch with the unchanged command or use another --checkpoint-dir",
         );
       output.log(`Resuming hosted checks: ${pending.run.runUrl}`);
+      await completeJudgeHandoff(client, judging!, pending);
       await reportVerdicts(client, values, pending.run, undefined, output, signal, judging);
       if (signal.aborted) return 130;
       if (maxRuns !== undefined && --maxRuns === 0) return 0;
@@ -1934,6 +2012,21 @@ async function runWorker(
                 signal: context.signal ?? signal,
               });
             },
+          }
+        : {}),
+      ...(judging
+        ? {
+            onUploaded: (report: RunnerReport, claim: LocalAgentClaim & { workerId: string }) =>
+              checkpointJudges(
+                judging,
+                {
+                  experimentId: claim.experimentId,
+                  subjectIds: report.subjectIds,
+                  runUrl: new URL(`/runs/${claim.experimentId}`, connection.baseUrl).toString(),
+                  telemetryNotAccepted: report.telemetryNotAccepted,
+                },
+                { kind: "worker", runId: claim.runId, workerId: claim.workerId },
+              ),
           }
         : {}),
       async onCompleted(report) {

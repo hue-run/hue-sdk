@@ -1118,7 +1118,8 @@ export class EvaluationClient {
   async getScoringResult(id: string): Promise<StoredScoringResult> {
     return productRunFields(await this.getResult(id), "result");
   }
-  /** Dispatches hosted judge jobs for `llm_judge` pins; check {@link getJudgeBudget} first. */
+  /** Dispatches hosted judge jobs for `llm_judge` pins. Hue checks admission for new requests;
+   * replay an interrupted request with its original key and body even if the budget changed. */
   createJudgeJobs(
     id: string,
     input: {
