@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import {
+  chmod,
   cp,
   mkdir,
   mkdtemp,
@@ -18,7 +20,9 @@ import { Writable } from "node:stream";
 import { crc32, deflateRawSync, gunzipSync, gzipSync } from "node:zlib";
 import { runTracesCommand, TRACES_USAGE, type TracesCommandIo } from "../src/cli/traces-import.js";
 import {
+  batchEntries,
   detectFormat,
+  integerQuotient,
   manifestTotals,
   validateManifest,
   type TraceImportManifest,
@@ -35,6 +39,24 @@ import { textContentType } from "../src/blobs.js";
 
 const cli = join(import.meta.dir, "../src/setup/cli.ts");
 const TOKEN = `hue_it_${"a".repeat(43)}`;
+/** Whether this process is refused a mode-000 file: false as root or in a sandbox that holds
+ * CAP_DAC_OVERRIDE, where an unreadable fixture cannot be made. */
+const PERMISSIONS_ENFORCED = (() => {
+  const probe = mkdtempSync(join(tmpdir(), "hue-traces-perm-"));
+  try {
+    writeFileSync(join(probe, "f"), "x");
+    chmodSync(join(probe, "f"), 0o000);
+    try {
+      readFileSync(join(probe, "f"));
+      return false;
+    } catch {
+      return true;
+    }
+  } finally {
+    chmodSync(join(probe, "f"), 0o600);
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
 const IMPORT_ID = "3f2c1a0e-5b6d-4c7e-8f90-a1b2c3d4e5f6";
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 
@@ -716,14 +738,21 @@ describe("hue traces import prepare", () => {
     const digest = sha256(LARGE_OUTPUT);
     const record = JSON.stringify(langfuseLarge.data[0]);
     const recordDigest = sha256(record);
-    expect(manifest.traces[0]!.blobs).toEqual([
-      {
-        sha256: recordDigest,
-        byte_size: Buffer.byteLength(record),
-        content_type: textContentType(record),
-      },
-      { sha256: digest, byte_size: LARGE_OUTPUT.length, content_type: "text/plain; charset=utf-8" },
-    ]);
+    // The manifest lists a trace's values in digest order.
+    expect(manifest.traces[0]!.blobs).toEqual(
+      [
+        {
+          sha256: recordDigest,
+          byte_size: Buffer.byteLength(record),
+          content_type: textContentType(record),
+        },
+        {
+          sha256: digest,
+          byte_size: LARGE_OUTPUT.length,
+          content_type: "text/plain; charset=utf-8",
+        },
+      ].sort((a, b) => (a.sha256 < b.sha256 ? -1 : 1)),
+    );
     const blob = await readFile(join(report.output_directory, `${digest}.blob`));
     expect(blob.toString("utf8")).toBe(LARGE_OUTPUT);
     expect((await stat(join(report.output_directory, `${digest}.blob`))).mode & 0o777).toBe(0o600);
@@ -915,6 +944,356 @@ describe("hue traces import prepare", () => {
       format: "unsupported",
       reason: "the file is empty",
     });
+  });
+
+  test("lists a trace's large values in digest order, whatever order its sources are read in", async () => {
+    const big = (fill: string) => fill.repeat(1024 * 1024 + 1);
+    const spanA = otlpSpan(
+      { traceId: T1, spanId: T1_ROOT },
+      "a",
+      "1760000000000000000",
+      "1760000001000000000",
+      { payload: big("a") },
+    );
+    const spanB = otlpSpan(
+      { traceId: T1, spanId: T1_CHILD, parentSpanId: T1_ROOT },
+      "b",
+      "1760000000500000000",
+      "1760000000600000000",
+      { payload: big("b") },
+    );
+    const root = await scratch();
+    const ordered = join(root, "ordered");
+    await writeFixtures(ordered, {
+      "1.json": Buffer.from(JSON.stringify(envelope({}, [spanA]))),
+      "2.json": Buffer.from(JSON.stringify(envelope({}, [spanB]))),
+    });
+    const reversed = join(root, "reversed");
+    await writeFixtures(reversed, {
+      "1.json": Buffer.from(JSON.stringify(envelope({}, [spanB]))),
+      "2.json": Buffer.from(JSON.stringify(envelope({}, [spanA]))),
+    });
+    const reports = [];
+    for (const input of [ordered, reversed]) {
+      const result = await run(["import", "prepare", input, "--json"]);
+      expect(result.code).toBe(0);
+      reports.push(JSON.parse(result.stdout) as Record<string, any>);
+    }
+    expect(reports[1]!.manifest_digest).toBe(reports[0]!.manifest_digest);
+    const manifest = await readManifest(reports[0]!.output_directory);
+    const digests = manifest.traces[0]!.blobs.map((blob) => blob.sha256);
+    expect(digests).toHaveLength(2);
+    expect(digests).toEqual([...digests].sort());
+  });
+
+  test("declares a Langfuse trace's origin from the markers its records carry, beyond its environment", async () => {
+    const exportOf = (traceId: string, fields: Record<string, unknown>) => ({
+      data: [
+        observation(
+          traceId.slice(0, 16),
+          traceId,
+          "SPAN",
+          "run",
+          "2026-03-01T10:00:00.000Z",
+          "2026-03-01T10:00:01.000Z",
+          { environment: "production", ...fields },
+        ),
+      ],
+    });
+    const root = await scratch();
+    const input = join(root, "bundle");
+    const ids = ["a1", "b2", "c3", "d4"].map((seed) => seed.repeat(16));
+    await writeFixtures(input, {
+      "evaluation.json": Buffer.from(
+        JSON.stringify(exportOf(ids[0]!, { metadata: { "hue.execution.id": "exec-1" } })),
+      ),
+      "simulation-scope.json": Buffer.from(
+        JSON.stringify(exportOf(ids[1]!, { metadata: { "scope.name": "hue.sim-gateway" } })),
+      ),
+      "simulation-resource.json": Buffer.from(
+        JSON.stringify(
+          exportOf(ids[2]!, { metadata: { "resourceAttributes.hue.world.id": "world-1" } }),
+        ),
+      ),
+      "production.json": Buffer.from(JSON.stringify(exportOf(ids[3]!, {}))),
+    });
+    const result = await run(["import", "prepare", input, "--json"]);
+    expect(result.code).toBe(0);
+    const report = JSON.parse(result.stdout) as Record<string, any>;
+    expect(report.traces.by_origin).toEqual({
+      production: 1,
+      evaluation: 1,
+      simulation: 2,
+      unknown: 0,
+    });
+    const manifest = await readManifest(report.output_directory);
+    const originOf = (traceId: string) =>
+      manifest.traces.find((trace) => trace.trace_id === traceId)!.origin;
+    expect(ids.map(originOf)).toEqual(["evaluation", "simulation", "simulation", "production"]);
+  });
+
+  test("declares an explicit owner a Langfuse root names in its metadata or resource attributes", async () => {
+    const exportOf = (traceId: string, fields: Record<string, unknown>) => ({
+      data: [
+        observation(
+          traceId.slice(0, 16),
+          traceId,
+          "SPAN",
+          "run",
+          "2026-03-01T10:00:00.000Z",
+          "2026-03-01T10:00:01.000Z",
+          fields,
+        ),
+      ],
+    });
+    const root = await scratch();
+    const input = join(root, "bundle");
+    const ids = ["e5", "f6", "a7"].map((seed) => seed.repeat(16));
+    await writeFixtures(input, {
+      "metadata.json": Buffer.from(
+        JSON.stringify(
+          exportOf(ids[0]!, {
+            metadata: { "hue.world.entity.namespace": "team", "hue.world.entity.id": "billing" },
+          }),
+        ),
+      ),
+      "resource.json": Buffer.from(
+        JSON.stringify(
+          exportOf(ids[1]!, {
+            metadata: {
+              "resourceAttributes.hue.world.entity.namespace": "org",
+              "resourceAttributes.hue.world.entity.id": "acme",
+            },
+          }),
+        ),
+      ),
+      "both.json": Buffer.from(
+        JSON.stringify(
+          exportOf(ids[2]!, {
+            userId: "user-7",
+            sessionId: "session-3",
+            metadata: { "hue.world.entity.namespace": "team", "hue.world.entity.id": "support" },
+          }),
+        ),
+      ),
+    });
+    const result = await run(["import", "prepare", input, "--json"]);
+    expect(result.code).toBe(0);
+    const report = JSON.parse(result.stdout) as Record<string, any>;
+    expect(report.traces.without_identity).toBe(0);
+    const manifest = await readManifest(report.output_directory);
+    const identityOf = (traceId: string) =>
+      manifest.traces.find((trace) => trace.trace_id === traceId)!.identity;
+    expect(identityOf(ids[0]!)).toEqual({ entity: { namespace: "team", id: "billing" } });
+    expect(identityOf(ids[1]!)).toEqual({ entity: { namespace: "org", id: "acme" } });
+    expect(identityOf(ids[2]!)).toEqual({
+      user: "user-7",
+      entity: { namespace: "team", id: "support" },
+      session: "session-3",
+    });
+  });
+
+  test("reads an export that mixes proto field names with camelCase at any depth", async () => {
+    const mixed = {
+      resourceSpans: [
+        {
+          resource: { attributes: [{ key: "service.name", value: { string_value: "mixed" } }] },
+          scope_spans: [
+            {
+              scope: { name: "mixed-exporter" },
+              spans: [
+                {
+                  trace_id: T1,
+                  span_id: T1_ROOT,
+                  name: "root",
+                  kind: 1,
+                  start_time_unix_nano: "1760000000000000000",
+                  end_time_unix_nano: "1760000001000000000",
+                  attributes: [],
+                  status: { code: 0 },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const root = await scratch();
+    const input = join(root, "mixed.json");
+    await writeFile(input, JSON.stringify(mixed));
+    const result = await run(["import", "prepare", input, "--json"]);
+    expect(result.code).toBe(0);
+    const report = JSON.parse(result.stdout) as Record<string, any>;
+    expect(report.totals).toMatchObject({ traces: 1, spans: 1 });
+    const manifest = await readManifest(report.output_directory);
+    const [span] = await spansOf(report.output_directory, manifest, T1);
+    expect(span!.spanId).toBe(T1_ROOT);
+    expect(span!.startTimeUnixNano).toBe("1760000000000000000");
+    expect(span!.resource["service.name"]).toBe("mixed");
+    expect(span!.scope).toBe("mixed-exporter");
+  });
+
+  test.skipIf(!PERMISSIONS_ENFORCED)(
+    "reports a file or directory it cannot open and prepares the rest",
+    async () => {
+      const root = await scratch();
+      const input = join(root, "bundle");
+      await writeFixtures(input, {
+        "a.json": Buffer.from(otlpFile),
+        "locked.json": Buffer.from(otlpFile),
+      });
+      await chmod(join(input, "locked.json"), 0o000);
+      await mkdir(join(input, "sealed"));
+      await chmod(join(input, "sealed"), 0o000);
+      try {
+        const result = await run(["import", "prepare", input, "--json"]);
+        expect(result.code).toBe(0);
+        const report = JSON.parse(result.stdout) as Record<string, any>;
+        expect(report.files.unsupported).toEqual([
+          { file: "locked.json", reason: "the file could not be read (EACCES)" },
+          { file: "sealed", reason: "the directory could not be read (EACCES)" },
+        ]);
+        expect(report.totals.traces).toBe(2);
+      } finally {
+        await chmod(join(input, "locked.json"), 0o600);
+        await chmod(join(input, "sealed"), 0o700);
+      }
+    },
+  );
+
+  test("closes each archive once its members were read, before opening the next", async () => {
+    const root = await scratch();
+    const input = join(root, "bundle");
+    const files: Record<string, Uint8Array> = {};
+    for (let index = 0; index < 3; index++) {
+      const traceId = `${index + 1}`.repeat(32);
+      files[`${index}.zip`] = buildZip([
+        {
+          name: "a.json",
+          bytes: Buffer.from(
+            JSON.stringify(
+              envelope({}, [
+                otlpSpan(
+                  { traceId, spanId: "1".repeat(16) },
+                  "job",
+                  "1760000000000000000",
+                  "1760000001000000000",
+                ),
+              ]),
+            ),
+          ),
+        },
+      ]);
+    }
+    await writeFixtures(input, files);
+    const events: string[] = [];
+    const originalOpen = ZipArchive.open.bind(ZipArchive);
+    const originalClose = ZipArchive.prototype.close;
+    const openSpy = spyOn(ZipArchive, "open").mockImplementation(async (path: string) => {
+      events.push("open");
+      return originalOpen(path);
+    });
+    const closeSpy = spyOn(ZipArchive.prototype, "close").mockImplementation(async function (
+      this: ZipArchive,
+    ) {
+      events.push("close");
+      return originalClose.call(this);
+    });
+    try {
+      const result = await run(["import", "prepare", input, "--json"]);
+      expect(result.code).toBe(0);
+      expect((JSON.parse(result.stdout) as Record<string, any>).totals.traces).toBe(3);
+      expect(events).toEqual(["open", "close", "open", "close", "open", "close"]);
+    } finally {
+      openSpy.mockRestore();
+      closeSpy.mockRestore();
+    }
+  });
+
+  test("refuses a ZIP member whose compressed size does not fit its decoded size", async () => {
+    const root = await scratch();
+    const archive = buildZip([
+      { name: "a.json", bytes: Buffer.from(otlpFile) },
+      { name: "b.json", bytes: Buffer.from(otlpFile), stored: true },
+    ]);
+    // The central directory starts where the end record says; each entry keeps its compressed
+    // size at +20 and its name, extra and comment lengths at +28, +30 and +32.
+    const end = archive.length - 22;
+    const first = archive.readUInt32LE(end + 16);
+    const patched = Buffer.from(archive);
+    patched.writeUInt32LE(0x7fff0000, first + 20);
+    const second =
+      first +
+      46 +
+      patched.readUInt16LE(first + 28) +
+      patched.readUInt16LE(first + 30) +
+      patched.readUInt16LE(first + 32);
+    patched.writeUInt32LE(patched.readUInt32LE(second + 20) + 1, second + 20);
+    const path = join(root, "bundle.zip");
+    await writeFile(path, patched);
+    const zip = await ZipArchive.open(path);
+    try {
+      expect(zip.members.map((member) => member.refused)).toEqual([
+        "a member whose compressed size does not fit its recorded size",
+        "a member whose compressed size does not fit its recorded size",
+      ]);
+      // A member built past the bound is held to it before any of its bytes are allocated.
+      await expect(
+        zip.read({ ...zip.members[0]!, refused: undefined, compressedSize: 0x7fff0000 }),
+      ).rejects.toThrow("compressed data exceeds");
+    } finally {
+      await zip.close();
+    }
+    const result = await run(["import", "prepare", path, "--json"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("compressed size does not fit");
+  });
+
+  test("packs incompressible entries into batches under the wire cap, the same way every time", () => {
+    // Deterministic pseudo-random hex, about 120 KiB an entry, which gzip halves at best: twenty
+    // entries exceed the wire cap and force the sealer to shrink by its observed ratio.
+    let seed = "hue-import-seal";
+    const chunk = () => {
+      let out = "";
+      while (out.length < 120 * 1024) {
+        seed = sha256(seed);
+        out += seed;
+      }
+      return out;
+    };
+    const entries = Array.from({ length: 20 }, (_, index) => ({
+      resource: { attributes: [] },
+      scopeSpans: [
+        {
+          scope: { name: "seal" },
+          spans: [
+            {
+              traceId: T1,
+              spanId: (index + 1).toString(16).padStart(16, "0"),
+              name: "s",
+              kind: 1,
+              startTimeUnixNano: "1",
+              endTimeUnixNano: "2",
+              attributes: [{ key: "payload", value: { stringValue: chunk() } }],
+              status: { code: 0 },
+            },
+          ],
+        },
+      ],
+    }));
+    const first = batchEntries(entries);
+    const second = batchEntries(entries);
+    expect(first.length).toBeGreaterThan(1);
+    expect(first.map((batch) => batch.sha256)).toEqual(second.map((batch) => batch.sha256));
+    for (const batch of first) expect(batch.body.byteLength).toBeLessThanOrEqual(900 * 1024);
+    expect(first.flatMap((batch) => batch.spanIds)).toEqual(
+      entries.map((entry) => entry.scopeSpans[0]!.spans[0]!.spanId),
+    );
+    expect(integerQuotient(7, 2)).toBe(3);
+    expect(integerQuotient(0, 5)).toBe(0);
+    expect(integerQuotient(2_621_440 * 921_600 * 9, 1_000_003 * 10)).toBe(
+      Math.floor((2_621_440 * 921_600 * 9) / (1_000_003 * 10)),
+    );
   });
 
   test("prints usage for bad arguments", async () => {
@@ -1443,6 +1822,93 @@ describe("hue traces import upload", () => {
     );
     expect(posts.filter((count) => count === 2)).toHaveLength(1);
     expect(posts.filter((count) => count === 1)).toHaveLength(manifest.traces.length - 1);
+    expect(server.completed()).toBe(true);
+  });
+
+  test("leaves a batch pending when its acknowledgement cannot be read, and sends it next run", async () => {
+    const { directory, manifest } = await preparedBundle({
+      "a.json": Buffer.from(JSON.stringify(envelope({}, [T1_ROOT_SPAN, T1_CHILD_SPAN]))),
+    });
+    expect(manifest.traces).toHaveLength(1);
+    const [batch] = manifest.traces[0]!.batches;
+    // Stored, then answered with something that is no acknowledgement (a proxy's page).
+    const server = hue({
+      afterBatch: (index) =>
+        index === 1
+          ? new Response("<html>busy</html>", {
+              status: 200,
+              headers: { "content-type": "text/html" },
+            })
+          : undefined,
+    });
+    const file = await authorizationFile(directory, [TOKEN, server.url]);
+    const first = await run([
+      "import",
+      "upload",
+      directory,
+      "--authorization-file",
+      file,
+      "--json",
+    ]);
+    expect(first.code).toBe(1);
+    const report = JSON.parse(first.stdout) as Record<string, any>;
+    expect(report.state).toBe("failed");
+    expect(report.error.code).toBe("protocol");
+    expect(report.error.message).toContain("stays pending");
+    expect(report.next_action).toContain("Run the same command again");
+    expect(report.batches).toEqual({ declared: 1, landed: 0, conflicted: 0, pending: 1 });
+    // Nothing landed, so nothing was checkpointed: no progress file, or one without the batch.
+    const progress = JSON.parse(
+      await readFile(join(directory, "progress.json"), "utf8").catch(() => '{"traces":{}}'),
+    ) as Record<string, any>;
+    expect(progress.traces[T1]?.batches ?? []).toEqual([]);
+    expect(server.posts(batch!.sha256)).toBe(1);
+    // The next run sends the same bytes again; Hue takes the replay as duplicates and completes.
+    const second = await run([
+      "import",
+      "upload",
+      directory,
+      "--authorization-file",
+      file,
+      "--json",
+    ]);
+    expect(second.code).toBe(0);
+    expect(server.posts(batch!.sha256)).toBe(2);
+    expect(server.completed()).toBe(true);
+  });
+
+  test("asks again for an answer whose body breaks off after its headers", async () => {
+    const { directory, manifest } = await preparedBundle({
+      "a.json": Buffer.from(JSON.stringify(envelope({}, [T1_ROOT_SPAN, T1_CHILD_SPAN]))),
+    });
+    const [batch] = manifest.traces[0]!.batches;
+    const server = hue();
+    const file = await authorizationFile(directory, [TOKEN, server.url]);
+    let broken = false;
+    const result = await run(
+      ["import", "upload", directory, "--authorization-file", file, "--json"],
+      {
+        fetch: async (input, init) => {
+          const response = await fetch(input, init);
+          if (broken || !new URL(input).pathname.endsWith("/batches")) return response;
+          // Hue stored the batch and answered 200; the connection drops before the body ends.
+          broken = true;
+          await response.body?.cancel();
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode("{"));
+                controller.error(new Error("connection reset"));
+              },
+            }),
+            { status: 200 },
+          );
+        },
+      },
+    );
+    expect(result.code).toBe(0);
+    expect(result.sleeps).toEqual([1000]);
+    expect(server.posts(batch!.sha256)).toBe(2);
     expect(server.completed()).toBe(true);
   });
 

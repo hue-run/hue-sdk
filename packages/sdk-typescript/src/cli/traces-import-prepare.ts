@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Dirent } from "node:fs";
 import { mkdir, open, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { sdkVersion } from "../version.js";
@@ -101,7 +102,6 @@ async function readHead(path: string, length: number): Promise<Uint8Array> {
 async function* sourceFiles(
   input: string,
   unsupported: PrepareReport["files"]["unsupported"],
-  closers: (() => Promise<void>)[],
 ): AsyncGenerator<SourceFile> {
   const root = resolve(input);
   const info = await stat(root);
@@ -110,10 +110,24 @@ async function* sourceFiles(
     if (++count > PREPARE_LIMITS.files)
       throw new PrepareError(`The input holds more than ${PREPARE_LIMITS.files} files`);
   };
+  /** Why an entry the walk listed could not be opened: the system's code, when it gave one. */
+  const unreadable = (what: string, error: unknown) => {
+    const code = (error as NodeJS.ErrnoException).code;
+    return `the ${what} could not be read${code ? ` (${code})` : ""}`;
+  };
   async function* file(path: string, name: string): AsyncGenerator<SourceFile> {
-    const size = (await stat(path)).size;
     seen();
-    const head = await readHead(path, 4);
+    let size: number;
+    let head: Uint8Array;
+    try {
+      size = (await stat(path)).size;
+      head = await readHead(path, 4);
+    } catch (error) {
+      // A file the walk can list but not open (permissions, a file removed meanwhile) is
+      // reported; the rest of the input is still prepared.
+      unsupported.push({ file: name, reason: unreadable("file", error) });
+      return;
+    }
     if (isZipSignature(head)) {
       yield* archive(path, name);
       return;
@@ -135,24 +149,40 @@ async function* sourceFiles(
       });
       return;
     }
-    closers.push(() => zip.close());
-    for (const member of zip.members) {
-      if (member.path.endsWith("/")) continue;
-      const memberName = `${name}/${member.path}`;
-      seen();
-      if (member.refused) {
-        unsupported.push({ file: memberName, reason: member.refused });
-        continue;
+    // Each member is read while its archive is open; the archive is closed as soon as its last
+    // member was handed out (or the walk ended early), never held until the whole tree is read.
+    try {
+      for (const member of zip.members) {
+        if (member.path.endsWith("/")) continue;
+        const memberName = `${name}/${member.path}`;
+        seen();
+        if (member.refused) {
+          unsupported.push({ file: memberName, reason: member.refused });
+          continue;
+        }
+        yield { name: memberName, size: member.size, read: () => zip.read(member) };
       }
-      yield { name: memberName, size: member.size, read: () => zip.read(member) };
+    } finally {
+      await zip.close().catch(() => {});
     }
   }
   async function* directory(path: string, depth: number): AsyncGenerator<SourceFile> {
     if (depth > PREPARE_LIMITS.depth)
       throw new PrepareError(`The directory tree is deeper than ${PREPARE_LIMITS.depth} levels`);
-    const entries = (await readdir(path, { withFileTypes: true })).sort((a, b) =>
-      a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
-    );
+    let entries: Dirent[];
+    try {
+      entries = await readdir(path, { withFileTypes: true });
+    } catch (error) {
+      // The input itself must be readable; a subdirectory that is not is reported and skipped.
+      if (depth === 0) throw error;
+      seen();
+      unsupported.push({
+        file: posixPath(relative(root, path)),
+        reason: unreadable("directory", error),
+      });
+      return;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     for (const entry of entries) {
       const child = join(path, entry.name);
       const name = posixPath(relative(root, child));
@@ -253,10 +283,9 @@ export async function prepareTraceBundle(
     names.add(name);
     fileNames.set(digest, names);
   };
-  const closers: (() => Promise<void>)[] = [];
   let totalBytes = 0;
-  try {
-    for await (const source of sourceFiles(input, unsupported, closers)) {
+  {
+    for await (const source of sourceFiles(input, unsupported)) {
       totalBytes += source.size;
       if (totalBytes > PREPARE_LIMITS.totalBytes)
         throw new PrepareError(`The input holds more than ${PREPARE_LIMITS.totalBytes} bytes`);
@@ -305,8 +334,6 @@ export async function prepareTraceBundle(
         unsupported.push({ file: source.name, reason: error.message });
       }
     }
-  } finally {
-    for (const close of closers) await close().catch(() => {});
   }
   for (const collector of [otlp, langfuse]) {
     const finished = collector.finish();

@@ -33,6 +33,11 @@ const END_RECORD_BYTES = 22;
 const MAX_COMMENT_BYTES = 65_535;
 const METHOD_STORED = 0;
 const METHOD_DEFLATE = 8;
+/** The most compressed bytes a deflated member of `size` decoded bytes can take: deflate grows
+ * an incompressible input by at most 5 bytes per 64 KiB block, well under a kilobyte per
+ * megabyte and a kilobyte of slack. A larger `compressedSize` is a malformed entry, refused
+ * before any of it is read. */
+const deflateBound = (size: number) => size + (size >>> 10) + 1024;
 const FLAG_ENCRYPTED = 0x0001;
 const FLAG_UTF8 = 0x0800;
 
@@ -228,6 +233,12 @@ export class ZipArchive {
         member.refused = `compression method ${method} (only stored and deflate are read)`;
       else if (uncompressedSize > ZIP_LIMITS.memberBytes)
         member.refused = `a member over ${ZIP_LIMITS.memberBytes} bytes`;
+      else if (
+        method === METHOD_STORED
+          ? compressedSize !== uncompressedSize
+          : compressedSize > deflateBound(uncompressedSize)
+      )
+        member.refused = "a member whose compressed size does not fit its recorded size";
       else if (localHeaderOffset + 30 > size || compressedSize > size)
         member.refused = "a member outside the archive";
       members.push(member);
@@ -244,6 +255,10 @@ export class ZipArchive {
       throw new ZipError("A member's local header is malformed");
     const dataOffset =
       member.localHeaderOffset + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
+    // The listing refused any member past this bound; a member built elsewhere is held to it
+    // before its compressed bytes are allocated.
+    if (member.compressedSize > deflateBound(Math.min(member.size, ZIP_LIMITS.memberBytes)))
+      throw new ZipError("A member's compressed data exceeds the archive bounds");
     const compressed = await readAt(this.handle, dataOffset, member.compressedSize);
     let bytes: Buffer;
     if (member.method === METHOD_STORED) bytes = compressed;

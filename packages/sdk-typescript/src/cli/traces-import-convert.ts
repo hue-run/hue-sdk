@@ -400,6 +400,14 @@ export class BlobSink {
       entry: blobEntry(key, sha256, bytes.byteLength, contentType),
     };
   }
+
+  /** The values in digest order: the manifest lists a trace's values the same whatever order its
+   * sources were read in, so renaming or repacking them keeps the manifest digest. */
+  sorted(): PreparedBlob[] {
+    return [...this.blobs.values()].sort((a, b) =>
+      a.sha256 < b.sha256 ? -1 : a.sha256 > b.sha256 ? 1 : 0,
+    );
+  }
 }
 
 /** A converted span's attributes: a value over the inline limit is stored apart from the span
@@ -560,7 +568,9 @@ export class OtlpTraceCollector {
   add(envelopes: readonly Record<string, unknown>[], sourceDigest: string): Refusal[] {
     const refused: Refusal[] = [];
     for (const envelope of envelopes) {
-      if (!Array.isArray(envelope.resourceSpans)) renameProtoFields(envelope);
+      // An export may mix the proto field names with lowerCamelCase at any depth; every
+      // envelope is normalized whole, so a `scope_spans` under a `resourceSpans` root is read.
+      renameProtoFields(envelope);
       const groups = Array.isArray(envelope.resourceSpans) ? envelope.resourceSpans : [];
       for (const groupValue of groups) {
         if (!isObject(groupValue)) continue;
@@ -706,7 +716,7 @@ export class OtlpTraceCollector {
         traceId: draft.traceId,
         format: "otlp_json",
         entries: spans.map((span) => span.entry),
-        blobs: [...draft.blobs.blobs.values()],
+        blobs: draft.blobs.sorted(),
         ...(identity ? { identity } : {}),
         origin: draft.evaluation
           ? "evaluation"
@@ -953,7 +963,22 @@ function convertLangfuseTrace(draft: LangfuseTraceDraft, traceId: string): Conve
     spanIds.set(originalId, spanId);
   }
   let identity: TraceIdentity | undefined;
+  // The origin markers the OTLP reader applies, read from the converted attributes with the same
+  // precedence: an evaluation's or a simulated world's records are never production history,
+  // whatever environment the export was taken from.
   let production = false;
+  let evaluation = false;
+  let simulation = false;
+  const markOrigin = (key: string, value: JsonValue, resourceAttribute: boolean) => {
+    if (EVALUATION_KEYS.includes(key)) evaluation = true;
+    if (SIMULATION_KEYS.includes(key)) simulation = true;
+    if (
+      resourceAttribute &&
+      (key === "deployment.environment.name" || key === "deployment.environment") &&
+      value === "production"
+    )
+      production = true;
+  };
   const entries = observations.map((observation, index): ImportEntry => {
     const originalId = text(observation.id, true);
     const spanId = spanIds.get(originalId)!;
@@ -971,10 +996,16 @@ function convertLangfuseTrace(draft: LangfuseTraceDraft, traceId: string): Conve
     for (const [key, value] of Object.entries(metadata)) {
       if (key.startsWith("hue.import."))
         throw new ConversionError("Source metadata uses reserved import keys");
-      if (key.startsWith("resourceAttributes."))
-        resource.push({ key: key.slice("resourceAttributes.".length), value: anyValue(value) });
-      else if (key !== "scope.name" && key !== "scope.version") attributes.add(key, value);
+      if (key.startsWith("resourceAttributes.")) {
+        const resourceKey = key.slice("resourceAttributes.".length);
+        resource.push({ key: resourceKey, value: anyValue(value) });
+        markOrigin(resourceKey, value, true);
+      } else if (key !== "scope.name" && key !== "scope.version") {
+        attributes.add(key, value);
+        markOrigin(key, value, false);
+      }
     }
+    if (text(metadata["scope.name"]) === SIMULATION_SCOPE) simulation = true;
     attributes.add("hue.import.source_index", index);
     attributes.add("hue.import.original_span_id", originalId);
     if (traceId !== originalTraceId)
@@ -1020,12 +1051,6 @@ function convertLangfuseTrace(draft: LangfuseTraceDraft, traceId: string): Conve
     }
     attributes.add("hue.import.status_source", "langfuse.level");
     if (observation.environment === "production") production = true;
-    if (!parent) {
-      const user = identifier(observation.userId, MAX_IDENTIFIER);
-      const session = identifier(observation.sessionId, MAX_SESSION);
-      if (user || session)
-        identity = { ...(user ? { user } : {}), ...(session ? { session } : {}) };
-    }
     const message = text(observation.statusMessage);
     const span: ImportSpan = {
       traceId,
@@ -1039,6 +1064,10 @@ function convertLangfuseTrace(draft: LangfuseTraceDraft, traceId: string): Conve
       attributes: attributes.finish(),
       status: { code: observation.level === "ERROR" ? 2 : 0, ...(message ? { message } : {}) },
     };
+    // The trace's owner as the OTLP reader takes it from a root: the user (`langfuse.user.id`
+    // among the keys), an explicit entity in the root's metadata or resource attributes, and the
+    // session.
+    if (!parent) identity = identityOf(attributeMap(span.attributes), attributeMap(resource));
     return {
       resource: { attributes: resource },
       scopeSpans: [
@@ -1058,9 +1087,15 @@ function convertLangfuseTrace(draft: LangfuseTraceDraft, traceId: string): Conve
     traceId,
     format: "langfuse_observations",
     entries,
-    blobs: [...blobs.blobs.values()],
+    blobs: blobs.sorted(),
     ...(identity ? { identity } : {}),
-    origin: production ? "production" : "unknown",
+    origin: evaluation
+      ? "evaluation"
+      : simulation
+        ? "simulation"
+        : production
+          ? "production"
+          : "unknown",
     sourceDigests: draft.sourceDigests,
     remappedTraceId: traceId !== originalTraceId,
     remappedSpans,
@@ -1752,7 +1787,7 @@ export function convertAtifExport(
     traceId,
     format: "atif",
     entries,
-    blobs: [...blobs.blobs.values()],
+    blobs: blobs.sorted(),
     ...(userId || session
       ? { identity: { ...(userId ? { user: userId } : {}), ...(session ? { session } : {}) } }
       : {}),
@@ -1770,6 +1805,17 @@ export interface PreparedBatch {
   body: Uint8Array;
   decodedBytes: number;
   spanIds: string[];
+}
+
+/** `Math.floor(numerator / divisor)` for safe nonnegative integers, without a division: the
+ * published package's import-boundary check reads a `/` after a name as a regular expression, so
+ * the quotient is estimated from the reciprocal and corrected by whole steps, which makes it
+ * exact on every engine. */
+export function integerQuotient(numerator: number, divisor: number): number {
+  let quotient = Math.floor(numerator * divisor ** -1);
+  while (quotient * divisor > numerator) quotient--;
+  while ((quotient + 1) * divisor <= numerator) quotient++;
+  return quotient;
 }
 
 const spanIdOf = (entry: ImportEntry): string => {
@@ -1821,8 +1867,9 @@ export function batchEntries(entries: readonly ImportEntry[]): PreparedBatch[] {
       if (end - from === 1) throw new ConversionError("One span exceeds the import batch bounds");
       // Shrink toward the wire cap by the observed compression ratio rather than re-encoding
       // per entry.
-      const budget = Math.floor(
-        (encoded.decoded.byteLength * MAX_BATCH_WIRE_BYTES * 0.9) / encoded.body.byteLength,
+      const budget = integerQuotient(
+        encoded.decoded.byteLength * MAX_BATCH_WIRE_BYTES * 9,
+        encoded.body.byteLength * 10,
       );
       let next = from + 1;
       let bytes = BATCH_FRAME_BYTES + parts[from]!.bytes;

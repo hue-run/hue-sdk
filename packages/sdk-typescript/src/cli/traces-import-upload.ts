@@ -408,8 +408,18 @@ export async function uploadTraceBundle(
           response.status === 408 ||
           response.status === 429 ||
           (response.status >= 500 && response.status <= 504);
+        let body: Buffer | undefined;
         if (!transient) {
-          const body = await readBounded(response);
+          // A body that breaks off (the connection dropped after the headers) is no answer: the
+          // request is made again rather than read as an empty acknowledgement.
+          try {
+            body = await readBounded(response);
+          } catch {
+            if (forced.signal.aborted) throw new Interrupted();
+            body = undefined;
+          }
+        }
+        if (body !== undefined) {
           let json: unknown;
           try {
             json = body.byteLength ? JSON.parse(body.toString("utf8")) : undefined;
@@ -650,19 +660,18 @@ export async function uploadTraceBundle(
     }
     const stop = stopFor(reply, `Batch ${batch.sha256} of trace ${traceId} was refused`);
     if (stop) throw stop;
-    const partial =
-      isObject(reply.json) && isObject(reply.json.partialSuccess)
-        ? reply.json.partialSuccess
-        : undefined;
-    const rejected = partial ? Number(partial.rejectedSpans ?? 0) : 0;
-    if (rejected > 0) {
-      const message =
-        typeof partial?.errorMessage === "string" && partial.errorMessage
-          ? partial.errorMessage
-          : "Records were refused.";
+    // Only an acknowledgement that reads whole is recorded: a success without one (an empty,
+    // cut or foreign body) leaves the batch pending, so the next run sends it again.
+    const acknowledged = batchAcknowledgement(reply);
+    if (!acknowledged)
+      throw new UploadStop(
+        `Hue's answer to batch ${batch.sha256} of trace ${traceId} could not be read as an acknowledgement; the batch stays pending`,
+        "protocol",
+      );
+    if (acknowledged.rejected > 0) {
       state.conflicts.push({
         sha256: batch.sha256,
-        message: `${rejected} span(s) rejected: ${message}`,
+        message: `${acknowledged.rejected} span(s) rejected: ${acknowledged.message || "Records were refused."}`,
       });
       return false;
     }
@@ -880,7 +889,7 @@ export async function uploadTraceBundle(
       ? "Call prepare_trace_import again with the same manifest_digest and totals, write the new authorization to the file and run the same command again."
       : failure?.code === "import_canceled"
         ? `This import was canceled in Hue and takes no more requests. Call get_trace_import with trace_import_id ${importId} for its state.`
-        : failure && !["busy", "unreachable"].includes(failure.code)
+        : failure && !["busy", "unreachable", "protocol"].includes(failure.code)
           ? "Fix the reported problem; then run the same command again to resume."
           : conflicted && !unverified && !interrupted && !failure
             ? `The conflicting traces keep the evidence Hue already holds. Call get_trace_import with trace_import_id ${importId} to review them.`
@@ -919,6 +928,32 @@ export async function uploadTraceBundle(
   };
 }
 
+/** The OTLP export response of an acknowledged batch, read strictly: a JSON object whose
+ * `partialSuccess`, when present, counts the rejected spans as a number or a digit string.
+ * Undefined for anything else, which is no acknowledgement to act on. */
+function batchAcknowledgement(reply: Reply): { rejected: number; message: string } | undefined {
+  if (!isObject(reply.json)) return undefined;
+  const partial = reply.json.partialSuccess;
+  if (partial === undefined) return { rejected: 0, message: "" };
+  if (!isObject(partial)) return undefined;
+  const raw = partial.rejectedSpans;
+  const rejected =
+    raw === undefined
+      ? 0
+      : typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0
+        ? raw
+        : typeof raw === "string" && /^\d{1,15}$/.test(raw)
+          ? Number(raw)
+          : undefined;
+  if (rejected === undefined) return undefined;
+  return {
+    rejected,
+    message: typeof partial.errorMessage === "string" ? partial.errorMessage : "",
+  };
+}
+
+/** The response body, up to {@link MAX_RESPONSE_BYTES} (a longer one is cut there). A body that
+ * breaks off before its end rejects: the caller treats the request as unanswered. */
 async function readBounded(response: Response): Promise<Buffer> {
   const reader = response.body?.getReader();
   if (!reader) return Buffer.alloc(0);
@@ -935,8 +970,6 @@ async function readBounded(response: Response): Promise<Buffer> {
       }
       chunks.push(next.value);
     }
-  } catch {
-    // A body that breaks off is read as what arrived.
   } finally {
     reader.releaseLock();
   }
