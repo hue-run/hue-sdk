@@ -217,7 +217,7 @@
         }
       },
       "name": "hue-run",
-      "version": "0.12.1"
+      "version": "0.13.0"
     },
     "typescript": {
       "bins": {
@@ -736,7 +736,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.19.1"
+      "version": "0.20.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -745,10 +745,10 @@
     "description": "Set up and verify Hue tracing, investigate production traces over the Hue MCP, turn traces into reviewed cases, make an agent eval-ready and run Hue evaluations with hue eval. Use when a developer asks to set up, integrate or troubleshoot Hue or verify that requests reach Hue; asks what needs attention, fails or is slow in production; asks to turn a trace into a case or eval set; asks to make their agent eval-ready or point its Gmail, Slack or other app clients at Hue's simulated worlds; or asks to evaluate, test or regression-test their agent or run Hue evals (hue eval --case, --command or --worker) and read the results. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to evaluate or test their agent. Preserves the application's model provider, framework, OpenTelemetry setup and production behavior.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.7.7"
+      "version": "0.7.8"
     },
     "name": "hue",
-    "sha256": "sha256:a9d0ecfe4c75e128e456782e7dbd7a1c4d3374c0954f194a80e43d78391201d4",
+    "sha256": "sha256:c80b8d7bb5f8ad4fab6721a36a3bdea838a2926537ac61c83be2d24f0d6845df",
     "source": "skills/hue/SKILL.md"
   }
 }

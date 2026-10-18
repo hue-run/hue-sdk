@@ -345,12 +345,12 @@ See the [documentation](https://docs.hue.run/sdks/python) for integration guidan
 
 ## Simulated worlds
 
-The next release adds `hue_sdk.world.WorldClient` with `create_instance`, `get_instance` and
+`hue_sdk.world.WorldClient` provides `create_instance`, `get_instance` and
 `finish_instance`. It requires a Hue deployment serving the canonical instance routes.
 The published client below remains supported. The handoff's legacy `worldId` field continues
 to identify the runtime instance.
 
-The unreleased `WorldModelClient` reconstructs a user's starting World from retained evidence:
+`WorldModelClient` reconstructs a user's starting World from retained evidence:
 
 ```python
 from hue_sdk.world import WorldModelClient
@@ -375,7 +375,7 @@ reports that the World is preparing. Retries preserve the same request bytes and
 Other failures keep `max_attempts`. These methods accept an optional `cancel_event` containing
 a `threading.Event`; setting it ends the wait and closes active HTTP reads.
 
-For automatic capture, the compatible service must enable the project. Set the complete user ID
+Automatic capture requires a compatible service. Set the complete user ID
 on the root request through `hue.context(user_id=...)`, then attach explicit account metadata to
 each tool span. Configure faithful production provenance on the application's OpenTelemetry
 resource (`deployment.environment.name=production`); eval and simulation traffic stay excluded.
