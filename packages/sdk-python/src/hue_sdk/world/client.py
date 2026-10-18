@@ -17,6 +17,12 @@ from urllib3.connectionpool import ConnectionPool
 
 from ..evals._json import MISSING, encode, json_value, uuid
 from ..transport import DEFAULT_BASE_URL, normalize_base_url, reject_positional_api_key
+from .readiness import (
+    PREPARATION_DIAGNOSTICS,
+    TERMINAL_WORLD_DIAGNOSTICS,
+    WorldPreparationProgress,
+    parse_preparation,
+)
 from .types import (
     ActionResult,
     CoverageGapResult,
@@ -50,11 +56,13 @@ class HueEnvironmentError(RuntimeError):
         status: int | None = None,
         retry_after: float | None = None,
         diagnostic: str | None = None,
+        preparation: WorldPreparationProgress | None = None,
     ) -> None:
         self.status = status
         # The server's Retry-After in seconds, bounded, when a 429 or 503 carried one.
         self.retry_after = retry_after
         self.diagnostic = diagnostic
+        self.preparation = preparation
         detail = f", {diagnostic}" if diagnostic else ""
         super().__init__(
             f"Hue environment request failed (HTTP {status}{detail})."
@@ -332,8 +340,33 @@ class WorldClient:
                     stream=True,
                 ) as response:
                     if not 200 <= response.status_code < 300:
+                        diagnostic = _diagnostic(response)
+                        preparation = None
+                        if response.status_code == 503 and diagnostic in PREPARATION_DIAGNOSTICS:
+                            try:
+                                error_chunks: list[bytes] = []
+                                error_bytes = 0
+                                for chunk in response.iter_content(chunk_size=4096):
+                                    error_bytes += len(chunk)
+                                    if error_bytes > 16 * 1024 or (
+                                        deadline is not None and deadline.passed
+                                    ):
+                                        break
+                                    error_chunks.append(chunk)
+                                else:
+                                    preparation = parse_preparation(
+                                        json.loads(b"".join(error_chunks)), diagnostic
+                                    )
+                            except (
+                                requests.RequestException,
+                                OSError,
+                                ValueError,
+                                UnicodeError,
+                                RecursionError,
+                            ):
+                                pass
                         raise HueEnvironmentError(
-                            response.status_code, _retry_after(response), _diagnostic(response)
+                            response.status_code, _retry_after(response), diagnostic, preparation
                         )
                     chunks: list[bytes] = []
                     size = 0
@@ -405,8 +438,10 @@ class WorldClient:
                 else:
                     ordinary_failures += 1
                     if (
-                        error.status is not None and error.status not in _RETRYABLE
-                    ) or ordinary_failures >= self._max_attempts:
+                        (error.status is not None and error.status not in _RETRYABLE)
+                        or (error.status == 503 and error.diagnostic in TERMINAL_WORLD_DIAGNOSTICS)
+                        or ordinary_failures >= self._max_attempts
+                    ):
                         raise
                     backoff = min(0.1 * 2 ** (ordinary_failures - 1), 2)
                     wait = (
@@ -470,7 +505,9 @@ class WorldClient:
                 cancel_event=cancel_event,
             )
         except HueEnvironmentError as error:
-            raise WorldCreationError(error.status, error.retry_after, error.diagnostic) from None
+            raise WorldCreationError(
+                error.status, error.retry_after, error.diagnostic, error.preparation
+            ) from None
 
     def get_run(self, run_id: str) -> RunState:
         run = self._request("GET", f"/environment-runs/{uuid(run_id)}")
