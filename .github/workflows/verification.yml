@@ -28,10 +28,21 @@ jobs:
           if os.environ["AUTHOR_TYPE"] == "Bot":
               print("Bot pull request; no verification evidence required.")
               sys.exit(0)
-          body = os.environ.get("BODY", "")
+          body = re.sub(r"<!--.*?-->", "", os.environ.get("BODY", ""), flags=re.DOTALL)
           skills = sorted(p.parent.name for p in pathlib.Path(".agents/skills").glob("verify-*/SKILL.md"))
           named = [s for s in skills if re.search(rf"(?<![\w-]){re.escape(s)}(?![\w-])", body)]
-          if named and ("```" in body or "![" in body):
+          fences = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n(.*?)^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$", re.MULTILINE | re.DOTALL)
+          has_code_output = any(
+              opening[0] == closing[0] and len(closing) >= len(opening) and content.strip()
+              for opening, content, closing in fences.findall(body)
+          )
+          has_markdown_image = any(target.strip() for target in re.findall(r"!\[[^\]\n]*\]\(([^)\n]*)\)", body))
+          has_html_image = re.search(
+              r"""<img\b[^>]*\ssrc\s*=\s*(?:"[^"]*\S[^"]*"|'[^']*\S[^']*'|[^\s"'<>]+)[^>]*>""",
+              body,
+              re.IGNORECASE | re.DOTALL,
+          )
+          if named and (has_code_output or has_markdown_image or has_html_image):
               print("Verified with " + ", ".join(named))
               sys.exit(0)
           print(f"::error::Name the verify skill you ran ({', '.join(skills)}) in the PR description and paste its output in a code block, or one screenshot for a visible UI change. See AGENTS.md, Before opening a PR.")
