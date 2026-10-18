@@ -140,7 +140,7 @@ These pages own their procedures. Read the page with curl, adding `.md` to its U
 | Understand findings, intents, request answers or trace checks | [Classifiers](https://docs.hue.run/classifiers/overview) |
 | Turn a trace into a case or eval set | [Create a case](https://docs.hue.run/evaluations/case-from-trace) |
 | Run or regression-test the agent against cases with `hue eval` | [Run your agent](https://docs.hue.run/evaluations/run-your-agent) |
-| Point the agent's Gmail, Slack or other app clients at a World during evaluations | [Connect your agent](https://docs.hue.run/evaluations/eval-ready-agent), with [Worlds](https://docs.hue.run/worlds/overview) and [supported apps](https://docs.hue.run/evaluations/simulations) |
+| Point the agent's own app clients at a World during evaluations | [Connect your agent](https://docs.hue.run/evaluations/eval-ready-agent), with [Worlds](https://docs.hue.run/worlds/overview) and [Simulations](https://docs.hue.run/evaluations/simulations) |
 | Evaluate a function in-process or in CI | [Local evaluations](https://docs.hue.run/evaluations/first-evaluation) |
 | Run the agent from Hue against an HTTPS endpoint | [Managed runs](https://docs.hue.run/evaluations/managed-runs) |
 
