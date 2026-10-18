@@ -590,9 +590,10 @@ describe("hue import langfuse through the v2 API", () => {
   });
 
   test("stamps each span with Langfuse's environment as recorded, never a default", async () => {
-    // A trace in Langfuse's default environment, beside production trace A and trace B, which
-    // records no environment.
+    // A trace in Langfuse's default environment and one whose production root has a child in the
+    // default environment, beside production trace A and trace B, which records no environment.
     const DEFAULT_TRACE = "3333333333333333333333333333333e";
+    const MIXED_TRACE = "4444444444444444444444444444444f";
     const lf = langfuse({
       v2: [
         ...v2Data().filter((row) => row.traceId === TRACE_A || row.traceId === TRACE_B),
@@ -616,6 +617,26 @@ describe("hue import langfuse through the v2 API", () => {
           parentObservationId: "e1e2e3e4e5e6e7e8",
           environment: "default",
         },
+        {
+          id: "a1a2a3a4a5a6a7a8",
+          traceId: MIXED_TRACE,
+          type: "AGENT",
+          name: "mixed",
+          startTime: "2026-03-11T00:00:00.000Z",
+          endTime: "2026-03-11T00:00:02.000Z",
+          parentObservationId: null,
+          environment: "production",
+        },
+        {
+          id: "b1b2b3b4b5b6b7b8",
+          traceId: MIXED_TRACE,
+          type: "SPAN",
+          name: "replayed step",
+          startTime: "2026-03-11T00:00:01.000Z",
+          endTime: "2026-03-11T00:00:02.000Z",
+          parentObservationId: "a1a2a3a4a5a6a7a8",
+          environment: "default",
+        },
       ],
     });
     const target = hue();
@@ -634,6 +655,13 @@ describe("hue import langfuse through the v2 API", () => {
     expect(stamped(TRACE_A)).toEqual(Array(3).fill(["production", "production"]));
     // Langfuse's default environment is copied as recorded, never taken for production.
     expect(stamped(DEFAULT_TRACE)).toEqual(Array(2).fill(["default", "default"]));
+    // Each span keeps its own environment, never its root's, so a mixed trace says it is mixed.
+    expect(
+      str(target.span(MIXED_TRACE, "a1a2a3a4a5a6a7a8")!, "hue.import.source_environment"),
+    ).toBe("production");
+    expect(
+      str(target.span(MIXED_TRACE, "b1b2b3b4b5b6b7b8")!, "hue.import.source_environment"),
+    ).toBe("default");
     // An absent environment stays absent: neither attribute.
     expect(stamped(hueTraceId(TRACE_B))).toEqual(Array(2).fill([undefined, undefined]));
     // The resource declares no deployment environment, since one import can mix them.
