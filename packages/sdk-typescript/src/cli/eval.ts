@@ -51,8 +51,10 @@ import {
   type ScenarioPins,
 } from "../evals/scenarios.js";
 import { collectDirectOutputs, stageDirectCase } from "./eval-direct.js";
+import { runEnvironmentTarget } from "../evals/environment-target.js";
 import {
   runSimulation,
+  simulationTargetContext,
   type SimulationProgress,
   type SimulationReport,
   type SimulationTargetContext,
@@ -111,7 +113,9 @@ Selection (exactly one, not used with --worker):
   --dataset-version <id>          Frozen dataset version; requires --scorer or --scorer-version
   --scorer <slug|name|id>         Evaluator to pin at its latest published version (repeatable)
   --scorer-version <id>           Scorer version to pin (repeatable)
-  --mode <auto|direct|simulation> Case kind; auto picks direct for sets whose cases pin no world
+  --mode <auto|direct|simulation> Case kind; auto picks direct for sets whose cases pin no
+                                  world and runs a set mixing both kinds as one run, each
+                                  case through its own kind's path
 
 Agent (exactly one):
   <adapter-file>                  Module exporting default or runMyAgent(inputs, context)
@@ -1158,14 +1162,20 @@ function parseMode(value: string | undefined): RunMode {
   throw new UsageError("--mode must be auto, direct or simulation");
 }
 
-/** The selection's cases, and whether the run is direct: when `--mode` leaves it open, direct
- * means nothing pins a simulated world, not a Scenario and no case of the version. A simulation
- * run cannot execute a case that pins no world, so a selection mixing both kinds is refused. */
+/** How a one-shot run executes its cases: every case without a world (`direct`), every case in
+ * a fresh world (`simulation`), or each case through its own kind's path (`mixed`). */
+type RunKind = "direct" | "simulation" | "mixed";
+
+/** The selection's cases and how they run. When `--mode` leaves it open, a version mixing cases
+ * that pin a world with cases that pin none runs as one mixed run; direct means nothing pins a
+ * simulated world, not a Scenario and no case of the version; anything else is a simulation. A
+ * simulation run cannot execute a case that pins no world, so `--mode simulation` over such
+ * cases is refused. */
 async function inspectSelection(
   client: EvaluationClient,
   pins: ScenarioPins,
   mode: RunMode,
-): Promise<{ direct: boolean; cases: number; worldCases: number; refusal?: string }> {
+): Promise<{ kind: RunKind; cases: number; worldCases: number; refusal?: string }> {
   let cases = 0;
   let worldCases = 0;
   let after: string | undefined;
@@ -1175,16 +1185,20 @@ async function inspectSelection(
     worldCases += page.items.filter((item) => item.environmentVersionId).length;
     after = page.nextCursor ?? undefined;
   } while (after);
-  const direct =
-    mode === "auto"
-      ? !pins.scenarioId && !pins.environmentVersionId && worldCases === 0
-      : mode === "direct";
   const answerOnly = cases - worldCases;
+  const kind: RunKind =
+    mode !== "auto"
+      ? mode
+      : worldCases > 0 && answerOnly > 0
+        ? "mixed"
+        : worldCases === 0 && !pins.scenarioId && !pins.environmentVersionId
+          ? "direct"
+          : "simulation";
   const refusal =
-    !direct && answerOnly > 0
-      ? `${answerOnly} of the ${cases} ${cases === 1 ? "case pins" : "cases pin"} no world, so a simulation run would fail ${answerOnly === 1 ? "it" : "them"} before the agent starts. Put the answer-only cases in their own eval set${mode === "simulation" ? ", or drop --mode simulation" : ""}.`
+    kind === "simulation" && answerOnly > 0
+      ? `${answerOnly} of the ${cases} ${cases === 1 ? "case pins" : "cases pin"} no world, so a simulation run would fail ${answerOnly === 1 ? "it" : "them"} before the agent starts. ${mode === "simulation" ? "Drop --mode simulation: --mode auto runs the world cases and the answer-only cases together as one run" : "Put the answer-only cases in their own eval set"}.`
       : undefined;
-  return { direct, cases, worldCases, ...(refusal ? { refusal } : {}) };
+  return { kind, cases, worldCases, ...(refusal ? { refusal } : {}) };
 }
 
 function toJson(
@@ -1338,7 +1352,7 @@ interface JudgeCheckpoint {
   source: {
     directory: string;
     identity: {
-      kind: "direct" | "simulation" | "local-agent-worker";
+      kind: RunKind | "local-agent-worker";
       projectId: string;
       baseUrl: string;
       agent?: { key: string; revision: string };
@@ -1534,11 +1548,13 @@ async function runOnce(
   }
   const runName = values.name ?? defaultRunName(agent);
   const project = await client.checkConnection();
+  // Each kind of run has its own checkpoint directory and identity: a mixed run never resumes
+  // from, or is resumed by, a direct or simulation run's checkpoint.
   const checkpointDirectory = await prepareCheckpointDirectory(
     values["checkpoint-dir"],
     agent.key,
     project.id,
-    selection.direct ? "direct" : "simulation",
+    selection.kind,
   );
   const judging: JudgeCheckpoint | undefined = values.judges
     ? {
@@ -1554,7 +1570,7 @@ async function runOnce(
         source: {
           directory: checkpointDirectory,
           identity: {
-            kind: selection.direct ? "direct" : "simulation",
+            kind: selection.kind,
             projectId: project.id,
             baseUrl: connection.baseUrl,
           },
@@ -1572,9 +1588,10 @@ async function runOnce(
       await completeJudgeHandoff(client, judging!, pending);
       return await reportVerdicts(client, values, pending.run, baselineId, output, signal, judging);
     }
-    if (selection.direct)
-      return await runDirect(
+    if (selection.kind !== "simulation")
+      return await runExperimentAttempt(
         {
+          kind: selection.kind,
           client,
           values,
           pins,
@@ -1588,6 +1605,7 @@ async function runOnce(
           concurrency,
           baselineId,
           judging,
+          checkpointDirectory,
         },
         connection,
       );
@@ -1699,8 +1717,11 @@ async function checkRun(
       return 1;
     }
   }
-  const { direct, cases, worldCases, refusal } = selection;
+  const { kind, cases, worldCases, refusal } = selection;
   const unsaved = !pins.saved && !values["save-version"];
+  // What each kind of run gives its cases: a direct run gives no case a world, a simulation
+  // run gives every case one (and is refused over cases that pin none), a mixed run gives one
+  // to each case that pins one.
   const check = {
     ok: !unsaved && !refusal,
     project: { id: project.id, name: project.name },
@@ -1712,8 +1733,9 @@ async function checkRun(
       cases,
       evaluators: pins.scorerVersionIds.length,
     },
-    mode: direct ? "direct" : "simulation",
-    worldCases: direct ? 0 : worldCases,
+    mode: kind,
+    worldCases: kind === "direct" ? 0 : worldCases,
+    directCases: kind === "direct" ? cases : cases - worldCases,
     agent: { key: agent.key, revision: agent.revision, concurrency: values.concurrency ?? "1" },
   };
   if (values.json) process.stdout.write(`${JSON.stringify({ check })}\n`);
@@ -1722,10 +1744,13 @@ async function checkRun(
     output.log(
       `Selection: ${check.selection.kind === "case" ? "case" : "eval set"} "${pins.name}", ${cases} ${cases === 1 ? "case" : "cases"}, ${pins.scorerVersionIds.length} ${pins.scorerVersionIds.length === 1 ? "evaluator" : "evaluators"}`,
     );
+    const worlds = `${worldCases} ${worldCases === 1 ? "case gets" : "cases get"} a fresh world, reached through the HUE_SIM_*_URL mirrors and HUE_WORLD_TOKEN`;
     output.log(
-      direct
+      kind === "direct"
         ? "Mode: direct; the agent answers without a simulated world or app mirrors"
-        : `Mode: simulation; ${worldCases} ${worldCases === 1 ? "case gets" : "cases get"} a fresh world, reached through the HUE_SIM_*_URL mirrors and HUE_WORLD_TOKEN`,
+        : kind === "simulation"
+          ? `Mode: simulation; ${worlds}`
+          : `Mode: mixed; ${worlds}, and ${check.directCases} ${check.directCases === 1 ? "case answers" : "cases answer"} without one`,
     );
     output.log(`Agent: ${agent.key} @ ${agent.revision}`);
   }
@@ -1745,8 +1770,8 @@ async function checkRun(
   return 0;
 }
 
-/** Resumable direct-run attempt: the created experiment is finished before a new one starts. */
-interface DirectAttempt {
+/** Resumable one-shot attempt: the created experiment is finished before a new one starts. */
+interface ExperimentAttempt {
   /** Digest of the selection: dataset version, scorer pins and experiment configuration. */
   selectionDigest: string;
   /** Stable experiment-creation key; a resumed attempt never creates a second experiment. */
@@ -1756,14 +1781,19 @@ interface DirectAttempt {
 }
 
 /**
- * Direct cases: one ordinary experiment through `runExperiment`. The agent receives the case's
- * pinned files and returns generated documents; code evaluators pinned to the run stay deferred
- * for Hue's executor (`deferUnboundLocalScorers`), so no evaluator source runs on this machine.
- * The attempt is checkpointed as in simulation mode: rerunning the same selection resumes the
- * saved experiment without invoking the agent again for its finished cases.
+ * One ordinary experiment through `runExperiment`, for a direct run and for a mixed one. A
+ * direct run's agent receives the case's pinned files and returns generated documents. A mixed
+ * run routes each case by its pin: a case pinning no world goes to the direct adapter, a case
+ * pinning one gets a fresh world through the environment target and the simulation adapter, as
+ * a simulation run gives it. Code evaluators pinned to the run stay deferred for Hue's executor
+ * (`deferUnboundLocalScorers`), so no evaluator source runs on this machine. The attempt is
+ * checkpointed as in simulation mode, under the run kind's own identity: rerunning the same
+ * selection resumes the saved experiment without invoking the agent again for its finished
+ * cases.
  */
-async function runDirect(
+async function runExperimentAttempt(
   run: {
+    kind: "direct" | "mixed";
     client: EvaluationClient;
     values: ReturnType<typeof parse>["values"];
     pins: ScenarioPins;
@@ -1777,22 +1807,19 @@ async function runDirect(
     concurrency: number;
     baselineId: string | undefined;
     judging?: JudgeCheckpoint;
+    checkpointDirectory: string;
   },
   connection: Connection,
 ): Promise<number> {
-  const { client, values, pins, output, signal } = run;
+  const { client, kind, values, pins, output, signal } = run;
   const config = { agentKey: run.agent.key, agentRevision: run.agent.revision };
-  const checkpointDirectory = await prepareCheckpointDirectory(
-    values["checkpoint-dir"],
-    run.agent.key,
-    run.projectId,
-    "direct",
-  );
-  const store = await CheckpointStore.acquire(checkpointDirectory, {
-    kind: "direct",
+  const store = await CheckpointStore.acquire(run.checkpointDirectory, {
+    kind,
     projectId: run.projectId,
     baseUrl: connection.baseUrl,
   });
+  // Only a mixed run creates worlds; its world cases reach Hue through the environment client.
+  const environmentClient = kind === "mixed" ? createEnvironmentClient(connection) : undefined;
   let experimentId = "";
   let runUrl = "";
   let report: RunnerReport;
@@ -1803,10 +1830,10 @@ async function runDirect(
       scorerVersionIds: [...pins.scorerVersionIds].sort(),
       config,
     });
-    let attempt = await store.read<DirectAttempt>("active-attempt");
+    let attempt = await store.read<ExperimentAttempt>("active-attempt");
     if (attempt && attempt.stage !== "completed" && attempt.selectionDigest !== selectionDigest)
       throw new Error(
-        "Recover the unfinished direct run before running a changed selection: run the unchanged command again to finish it, or pass another --checkpoint-dir",
+        `Recover the unfinished ${kind} run before running a changed selection: run the unchanged command again to finish it, or pass another --checkpoint-dir`,
       );
     if (!attempt || attempt.stage === "completed") {
       attempt = { selectionDigest, idempotencyKey: randomUUID(), stage: "preparing" };
@@ -1844,9 +1871,41 @@ async function runDirect(
       scorers: [],
       deferUnboundLocalScorers: true,
       environmentEvidence: "when_pinned",
+      // A world case that a process which died here left running runs again in a fresh world;
+      // an answer-only case it left running stays uncertain, since its agent may still be
+      // acting. A direct run gives no case a world, so none of its cases reruns.
+      ...(environmentClient
+        ? { rerunCrashedCases: (item: ExperimentCase) => Boolean(item.environmentVersionId) }
+        : {}),
       async target(inputs, context) {
         if (signal.aborted) throw new TargetCancelledError();
-        output.log(`[${context.item.externalKey}] agent started`);
+        const label = context.item.externalKey;
+        if (environmentClient && context.item.environmentVersionId)
+          return runEnvironmentTarget({
+            client,
+            environmentClient,
+            hue: run.hue,
+            inputs,
+            context,
+            agentRevision: run.agent.revision,
+            // The CLI adapts to whatever the deployment serves; the library warning is for
+            // code that still reads the legacy capability itself.
+            deprecationWarnings: false,
+            signal,
+            onProgress(event) {
+              if (event.type === "world_created") output.log(`[${label}] world created`);
+              else if (event.type === "target_started") output.log(`[${label}] agent started`);
+              else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
+              else if (event.type === "attempt_prepared")
+                output.log(`[${label}] attempt prepared: ${event.status}`);
+            },
+            target: (targetInputs, targetContext) =>
+              run.agents.simulation(
+                structuredClone(targetInputs),
+                simulationTargetContext(targetContext),
+              ),
+          });
+        output.log(`[${label}] agent started`);
         const result = await run.agents.direct(inputs, {
           mode: "direct",
           config: structuredClone(context.config),
@@ -1874,7 +1933,7 @@ async function runDirect(
           experimentId,
           subjectIds: report.subjectIds,
           runUrl,
-          extra: { mode: "direct", deferredScorerVersionIds: report.deferredScorerVersionIds },
+          extra: { mode: kind, deferredScorerVersionIds: report.deferredScorerVersionIds },
           telemetryNotAccepted: report.telemetryNotAccepted,
         },
         { kind: "attempt" },
@@ -1896,7 +1955,7 @@ async function runDirect(
       experimentId,
       subjectIds: report.subjectIds,
       runUrl,
-      extra: { mode: "direct", deferredScorerVersionIds: report.deferredScorerVersionIds },
+      extra: { mode: kind, deferredScorerVersionIds: report.deferredScorerVersionIds },
       telemetryNotAccepted: report.telemetryNotAccepted,
     },
     run.baselineId,

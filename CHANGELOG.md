@@ -8,6 +8,18 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [Unreleased]
+
+#### Added
+
+- `hue eval` runs an eval set that mixes cases pinning a World with cases pinning none as one
+  run: each case takes its own kind's path (a fresh World through the simulation adapter, or the
+  direct adapter), under one experiment and one `mixed` checkpoint identity that a direct or
+  simulation run of the same selection neither resumes nor is resumed by. A World case a crashed
+  run left running runs again in a fresh World; a direct case it left running stays uncertain, as
+  before. `--mode simulation` over such a set is still refused before a run exists, and `--check`
+  reports `mode: "mixed"` with `worldCases` and `directCases`. Before, the set was refused.
+
 ### [0.20.2] - 2026-10-18
 
 #### Added

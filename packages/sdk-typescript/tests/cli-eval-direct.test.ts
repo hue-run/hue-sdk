@@ -504,6 +504,11 @@ function documentStandIn(
           items: [scorer, { id: randomUUID(), name: "Other", slug: "other", archivedAt: null }],
           nextCursor: null,
         });
+      const scorerVersionMatch = /^\/scorer-versions\/([^/]+)$/.exec(path);
+      if (scorerVersionMatch) {
+        const found = scorerVersions.find((item) => item.id === scorerVersionMatch[1]);
+        return found ? Response.json(found) : new Response(null, { status: 404 });
+      }
       if (path === `/scorers/${scorer.id}`)
         return Response.json({ ...scorer, versions: scorerVersions });
       if (path === "/experiments") {
@@ -2627,4 +2632,111 @@ process.stdout.write(key);
     await writeFile(join(layout.outputDirectory, "Empty.docx"), "");
     await expect(collectDirectOutputs(layout.outputDirectory)).rejects.toThrow("empty file");
   });
+});
+
+/** Answers from wherever it runs and reports what the run handed it: a world, a mirror, a key. */
+const mixedSource = `let text = "";
+for await (const chunk of process.stdin) text += chunk;
+const { inputs } = JSON.parse(text);
+process.stdout.write(JSON.stringify({
+  answer: "Synthetic answer",
+  caseKey: process.env.HUE_CASE_KEY,
+  inputs,
+  hasWorld: Boolean(process.env.HUE_WORLD_TOKEN),
+  hasMirror: Boolean(process.env.HUE_SIM_GOOGLE_GMAIL_MCP_URL),
+  environmentRunId: process.env.HUE_ENVIRONMENT_RUN_ID ?? null,
+  hueKey: process.env.HUE_API_KEY ?? null }));
+`;
+
+describe("hue eval on a mixed eval set", () => {
+  test(
+    "one run executes the world case in a fresh world and the answer-only case without one, under its own checkpoint identity",
+    async () => {
+      const standIn = documentStandIn({ workerKinds: ["direct", "world"] });
+      const cwd = await mkdtemp(join(tmpdir(), "hue-eval-mixed-"));
+      await writeFile(join(cwd, "mixed-agent.mjs"), mixedSource);
+      // The stand-in's two-kind cases belong to the eval set's first saved version.
+      const args = [
+        "--set",
+        "gia-d1-citation",
+        "--set-version",
+        "1",
+        "--scorer",
+        "gia-d1-citation",
+        "--command",
+        `${process.execPath} ${join(cwd, "mixed-agent.mjs")}`,
+        "--revision",
+        "mixed-v1",
+        "--checkpoint-dir",
+        join(cwd, "checkpoints"),
+        "--wait",
+        "30",
+        "--json",
+      ];
+      const env = { HUE_BASE_URL: standIn.baseUrl };
+      try {
+        // The preflight names each case's path and creates nothing.
+        const checked = await hue([...args, "--check"], { cwd, env });
+        expect(checked.status).toBe(0);
+        expect(JSON.parse(checked.stdout).check).toMatchObject({
+          ok: true,
+          mode: "mixed",
+          worldCases: 1,
+          directCases: 1,
+        });
+        const refused = await hue([...args, "--mode", "simulation", "--check"], { cwd, env });
+        expect(refused.status).toBe(1);
+        expect(refused.stderr).toContain("1 of the 2 cases pin no world");
+        expect(standIn.calls.experiments).toHaveLength(0);
+
+        const run = await hue(args, { cwd, env });
+        expect(run.stderr).not.toContain("Error");
+        expect(run.status).toBe(0);
+        const report = JSON.parse(run.stdout) as Record<string, unknown>;
+        expect(report).toMatchObject({ mode: "mixed", complete: true, totals: { cases: 2 } });
+        // One experiment holds both cases, under the agent's key and revision.
+        expect(standIn.calls.experiments).toHaveLength(1);
+        expect(standIn.calls.experiments[0]).toMatchObject({
+          config: { agentKey: "mixed-agent", agentRevision: "mixed-v1" },
+        });
+        expect(standIn.calls.starts).toBe(2);
+        expect(standIn.worlds.size).toBe(1);
+        expect([...standIn.worlds.values()][0]!.status).toBe("completed");
+        const byKey = new Map(
+          standIn.calls.completions.map((completion) => [
+            (completion.output as Record<string, unknown>).caseKey,
+            completion,
+          ]),
+        );
+        expect([...byKey.keys()].sort()).toEqual(["direct-0", "world-1"]);
+        expect(byKey.get("world-1")).toMatchObject({
+          state: "succeeded",
+          output: { hasWorld: true, hasMirror: true, hueKey: null },
+        });
+        expect((byKey.get("world-1")!.output as Record<string, unknown>).environmentRunId).toBe(
+          [...standIn.worlds.keys()][0]!,
+        );
+        expect(byKey.get("direct-0")).toMatchObject({
+          state: "succeeded",
+          output: { hasWorld: false, hasMirror: false, environmentRunId: null, hueKey: null },
+        });
+        // The attempt is checkpointed under the mixed run's own identity.
+        const checkpoints = join(cwd, "checkpoints", standIn.projectId);
+        expect(existsSync(join(checkpoints, "mixed", "active-attempt.json"))).toBe(true);
+        expect(existsSync(join(checkpoints, "direct"))).toBe(false);
+        expect(existsSync(join(checkpoints, "simulation"))).toBe(false);
+        // The finished attempt is saved as the mixed run's own; a direct or simulation run of the
+        // same selection would neither resume it nor be resumed by it.
+        expect(
+          JSON.parse(await readFile(join(checkpoints, "mixed", "manifest.json"), "utf8")),
+        ).toMatchObject({
+          value: { identity: { kind: "mixed", projectId: standIn.projectId } },
+        });
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
 });

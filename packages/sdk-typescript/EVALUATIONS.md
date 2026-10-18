@@ -362,7 +362,9 @@ Python SDK's `run_experiment` and `rescore` hand pinned input files to targets a
 generated files and the outbound worker are TypeScript-only.
 
 Since TypeScript 0.13.2, the `hue eval --worker --command "…"` wrapper supplies both callbacks, so one
-command worker accepts direct and world cases, including mixed eval sets. It keeps the launch
+command worker accepts direct and world cases, including mixed eval sets. Since 0.20.3, a one-shot
+`hue eval --set` over such a set runs it as one `mixed` run: each case takes its own kind's path
+under one experiment and its own checkpoint identity (`--mode simulation` over it is refused). It keeps the launch
 directory for relative application entry points; private case inputs/output still use
 `HUE_CASE_*`. An adapter-file worker opts into the direct callback with `--capability direct:v1`
 and must handle `context.mode === "direct"`. Restart an existing environment-only command

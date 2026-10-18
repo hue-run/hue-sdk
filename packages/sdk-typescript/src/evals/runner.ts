@@ -241,8 +241,11 @@ export interface RunExperimentOptions extends RunnerOptions {
   signal?: AbortSignal;
   /** Rerun, as a new attempt, a case that a process which died on this machine left running.
    * Only for targets that give every attempt a fresh world: elsewhere the dead run's agent may
-   * still be acting, so such a case stays uncertain. */
-  rerunCrashedCases?: boolean;
+   * still be acting, so such a case stays uncertain. A predicate decides per frozen case, for a
+   * target that gives a fresh world only to the cases that pin one: those rerun, the others stay
+   * uncertain. The crash is recorded in the case's checkpoint before the case is read, so a read
+   * that fails leaves the decision to the next invocation. */
+  rerunCrashedCases?: boolean | ((item: ExperimentCase) => boolean);
   /** Experiment to run; its dataset version must be frozen. */
   experimentId: string;
   /** Whether each case waits for acknowledged trace export or explicitly omits evidence. Required. */
@@ -418,7 +421,15 @@ type CaseCheckpoint =
   | Prepared
   | Uploading
   | { stage: "starting"; startKey: string; traceExternalId: string; previousExecutionId?: string }
-  | { stage: "running" | "serialization_failed"; executionId: string; attempt?: string }
+  // `crashed`: a process that died on this machine left the case running; recorded for every such
+  // case by the run that reclaimed its lock (or the next one, from the sweep record it leaves),
+  // before anything is read, so the recovery decision survives a failed read, write or run.
+  | {
+      stage: "running" | "serialization_failed";
+      executionId: string;
+      attempt?: string;
+      crashed?: boolean;
+    }
   // The caller's signal stopped the target: the next run retries the case with a new attempt.
   | { stage: "interrupted"; executionId: string; attempt?: string };
 
@@ -715,6 +726,23 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       .map((version) => version.id),
   };
   try {
+    // A run that reclaimed a dead process's lock first records that a crash sweep is due, then
+    // marks every case that process left running as crashed, before anything else happens and
+    // under the same release as the rest. The record outlives this run: a sweep that stops part
+    // way (a write the disk refuses) is finished by the next run, which holds no reclaimed lock
+    // but reads the record, so each case's recovery decision survives, and a failure further on
+    // (a case read Hue refuses stops the run) leaves it to the next run the same way.
+    const sweep = "crash-sweep";
+    if (store.reclaimed) await store.write(sweep, { pending: true });
+    if ((await store.read<{ pending: boolean }>(sweep))?.pending) {
+      for (const item of items) {
+        const file = `case-${uuid(item.id)}`;
+        const checkpoint = await store.read<CaseCheckpoint>(file).catch(() => undefined);
+        if (checkpoint?.stage === "running" && !checkpoint.crashed)
+          await store.write(file, { ...checkpoint, crashed: true });
+      }
+      await store.write(sweep, { pending: false });
+    }
     const filesRoot = resolve(options.filesDirectory ?? join(options.checkpointDirectory, "files"));
     const sanitize = (message: string) =>
       message.slice(0, 4000).toWellFormed().replaceAll("\u0000", "");
@@ -828,10 +856,21 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       files.keepOutputs = checkpoint?.stage === "uploading";
       if (checkpoint && "attempt" in checkpoint)
         files.directory = worldDirectoryOf(item.id, checkpoint.attempt);
+      // The frozen case, read once per case: the crash decision below and the start need it.
+      let frozen: ExperimentCase | undefined;
+      const frozenCaseOf = async () =>
+        (frozen ??= await options.client.getExperimentCase(experiment.id, item.id));
       let retryOf: string | undefined;
-      // A case left running by a process that died here is as interrupted as one the caller
-      // stopped; a fresh world isolates it from anything the dead run's agent still does.
-      if (checkpoint?.stage === "running" && store.reclaimed && options.rerunCrashedCases) {
+      // A case left running by a process that died here (recorded above, before anything was
+      // read) is as interrupted as one the caller stopped; a fresh world isolates it from
+      // anything the dead run's agent still does.
+      if (
+        checkpoint?.stage === "running" &&
+        checkpoint.crashed &&
+        options.rerunCrashedCases &&
+        (typeof options.rerunCrashedCases !== "function" ||
+          options.rerunCrashedCases(structuredClone(await frozenCaseOf())))
+      ) {
         checkpoint = { ...checkpoint, stage: "interrupted" };
         await store.write(file, checkpoint);
       }
@@ -862,7 +901,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         // second invocation. Metadata-only mode discarded the output, so its outcome is lost.
         if (checkpoint.hasOutput && checkpoint.output === undefined)
           throw new UncertainExecutionError(item.id, checkpoint.executionId);
-        const frozenCase = await options.client.getExperimentCase(experiment.id, item.id);
+        const frozenCase = await frozenCaseOf();
         checkpoint = await prepare(
           file,
           checkpoint,
@@ -876,7 +915,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         if (options.signal?.aborted) throw new TargetCancelledError();
         if (item.execution && item.execution.id !== retryOf)
           throw new UncertainExecutionError(item.id, item.execution.id);
-        const frozenCase = await options.client.getExperimentCase(experiment.id, item.id);
+        const frozenCase = await frozenCaseOf();
         if (frozenCase.datasetVersionId !== version.id)
           throw new Error("Case is not from the pinned dataset version");
         // Validate before creating a remote execution. SDK/input failures are not

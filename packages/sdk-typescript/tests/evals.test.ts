@@ -1,7 +1,9 @@
 import { ROOT_CONTEXT } from "@opentelemetry/api";
 import { describe, expect, spyOn, test } from "bun:test";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readdir, readFile, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -11,6 +13,7 @@ import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import { createHue, HueExportError } from "../src/index.js";
+import { digest as checkpointDigest } from "../src/evals/json.js";
 import {
   CheckpointIdentityError,
   CheckpointStore,
@@ -113,6 +116,7 @@ function fixture() {
   let telemetryFailures = 0;
   let resultFailures = 0;
   let startFailures = 0;
+  let caseReadFailures = 0;
   let truncatedItemPages = 0;
   const create = (config: unknown = { suffix: "" }) => {
     const id = randomUUID();
@@ -334,7 +338,10 @@ function fixture() {
           executions.set(execution.id, execution);
           return send(execution);
         }
-        if (experimentMatch[2]) return send(cases.find((item) => item.id === experimentMatch[2]));
+        if (experimentMatch[2]) {
+          if (caseReadFailures-- > 0) return new Response(null, { status: 503 });
+          return send(cases.find((item) => item.id === experimentMatch[2]));
+        }
         if (path.endsWith("/items")) {
           const index = url.searchParams.has("after")
             ? cases.findIndex((item) => item.id === url.searchParams.get("after")) + 1
@@ -488,6 +495,8 @@ function fixture() {
     rejectCasePartially: (caseId: string) => partiallyRejectedCases.add(caseId),
     failResult: () => (resultFailures = 1),
     failStart: () => (startFailures = 1),
+    /** Refuses the next frozen-case read once, as a transient failure during recovery. */
+    failCaseRead: () => (caseReadFailures = 1),
     truncateItemPage: () => (truncatedItemPages = 1),
   };
 }
@@ -2968,6 +2977,152 @@ describe("installed evaluation API and runner contract", () => {
       f.server.stop(true);
     }
   });
+  /** A run in another process that dies with both of `f`'s cases running: each case marks its
+   * start, then waits forever, so the checkpoint directory is left locked by a dead owner. The
+   * first case answers alone, the second pins a World. */
+  async function crashedRun(f: ReturnType<typeof fixture>) {
+    const [direct, world] = f.cases as [ExperimentCase, ExperimentCase];
+    world.environmentVersionId = randomUUID();
+    const exp = f.create();
+    const checkpointDirectory = await directory();
+    const markers = await directory();
+    const script = join(markers, "crashing-run.ts");
+    // The modules as this file resolves them: the source here, the installed package under the
+    // package verifier, which rewrites these specifiers.
+    const sdk = import.meta.resolve("../src/index.js");
+    const evals = import.meta.resolve("../src/evals.js");
+    await writeFile(
+      script,
+      `import { writeFileSync } from "node:fs";
+import { createHue } from ${JSON.stringify(sdk)};
+import { createEvaluationClient, runExperiment } from ${JSON.stringify(evals)};
+const [baseUrl, experimentId, checkpointDirectory, markers] = process.argv.slice(2);
+await runExperiment({
+  client: createEvaluationClient({ apiKey: ${JSON.stringify(key)}, baseUrl, maxAttempts: 1 }),
+  hue: createHue({ apiKey: ${JSON.stringify(key)}, baseUrl, serviceName: "crash", captureContent: false }),
+  experimentId,
+  checkpointDirectory,
+  persistResultContent: true,
+  traceEvidence: { mode: "required" },
+  concurrency: 2,
+  target: (_inputs, context) => {
+    writeFileSync(markers + "/" + context.item.id, "");
+    return new Promise(() => {});
+  },
+});
+`,
+    );
+    const child = spawn(
+      process.execPath,
+      [script, f.baseUrl, exp.id, checkpointDirectory, markers],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let childErrors = "";
+    child.stderr!.setEncoding("utf8").on("data", (chunk: string) => (childErrors += chunk));
+    try {
+      const deadline = Date.now() + 30_000;
+      while (!f.cases.every((item) => existsSync(join(markers, item.id)))) {
+        if (Date.now() > deadline || child.exitCode !== null)
+          throw new Error(`The crashing run never started its cases: ${childErrors.trim()}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      child.kill("SIGKILL");
+    }
+    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    const startsOf = (caseId: string) =>
+      f.requests.filter((r) => r.path === `/experiments/${exp.id}/items/${caseId}/start`);
+    expect(startsOf(world.id)).toHaveLength(1);
+    expect(startsOf(direct.id)).toHaveLength(1);
+    return { exp, checkpointDirectory, direct, world, startsOf };
+  }
+  /** Resumes a crashed run with the World-only predicate, collecting the cases whose target ran. */
+  function recovery(f: ReturnType<typeof fixture>, run: Awaited<ReturnType<typeof crashedRun>>) {
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "recover",
+      captureContent: false,
+    });
+    const targets: string[] = [];
+    const recover = () =>
+      runExperiment({
+        client: f.client,
+        hue,
+        experimentId: run.exp.id,
+        checkpointDirectory: run.checkpointDirectory,
+        persistResultContent: true,
+        traceEvidence: { mode: "required" },
+        // Only a case that gets a fresh World reruns; a direct case's agent may still be acting.
+        rerunCrashedCases: (item) => Boolean(item.environmentVersionId),
+        target: (_inputs, context) => {
+          targets.push(context.item.id);
+          return "recovered";
+        },
+      }).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+    return { hue, targets, recover };
+  }
+  /** The World case ran again as a new attempt after its dead one; the direct case did not run
+   * and is reported uncertain, as a resume without the option reports both. */
+  function expectWorldRerun(
+    f: ReturnType<typeof fixture>,
+    run: Awaited<ReturnType<typeof crashedRun>>,
+    targets: string[],
+    resumed: unknown,
+  ) {
+    expect(targets).toEqual([run.world.id]);
+    const retried = run.startsOf(run.world.id);
+    expect(retried).toHaveLength(2);
+    expect(retried[1]!.body.previousExecutionId).toBe(
+      [...f.executions.values()].find((execution) => execution.caseId === run.world.id)!.id,
+    );
+    expect(run.startsOf(run.direct.id)).toHaveLength(1);
+    const failures = resumed instanceof AggregateError ? resumed.errors : [resumed];
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toBeInstanceOf(UncertainExecutionError);
+    expect((failures[0] as UncertainExecutionError).caseId).toBe(run.direct.id);
+  }
+  test("a reclaimed checkpoint reruns a crashed World case as a fresh attempt and keeps a crashed direct case uncertain", async () => {
+    const f = fixture();
+    const run = await crashedRun(f);
+    const { hue, targets, recover } = recovery(f, run);
+    try {
+      // The first resume reclaims the lock, but its read of the first case fails and, as Hue's
+      // refusal is systemic, the run stops before the World case: both crashes were recorded on
+      // reclaiming, so the next resume, holding no reclaimed lock, still decides from them.
+      f.failCaseRead();
+      expect(await recover()).toBeInstanceOf(HueApiError);
+      expect(targets).toEqual([]);
+      expect(run.startsOf(run.world.id)).toHaveLength(1);
+      expectWorldRerun(f, run, targets, await recover());
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  }, 60_000);
+  test("a crash sweep the reclaiming run could not finish is finished by the next run", async () => {
+    const f = fixture();
+    const run = await crashedRun(f);
+    const { hue, targets, recover } = recovery(f, run);
+    try {
+      // As a run that reclaimed the lock and recorded the sweep, then failed before marking any
+      // case and released the lock, leaves things: no dead lock to reclaim, the record pending.
+      await rm(join(run.checkpointDirectory, ".lock"), { recursive: true, force: true });
+      const pending = { pending: true };
+      await writeFile(
+        join(run.checkpointDirectory, "crash-sweep.json"),
+        JSON.stringify({ value: pending, digest: checkpointDigest(pending) }),
+        { mode: 0o600 },
+      );
+      expectWorldRerun(f, run, targets, await recover());
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  }, 60_000);
   test("exclusive checkpoint ownership prevents concurrent duplicate target execution", async () => {
     const f = fixture();
     const exp = f.create();
