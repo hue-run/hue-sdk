@@ -21,6 +21,7 @@ import {
   pinRequestedAttemptV2,
   requestedAttemptV2,
   runEnvironmentTarget,
+  type EnvironmentTargetContext,
 } from "./environment-target.js";
 import { runExperiment, type RunnerReport, type TelemetryNotAccepted } from "./runner.js";
 import type {
@@ -708,6 +709,32 @@ async function resolveExperiment(
 
 let scenarioDeprecationWarned = false;
 
+/** The candidate-visible context of a world case, cloned from the environment target's: the
+ * frozen case's identity alone, never its expected outcome, metadata or source pins. */
+export function simulationTargetContext(
+  context: EnvironmentTargetContext,
+): SimulationTargetContext {
+  return {
+    config: structuredClone(context.config),
+    item: { id: context.item.id, externalKey: context.item.externalKey },
+    executionId: context.executionId,
+    environmentRunId: context.environmentRunId,
+    tools: context.tools,
+    ...(context.world ? { world: structuredClone(context.world) } : {}),
+    ...(context.mcp
+      ? {
+          mcp: { url: context.mcp.url, token: context.mcp.token, expiresAt: context.mcp.expiresAt },
+        }
+      : {}),
+    ...(context.connectionBundle
+      ? { connectionBundle: structuredClone(context.connectionBundle) }
+      : {}),
+    files: structuredClone(context.files),
+    outputDirectory: context.outputDirectory,
+    signal: context.signal,
+  };
+}
+
 /** Run an existing agent callback against one fresh hosted world per case. The helper
  * owns immutable resolution, execution linkage, finalization, scoring and resumable uploads.
  */
@@ -842,32 +869,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
               caseId: context.item.id,
             }),
           target: (targetInputs, targetContext) =>
-            options.target(structuredClone(targetInputs), {
-              config: structuredClone(targetContext.config),
-              item: {
-                id: targetContext.item.id,
-                externalKey: targetContext.item.externalKey,
-              },
-              executionId: targetContext.executionId,
-              environmentRunId: targetContext.environmentRunId,
-              tools: targetContext.tools,
-              ...(targetContext.world ? { world: structuredClone(targetContext.world) } : {}),
-              ...(targetContext.mcp
-                ? {
-                    mcp: {
-                      url: targetContext.mcp.url,
-                      token: targetContext.mcp.token,
-                      expiresAt: targetContext.mcp.expiresAt,
-                    },
-                  }
-                : {}),
-              ...(targetContext.connectionBundle
-                ? { connectionBundle: structuredClone(targetContext.connectionBundle) }
-                : {}),
-              files: structuredClone(targetContext.files),
-              outputDirectory: targetContext.outputDirectory,
-              signal: targetContext.signal,
-            }),
+            options.target(structuredClone(targetInputs), simulationTargetContext(targetContext)),
         }),
     });
     const complete: SimulationReport = { ...report, experimentId, runUrl };

@@ -2424,7 +2424,7 @@ describe("hue eval", () => {
   );
 
   test(
-    "a set mixing world and answer-only cases is refused before a run exists",
+    "a set mixing world and answer-only cases runs as one mixed run, and --mode simulation over it is refused before a run exists",
     async () => {
       const f = hueStandIn({ answerOnlyCases: 2 });
       const cwd = await workspace();
@@ -2438,17 +2438,37 @@ describe("hue eval", () => {
         f.baseUrl,
       ];
       try {
+        // Left open, the mode is mixed: the world case gets a world, the other two answer alone.
         const checked = await hue([...args, "--check"], { cwd });
-        expect(checked.status).toBe(1);
-        expect(checked.stderr).toContain("2 of the 3 cases pin no world");
+        expect(checked.status).toBe(0);
+        expect(checked.stdout).toContain(
+          "Mode: mixed; 1 case gets a fresh world, reached through the HUE_SIM_*_URL mirrors and HUE_WORLD_TOKEN, and 2 cases answer without one",
+        );
         const json = await hue([...args, "--check", "--json"], { cwd });
-        expect(json.status).toBe(1);
+        expect(json.status).toBe(0);
         expect(JSON.parse(json.stdout).check).toMatchObject({
+          ok: true,
+          selection: { cases: 3 },
+          mode: "mixed",
+          worldCases: 1,
+          directCases: 2,
+        });
+        // Forced to a simulation, the answer-only cases would fail before any agent starts.
+        const simulation = [...args, "--mode", "simulation"];
+        const refused = await hue([...simulation, "--check"], { cwd });
+        expect(refused.status).toBe(1);
+        expect(refused.stderr).toContain("2 of the 3 cases pin no world");
+        expect(refused.stderr).toContain("Drop --mode simulation");
+        const refusedJson = await hue([...simulation, "--check", "--json"], { cwd });
+        expect(refusedJson.status).toBe(1);
+        expect(JSON.parse(refusedJson.stdout).check).toMatchObject({
           ok: false,
           selection: { cases: 3 },
+          mode: "simulation",
           worldCases: 1,
+          directCases: 2,
         });
-        const run = await hue(args, { cwd });
+        const run = await hue(simulation, { cwd });
         expect(run.status).toBe(1);
         expect(run.stderr).toContain("2 of the 3 cases pin no world");
         expect(f.experiments.size).toBe(0);
