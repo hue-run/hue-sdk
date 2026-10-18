@@ -634,7 +634,7 @@ describe("hue traces import prepare", () => {
     expect(atif.origin).toBe("unknown");
     const atifSpans = await spansOf(report.output_directory, manifest, atif.trace_id);
     expect(atifSpans.map((span) => span.name)).toEqual([
-      "invoke_agent auctor",
+      "invoke_agent support-agent",
       "chat",
       "lookup_order",
       "delegate",
@@ -658,7 +658,7 @@ describe("hue traces import prepare", () => {
     expect(subagent!.parentSpanId).toBe(delegate!.spanId);
     expect(str(subagent!, "hue.agent.role")).toBe("subagent");
     expect(subStep!.parentSpanId).toBe(subagent!.spanId);
-    expect(str(atifRoot!, "hue.import.format")).toBe("auctor.atif");
+    expect(str(atifRoot!, "hue.import.format")).toBe("atif");
     expect(str(atifRoot!, "hue.agent.role")).toBe("orchestrator");
     expect(str(atifRoot!, "hue.import.source_record_scope")).toBe(
       "export_without_embedded_subagents",
@@ -666,7 +666,13 @@ describe("hue traces import prepare", () => {
     expect(attr(atifRoot!, "gen_ai.usage.input_tokens")).toEqual({ intValue: "250" });
     expect(str(step3!, "hue.import.source_index")).toBeUndefined();
     expect(attr(step3!, "hue.import.source_index")).toEqual({ intValue: "2" });
-    expect(atifSpans[0]!.scope).toBe("hue.auctor.atif-import");
+    expect(atifSpans[0]!.scope).toBe("hue.import.atif");
+    // No producer's name in any span name, format label or scope.
+    for (const span of atifSpans) {
+      expect(span.name).not.toMatch(/auctor/i);
+      expect(span.scope).not.toMatch(/auctor/i);
+      expect(str(span, "hue.import.format") ?? "").not.toMatch(/auctor/i);
+    }
     expect(atifSpans.at(-1)!.attributes).toEqual([
       { key: "user.id", value: { stringValue: "user-9" } },
     ]);

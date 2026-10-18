@@ -8,6 +8,19 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.20.5] - 2026-10-18
+
+#### Fixed
+
+- **Wire** `hue traces import prepare` names a trace converted from ATIF, the Agent Trajectory
+  Interchange Format, by the format alone: its spans carry `hue.import.format` `atif` under the
+  instrumentation scope `hue.import.atif`, and the run's agent span is `invoke_agent <agent.name>`
+  from the export's own `agent.name` (`invoke_agent` when it names none). 0.20.2 through 0.20.4
+  wrote one producer's name into all three. The conversion's identity seed changes with the
+  label, so the trace and span ids derived from an ATIF export differ from the ids those versions
+  derived: prepare such a bundle again before uploading it, and do not mix bundles prepared by
+  both. `gen_ai.agent.name` and `service.name` are unchanged; they already come from the export.
+
 ### [0.20.4] - 2026-10-18
 
 #### Added
@@ -2251,6 +2264,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.6 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.5`.
 - 0.8.5 (2026-10-18): the rule for other workflows no longer asks before every write to a Hue project, matching the Hue MCP server, which dropped its blanket write confirmation; its other rules are unchanged. The TypeScript installation command pins `@hue-run/sdk@0.20.4`.
 - 0.8.4 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.3`.
 - 0.8.3 (2026-10-18): the installation commands pin `@hue-run/sdk@0.20.2` and `hue-run==0.13.2`.
