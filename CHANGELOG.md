@@ -23,6 +23,9 @@ refuses to publish a version without a matching entry below.
 - The World client names, `WorldModelClient` and instance methods are available in this checkout
   and remain unreleased. Canonical clients use the World and instance routes. The environment module
   and its HTTP paths remain supported. The handoff's legacy `worldId` still identifies an instance.
+- World model results and errors expose optional preparation progress. Error responses retain only
+  validated progress fields from a bounded body. Unchanged insufficient-evidence and processing-limit
+  responses stop retries, while ordinary transient failures keep their existing retry behavior.
 
 
 ### [0.19.1] - 2026-10-16
@@ -1546,6 +1549,9 @@ No registry release is claimed until publication and registry acceptance complet
 - The World client names, `WorldModelClient` and instance methods are available in this checkout
   and remain unreleased. Canonical clients use the World and instance routes. The environment module
   and its HTTP paths remain supported. The handoff's legacy `worldId` still identifies an instance.
+- World model results and errors expose optional preparation progress. Error responses retain only
+  validated progress fields from a bounded body. Unchanged insufficient-evidence and processing-limit
+  responses stop retries, while ordinary transient failures keep their existing retry behavior.
 
 
 ### [0.12.1] - 2026-10-16
