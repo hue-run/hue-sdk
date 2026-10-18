@@ -173,7 +173,7 @@ function documentStandIn(
     /** A separately dispatched model judge, with no real provider. */
     hostedJudge?: { pending?: boolean; blocked?: boolean };
     /** Synthetic server-owned verifier program, deliberately unknown to local bindings. */
-    verifierBundle?: boolean;
+    syntheticHostedCode?: boolean;
     /** Accept a judge dispatch, then drop this many response bodies. */
     lostJudgeAcknowledgements?: number;
     /** Fault injected after upload but before the runner returns its completed report. */
@@ -373,11 +373,10 @@ function documentStandIn(
             ...scorerVersions[index]!.definition,
             kind: "hosted_code",
           }) as unknown as ScorerVersion["definition"];
-  if (options.verifierBundle)
+  if (options.syntheticHostedCode)
     scorerVersions[0]!.definition = {
       kind: "hosted_code",
-      program: "verifier_bundle",
-      bundleId: randomUUID(),
+      program: "synthetic_verifier",
       sourceDigest: "a".repeat(64),
       metrics: [{ name: "passed", type: "boolean" }],
     } as unknown as ScorerVersion["definition"];
@@ -1114,9 +1113,9 @@ const inheritedWorld = {
 
 describe("hue eval hosted judge opt-in", () => {
   test(
-    "a hosted verifier bundle is left to Hue without opting into model judges",
+    "an unknown synthetic hosted-code variant is left to Hue without opting into model judges",
     async () => {
-      const standIn = documentStandIn({ verifierBundle: true });
+      const standIn = documentStandIn({ syntheticHostedCode: true });
       const cwd = await mkdtemp(join(tmpdir(), "hue-hosted-verifier-"));
       await writeFile(join(cwd, "agent.mjs"), agentSource);
       try {
