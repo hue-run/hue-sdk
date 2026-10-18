@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:6af623f36a49856aa43e92f68edf9d7ae891b24f4b756525401e38fe584a76d4",
+    "sha256": "sha256:4d6d2e4dabf916ac11445b099f1a4404066fda47b1725658930cba61e97f7975",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -202,7 +202,10 @@
             "WorldModelAccountPage",
             "WorldModelClient",
             "WorldModelPage",
+            "WorldModelProcessing",
             "WorldModelResult",
+            "WorldPreparationProgress",
+            "WorldPreparationState",
             "WorldSealTimeoutError",
             "WorldSurface",
             "agent_environment",
@@ -217,7 +220,7 @@
         }
       },
       "name": "hue-run",
-      "version": "0.13.0"
+      "version": "0.13.1"
     },
     "typescript": {
       "bins": {
@@ -708,7 +711,9 @@
             "WorldModelClient",
             "WorldModelPage",
             "WorldModelPageOptions",
+            "WorldModelProcessing",
             "WorldModelResult",
+            "WorldPreparationProgress",
             "WorldProviderInstance",
             "WorldSurface",
             "WorldTool",
@@ -736,7 +741,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.20.0"
+      "version": "0.20.1"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -745,10 +750,10 @@
     "description": "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.8.0"
+      "version": "0.8.1"
     },
     "name": "hue",
-    "sha256": "sha256:55e0261fbe73ca8f2a42915b11ee806c6daccfa9fe00f1a8a9207f9fc14ccb6f",
+    "sha256": "sha256:e0714cd4ab1c3c5ffbaddc51b31810d24c908774e3d7acf2ee47917dbb30cb7d",
     "source": "skills/hue/SKILL.md"
   }
 }

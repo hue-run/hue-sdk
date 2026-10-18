@@ -1,3 +1,6 @@
+import type { WorldModelProcessing, WorldPreparationProgress } from "./readiness.js";
+export type { WorldModelProcessing, WorldPreparationProgress } from "./readiness.js";
+
 /** Project-scoped identity of the user or entity represented by a World model. */
 export interface WorldEntity {
   /** Identifier namespace, such as the application's user namespace. */
@@ -21,8 +24,10 @@ export interface WorldModel {
   lastUsedAt: string | null;
   /** Committed evidence sequence used for reconstruction. */
   evidenceCutoff: number;
-  /** Publication or erasure state. */
+  /** Legacy retention or erasure state. Read `processing` for current indexing progress. */
   status: "ready" | "preparing" | "erased";
+  /** Retained and indexed progress, when reported by Hue. */
+  processing?: WorldModelProcessing;
 }
 /** One app account bound to a World model. */
 export interface WorldModelAccount {
@@ -53,7 +58,7 @@ export interface StartingWorld {
   evidenceCutoff: number;
   /** Immutable starting-state digest, or null while preparation is incomplete. */
   digest: string | null;
-  /** Publication or erasure state. */
+  /** Starting-state preparation status. */
   status: "ready" | "preparing";
 }
 /** Bounded pagination over World models or their accounts. */
@@ -111,6 +116,8 @@ export interface WorldModelResult {
 export interface StartingWorldResult {
   /** Immutable starting state, or an explicit preparing state. */
   world: StartingWorld;
+  /** Progress of this requested starting World, when reported by Hue. */
+  preparation?: WorldPreparationProgress;
 }
 /** Acknowledgement that the World model has been erased. */
 export interface ErasedWorldModel {

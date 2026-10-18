@@ -8,6 +8,20 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.20.1] - 2026-10-18
+
+#### Added
+
+- `WorldClient.createWorld`, `listWorlds` and `getWorld` provide canonical registry method names.
+  Existing environment methods and routes remain supported.
+- World model results and errors expose optional typed processing and preparation progress.
+
+#### Fixed
+
+- World model errors retain only validated progress fields from at most 16 KiB of response data.
+  Insufficient-evidence and processing-limit diagnostics stop unchanged retries. Ordinary transient
+  failures keep their existing retry behavior.
+
 ### [0.20.0] - 2026-10-18
 
 #### Changed
@@ -1546,6 +1560,18 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
+### [0.13.1] - 2026-10-18
+
+#### Added
+
+- World model results and errors expose optional typed processing and preparation progress.
+
+#### Fixed
+
+- World model errors retain only validated progress fields from at most 16 KiB of response data.
+  Insufficient-evidence and processing-limit diagnostics stop unchanged retries. Ordinary transient
+  failures keep their existing retry behavior.
+
 ### [0.13.0] - 2026-10-18
 
 #### Changed
@@ -2180,6 +2206,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.1 (2026-10-18): pin current install commands to TypeScript `@hue-run/sdk@0.20.1` and Python `hue-run==0.13.1`; retain the tracing guidance and documentation routing from 0.8.0.
 - 0.8.0 (2026-10-18): the skill centers on SDK work: choosing the integration, preserving the application's provider, framework, prompts, behavior, exporters and redaction, instrumenting request, model and tool spans with real content and streaming lifetimes, content and media capture, and verifying stored spans and content with a separate check for uploaded media. Production investigation, MCP setup, classifiers, cases from traces, Worlds and evaluations become routing links to their docs.hue.run pages, which own those procedures; the duplicated case, eval-ready and evaluation procedures, case tiers and the mirrors' release-state note are removed. The key section tells an agent arriving from the agent setup page to return there after **Verify delivery** instead of starting it again and tells a user without an account that one is required, with no contact address or booking link, the install commands pin `@hue-run/sdk@0.20.0` (saved exactly) and `hue-run==0.13.0`, and setup test runs added AI SDK 6 `consumeStream()` and Python `GeneratorExit` streaming guidance, redaction notes for wrapping processors, user and session IDs and file bytes, and where verification's span IDs come from.
 - 0.7.8 (2026-10-18): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.20.0`. The registry availability check before installation is unchanged.
 - 0.7.7 (2026-10-16): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.19.1` instead of 0.19.0. The registry availability check before installation is unchanged.

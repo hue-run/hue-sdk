@@ -13,8 +13,9 @@ Your agent runs in your process while a disposable simulated world runs in Hue. 
 authoritative and records an ordered journal; Hue does not execute your agent code or provider
 credentials.
 
-A World is a reconstructed starting state. An instance is an isolated running copy of that
-state. Starting another instance does not share the first instance's changes. The handoff's
+A World model is retained entity history. A World is a reconstructed starting state. A World
+instance is an isolated running copy of that state. Starting another World instance does not
+share the first World instance's changes. The handoff's
 legacy `worldId` field identifies the runtime instance, not a durable World model.
 
 ## Reconstruct a user's World
@@ -51,6 +52,14 @@ Materialization, instance creation and reproduction wait up to two minutes when 
 reports that the World is preparing. Retries preserve the same request bytes and identity.
 Other failures keep the client's `maxAttempts` limit. Pass `{ signal }` as the last options
 argument to cancel a preparation wait or an active request.
+
+When the service reports preparation progress, `worldModel.processing` distinguishes retained
+evidence from indexed evidence. A start's `preparation` also includes the selected evidence
+cutoff. `HueWorldError.preparation` exposes the same bounded progress on a preparation refusal.
+Insufficient evidence and processing limits stop identical retries. Useful later evidence or an
+interpreter update can prepare the same unfinished request automatically. Retrying its original
+idempotency key starts the first usable World selected for that request. Preparation requires no
+review or publish action.
 
 `listModels` and `listAccounts` accept `after` and `limit` for pagination. Use each account's
 `providerInstanceKey` to distinguish connections, including several accounts for one app.
@@ -112,7 +121,9 @@ OAuth tokens or provider credentials in these fields.
 
 ## Publish an authored World
 
-`createWorldClient` also publishes authored definitions and starts instances from their
+`createWorldClient` uses `createWorld`, `listWorlds` and `getWorld` for World identities.
+The compatibility names `createEnvironment`, `listEnvironments` and `getEnvironment` remain
+available. The client also publishes authored definitions and starts World instances from their
 immutable versions. Use `WorldDefinitionV2` and `WorldProviderInstance` for arbitrary registered
 apps and multiple accounts of the same app. The deployment validates each app's JSON
 configuration and supported dialects.

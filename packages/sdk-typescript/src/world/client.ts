@@ -1,3 +1,8 @@
+import {
+  readWorldPreparation,
+  TERMINAL_WORLD_DIAGNOSTICS,
+  type WorldPreparationProgress,
+} from "./readiness.js";
 import { validateOptions } from "../config.js";
 import { aggregateBounds, json, uuid, valueBounds, type JsonBounds } from "../evals/json.js";
 import type {
@@ -46,6 +51,8 @@ export class HueEnvironmentError extends Error {
     readonly retryAfterMs?: number,
     /** The server's `X-Hue-Diagnostic` code, when it is a short snake-case value. */
     readonly diagnostic?: string,
+    /** Bounded, sanitized progress for a World preparation refusal. */
+    readonly preparation?: WorldPreparationProgress,
   ) {
     super(
       status
@@ -74,7 +81,8 @@ const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
 export function isTransientEnvironmentError(error: unknown): boolean {
   return (
     error instanceof HueEnvironmentError &&
-    (error.status === undefined || RETRYABLE.has(error.status))
+    (error.status === undefined || RETRYABLE.has(error.status)) &&
+    !(error.status === 503 && TERMINAL_WORLD_DIAGNOSTICS.has(error.diagnostic ?? ""))
   );
 }
 /** A `Retry-After` longer than this waits this long: Hue asks for a second, never minutes. */
@@ -103,7 +111,7 @@ const REQUEST_BOUNDS: JsonBounds = { ...valueBounds, bytes: 1024 * 1024 };
  */
 const ENVIRONMENT_PUBLICATION_BOUNDS = aggregateBounds(240_000 + 32);
 
-/** Typed client for authored environments, isolated runs and immutable journals. */
+/** Typed client for authored Worlds, isolated World instances and immutable journals. */
 export class WorldClient {
   /** Validated Hue origin. */
   readonly baseUrl: string;
@@ -156,11 +164,13 @@ export class WorldClient {
       throw new HueEnvironmentError();
     }
     if (!response.ok) {
-      await response.body?.cancel();
+      const diagnostic = diagnosticOf(response);
+      const preparation = await readWorldPreparation(response, diagnostic);
       throw new HueEnvironmentError(
         response.status,
         response.status === 429 || response.status === 503 ? retryAfterMillis(response) : undefined,
-        diagnosticOf(response),
+        diagnostic,
+        preparation,
       );
     }
     try {
@@ -318,6 +328,19 @@ export class WorldClient {
   /** Completes or abandons one instance and freezes its evidence. */
   finishInstance(instanceId: string, input: FinishRunInput) {
     return this.finishRun(instanceId, input);
+  }
+
+  /** Creates a World identity using the client's resource routes. */
+  createWorld(input: EnvironmentIdentity) {
+    return this.createEnvironment(input);
+  }
+  /** Lists active Worlds. */
+  listWorlds(page?: EnvironmentPageOptions) {
+    return this.listEnvironments(page);
+  }
+  /** Reads a World and its immutable version summaries. */
+  getWorld(id: string) {
+    return this.getEnvironment(id);
   }
 
   /** Creates an environment identity; this non-idempotent registry write is not retried. */
