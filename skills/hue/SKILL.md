@@ -3,7 +3,7 @@ name: hue
 description: "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction."
 metadata:
   author: hue-run
-  version: "0.8.1"
+  version: "0.8.2"
 ---
 
 # Hue
@@ -144,7 +144,7 @@ These pages own their procedures. Read the page with curl, adding `.md` to its U
 | Evaluate a function in-process or in CI | [Local evaluations](https://docs.hue.run/evaluations/first-evaluation) |
 | Run the agent from Hue against an HTTPS endpoint | [Managed runs](https://docs.hue.run/evaluations/managed-runs) |
 
-The same rules apply there: ask before every write to a Hue project, never hand the agent Hue-native tools or tools its production version lacks, and never put Hue URLs, world tokens or keys in production configuration.
+The same rules apply there: ask before every write to a Hue project, never hand the agent Hue-native tools or tools its production version lacks, and never put evaluation-only values in production configuration: mirror URLs (`HUE_SIM_*`), world tokens (`HUE_WORLD_TOKEN`), `HUE_MCP_*` values or the development **Read and write** key. A production server sends traces with its own **Tracing only** key.
 
 ## Troubleshooting
 
