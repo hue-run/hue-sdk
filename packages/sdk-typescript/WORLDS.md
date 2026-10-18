@@ -113,7 +113,9 @@ OAuth tokens or provider credentials in these fields.
 
 ## Publish an authored World
 
-`createWorldClient` also publishes authored definitions and starts instances from their
+`createWorldClient` uses `createWorld`, `listWorlds` and `getWorld` for World identities.
+The compatibility names `createEnvironment`, `listEnvironments` and `getEnvironment` remain
+available. The client also publishes authored definitions and starts World instances from their
 immutable versions. Use `WorldDefinitionV2` and `WorldProviderInstance` for arbitrary registered
 apps and multiple accounts of the same app. The deployment validates each app's JSON
 configuration and supported dialects.

@@ -320,6 +320,19 @@ export class WorldClient {
     return this.finishRun(instanceId, input);
   }
 
+  /** Creates a World identity using the client's resource routes. */
+  createWorld(input: EnvironmentIdentity) {
+    return this.createEnvironment(input);
+  }
+  /** Lists active Worlds. */
+  listWorlds(page?: EnvironmentPageOptions) {
+    return this.listEnvironments(page);
+  }
+  /** Reads a World and its immutable version summaries. */
+  getWorld(id: string) {
+    return this.getEnvironment(id);
+  }
+
   /** Creates an environment identity; this non-idempotent registry write is not retried. */
   createEnvironment(input: EnvironmentIdentity) {
     return this.requestOnce<EnvironmentSummary>("POST", "/environments", input);

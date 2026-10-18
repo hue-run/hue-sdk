@@ -3,6 +3,59 @@ import { randomUUID } from "node:crypto";
 import { createEnvironmentClient, HueEnvironmentError } from "../src/environment.js";
 import { createWorldClient, HueWorldError, worldHandoff } from "../src/world.js";
 
+test("World registry aliases preserve payloads, pagination and compatibility routing", async () => {
+  const worldId = randomUUID();
+  const requests: { method: string; path: string; body: unknown }[] = [];
+  const identity = { name: "Inbox", slug: "inbox" };
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      requests.push({
+        method: request.method,
+        path: url.pathname + url.search,
+        body: request.method === "POST" ? await request.json() : null,
+      });
+      return Response.json({ id: worldId, ...identity, versions: [] });
+    },
+  });
+  try {
+    const connection = { apiKey: "synthetic-world-key", baseUrl: server.url.origin };
+    for (const [client, resource] of [
+      [createWorldClient(connection), "worlds"],
+      [createEnvironmentClient(connection), "environments"],
+    ] as const) {
+      expect(await client.createWorld(identity)).toEqual(await client.createEnvironment(identity));
+      expect(await client.listWorlds({ after: worldId, limit: 20 })).toEqual(
+        await client.listEnvironments({ after: worldId, limit: 20 }),
+      );
+      expect(await client.getWorld(worldId)).toEqual(await client.getEnvironment(worldId));
+      expect(requests.splice(0)).toEqual([
+        ...Array.from({ length: 2 }, () => ({
+          method: "POST",
+          path: `/api/v1/${resource}`,
+          body: identity,
+        })),
+        ...Array.from({ length: 2 }, () => ({
+          method: "GET",
+          path: `/api/v1/${resource}?after=${worldId}&limit=20`,
+          body: null,
+        })),
+        ...Array.from({ length: 2 }, () => ({
+          method: "GET",
+          path: `/api/v1/${resource}/${worldId}`,
+          body: null,
+        })),
+      ]);
+      expect(() => client.getWorld("invalid-id")).toThrow();
+      expect(requests).toHaveLength(0);
+    }
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("World and compatibility clients route independently without changing runtime identity", async () => {
   const instanceId = randomUUID();
   const versionId = randomUUID();
