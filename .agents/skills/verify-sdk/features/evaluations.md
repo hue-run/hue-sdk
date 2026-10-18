@@ -23,6 +23,7 @@ Preconditions:
 - Dependencies installed (Launch). The tests start their own loopback evaluation receivers; the stub is not used.
 
 - **TypeScript.** `cd packages/sdk-typescript && bun test tests/evals.test.ts -t "<behavior>"`. The whole file is 42 tests in about 17 s. Related files: `attempt`, `checkpoint-lock`, `files`, `verdicts`, `scorer-publication`, `local-worker`.
+- **Judge budget.** `cd packages/sdk-typescript && bun test tests/evals.test.ts -t "judge budget"`. Expected: `getJudgeBudget()` returns the organization's monthly AI budget (`organizationBudget`) unchanged, `null` when the server has none, and an older server's response without it.
 - **Upload handoff.** `cd packages/sdk-typescript && bun test tests/cli-eval-direct.test.ts -t "hosted judge.*handoff"`. Expected: a failed initial checkpoint write, a failed attempt marker and an interrupted worker acknowledgment resume the original uploaded outputs without invoking the agent again. Uses synthetic loopback receivers.
 - **Python.** `cd packages/sdk-python && uv run --frozen --all-groups pytest tests/test_evaluations.py -q -k product_registry`. Expected: selected tests pass in about 1 s.
 

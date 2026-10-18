@@ -1757,6 +1757,62 @@ describe("installed evaluation API and runner contract", () => {
       server.stop(true);
     }
   });
+  test("the judge budget reads the organization's monthly AI budget and tolerates older servers", async () => {
+    const organizationBudget = {
+      monthlyAllowanceUsd: "500",
+      actualSpendUsd: "12.5",
+      reservedUsd: "0.75",
+      unresolvedUsd: "0.25",
+      unresolvedCalls: 1,
+      remainingUsd: "486.5",
+      periodStart: "2026-10-01",
+      resetsAt: "2026-11-01T00:00:00.000Z",
+      paused: false,
+    };
+    const legacy = {
+      projectId: randomUUID(),
+      configured: true,
+      enabled: true,
+      allowanceMicroUsd: 500_000_000,
+      reservedMicroUsd: 750_000,
+      spentMicroUsd: 12_500_000,
+      maxInFlight: 4,
+      blocked: false,
+    };
+    const responses: object[] = [
+      { ...legacy, organizationAvailableMicroUsd: 486_500_000, organizationBudget },
+      { ...legacy, organizationAvailableMicroUsd: 0, organizationBudget: null },
+      legacy,
+    ];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        expect(new URL(request.url).pathname).toBe("/api/v1/judge-budget");
+        return Response.json(responses.shift());
+      },
+    });
+    const client = createEvaluationClient({ apiKey: key, baseUrl: server.url.origin });
+    try {
+      const current = await client.getJudgeBudget();
+      expect(current.organizationBudget).toEqual(organizationBudget);
+      expect(current.organizationBudget?.remainingUsd).toBe("486.5");
+      expect(current.organizationBudget?.paused).toBe(false);
+      expect(current.organizationAvailableMicroUsd).toBe(486_500_000);
+      expect(current.maxInFlight).toBe(4);
+
+      const unbudgeted = await client.getJudgeBudget();
+      expect(unbudgeted.organizationBudget).toBeNull();
+      expect(unbudgeted.organizationAvailableMicroUsd).toBe(0);
+
+      const older = await client.getJudgeBudget();
+      expect(older).toEqual(legacy);
+      expect(older.organizationBudget).toBeUndefined();
+      expect(older.organizationAvailableMicroUsd).toBeUndefined();
+    } finally {
+      server.stop(true);
+    }
+  });
   test("evaluation requests refuse credential-bearing redirects and sanitize failures", async () => {
     let redirectedHits = 0;
     const target = Bun.serve({
