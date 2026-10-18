@@ -35,7 +35,7 @@ The pstack skills in `.agents/skills/` are not loaded automatically (`disable-mo
 
 ## Before opening a PR
 
-- Keep the change minimal (ponytail), never at the cost of validation, error handling, security or accessibility, and run `/ponytail-review` on the diff where the host supports it.
+- Keep the change minimal (ponytail), never at the cost of validation, error handling, security or accessibility, and run `/ponytail-review` on the diff.
 - Verify the change with the matching `.agents/skills/verify-*` skill (`verify-sdk`, `verify-package`, `verify-examples`) and paste its evidence into the PR: text output by default, one screenshot only for a visible UI change, never a recording. Run the narrowest check the skill names; CI runs the full commands above. The `Verification evidence` check fails a ready PR whose description names no `verify-*` skill or has no pasted output.
 - If the change adds or alters a feature, update that skill's `features/` map (`maintain-verification-skill` for bigger changes) and any affected user-facing docs (`technical-writing`).
 
