@@ -3,7 +3,7 @@ name: hue
 description: "Set up and verify Hue tracing, investigate production traces over the Hue MCP, turn traces into reviewed cases, make an agent eval-ready and run Hue evaluations with hue eval. Use when a developer asks to set up, integrate or troubleshoot Hue or verify that requests reach Hue; asks what needs attention, fails or is slow in production; asks to turn a trace into a case or eval set; asks to make their agent eval-ready or point its Gmail, Slack or other app clients at Hue's simulated worlds; or asks to evaluate, test or regression-test their agent or run Hue evals (hue eval --case, --command or --worker) and read the results. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to evaluate or test their agent. Preserves the application's model provider, framework, OpenTelemetry setup and production behavior."
 metadata:
   author: hue-run
-  version: "0.7.8"
+  version: "0.7.9"
 ---
 
 # Hue
@@ -81,7 +81,7 @@ Use full content capture for setup: `captureContent: true` / `capture_content=Tr
 
 For redaction, read the [redaction recipe](https://docs.hue.run/guides/redaction) and identify the provider and exporter that actually send the records. TypeScript's `redact(value, path)` belongs on `createHue`, or on `createHueTransport` when reusing a provider. Python's `redactor(field, value)` covers Hue helper content, not arbitrary external spans; scrub those at their producer or collector. Configure each exporter separately, including Langfuse when present. Use the recipe's email example as a starting point, adapt it to the application's fields, and verify synthetic exported content plus unchanged application results. Do not promise automatic PII detection or coverage of every field.
 
-Both SDKs strip recognized GenAI, OpenInference, OpenLLMetry, Langfuse and Vercel content attributes at export when capture is disabled (Python requires 0.2.0; Langfuse filtering requires TypeScript `0.13.0` or Python `0.7.0`). Configure the chosen instrumentor's own input/output capture controls to match the chosen policy, because unrecognized custom keys pass through. Direct OTLP requires explicit instrumentor capture settings. Both SDKs' helpers record the exception type (`error.type`) and span status but omit exception messages and stacks even with content capture enabled. Report unsupported or unavailable fields rather than bypassing SDK limits or inventing data.
+Both SDKs strip recognized GenAI, OpenInference, OpenLLMetry, Langfuse and Vercel content attributes at export when capture is disabled (Python requires 0.2.0; Langfuse filtering requires TypeScript `0.13.1` or Python `0.7.0`). Configure the chosen instrumentor's own input/output capture controls to match the chosen policy, because unrecognized custom keys pass through. Direct OTLP requires explicit instrumentor capture settings. Both SDKs' helpers record the exception type (`error.type`) and span status but omit exception messages and stacks even with content capture enabled. Report unsupported or unavailable fields rather than bypassing SDK limits or inventing data.
 
 **Traces that can become cases.** If the user wants evaluations, use Hue SDK transport with `captureContent: true` / `capture_content=True`, and pass MCP server identity (`mcp:`) on tool spans. Case creation refuses a running trace (`running`, retry after it ends), a trace exported without content (`content_not_recorded`), a trace that reached no app Hue simulates (`no_simulated_app`, 422), evidence over 8 MiB, and a trace not recorded by Hue's SDK (`not_hue_sdk`) unless the project accepts generic sources, whose traces then need a full review (`generic_task_unreviewed`).
 
@@ -223,8 +223,8 @@ evaluator, so a missing judge leaves its result inconclusive.
 ## Evaluate a published case
 
 When the user asks to evaluate or regression-test their agent against a published Hue case, or to
-make their agent eval-ready, follow this procedure end to end. Use `@hue-run/sdk` 0.20.0
-(`HUE_WORLD_NOW` needs 0.13.0; `--case` and `--command` are available since 0.12.1). Confirm registry availability before running version-pinned install commands; a source commit is not a release. `hue eval`
+make their agent eval-ready, follow this procedure end to end. Use `@hue-run/sdk` 0.20.1
+(`HUE_WORLD_NOW` needs 0.13.1; `--case` and `--command` are available since 0.12.1). Confirm registry availability before running version-pinned install commands; a source commit is not a release. `hue eval`
 runs on Node.js 22 or 24, also for a Python agent, and the agent itself needs no Hue package.
 Hue never executes the agent: it runs in the user's process. Hue hosts a simulated world when
 the case pins one and grades the execution's output and any sealed world.
@@ -356,8 +356,8 @@ in the codebase's language and trim the functions no call site uses.
    the evaluation from the shell:
 
    ```sh
-   npx -y @hue-run/sdk@0.20.0 eval --case "<name>" --command "<the agent's start command>" --check
-   npx -y @hue-run/sdk@0.20.0 eval --case "<name>" --command "<the agent's start command>"
+   npx -y @hue-run/sdk@0.20.1 eval --case "<name>" --command "<the agent's start command>" --check
+   npx -y @hue-run/sdk@0.20.1 eval --case "<name>" --command "<the agent's start command>"
    ```
 
    Use this CLI rather than a script of your own: don't write a harness, a runner or tool
@@ -421,7 +421,7 @@ in the codebase's language and trim the functions no call site uses.
 7. To let the Run button and `launch_local_run` use this agent, start a worker instead:
 
    ```sh
-   npx -y @hue-run/sdk@0.20.0 eval --worker --command "<the agent's start command>" --revision <new-agent-revision>
+   npx -y @hue-run/sdk@0.20.1 eval --worker --command "<the agent's start command>" --revision <new-agent-revision>
    ```
 
 A worker upgrade from an environment-only registration needs a new `--revision`, because Hue

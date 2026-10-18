@@ -8,6 +8,20 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.20.1] - 2026-10-18
+
+#### Added
+
+- `WorldClient.createWorld`, `listWorlds` and `getWorld` provide canonical registry method names.
+  Existing environment methods and routes remain supported.
+- World model results and errors expose optional typed processing and preparation progress.
+
+#### Fixed
+
+- World model errors retain only validated progress fields from at most 16 KiB of response data.
+  Insufficient-evidence and processing-limit diagnostics stop unchanged retries. Ordinary transient
+  failures keep their existing retry behavior.
+
 ### [0.20.0] - 2026-10-18
 
 #### Changed
@@ -30,9 +44,6 @@ refuses to publish a version without a matching entry below.
 - The World client names, `WorldModelClient` and instance methods use the canonical World,
   World model and instance routes. The environment module
   and its HTTP paths remain supported. The handoff's legacy `worldId` still identifies an instance.
-- World model results and errors expose optional preparation progress. Error responses retain only
-  validated progress fields from a bounded body. Unchanged insufficient-evidence and processing-limit
-  responses stop retries, while ordinary transient failures keep their existing retry behavior.
 
 
 ### [0.19.1] - 2026-10-16
@@ -1549,6 +1560,18 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
+### [0.13.1] - 2026-10-18
+
+#### Added
+
+- World model results and errors expose optional typed processing and preparation progress.
+
+#### Fixed
+
+- World model errors retain only validated progress fields from at most 16 KiB of response data.
+  Insufficient-evidence and processing-limit diagnostics stop unchanged retries. Ordinary transient
+  failures keep their existing retry behavior.
+
 ### [0.13.0] - 2026-10-18
 
 #### Changed
@@ -1564,9 +1587,6 @@ No registry release is claimed until publication and registry acceptance complet
 - The World client names, `WorldModelClient` and instance methods use the canonical World,
   World model and instance routes. The environment module
   and its HTTP paths remain supported. The handoff's legacy `worldId` still identifies an instance.
-- World model results and errors expose optional preparation progress. Error responses retain only
-  validated progress fields from a bounded body. Unchanged insufficient-evidence and processing-limit
-  responses stop retries, while ordinary transient failures keep their existing retry behavior.
 
 
 ### [0.12.1] - 2026-10-16
@@ -2186,6 +2206,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.7.9 (2026-10-18): evaluation commands use `@hue-run/sdk@0.20.1`. The registry availability check before installation is unchanged.
 - 0.7.8 (2026-10-18): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.20.0`. The registry availability check before installation is unchanged.
 - 0.7.7 (2026-10-16): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.19.1` instead of 0.19.0. The registry availability check before installation is unchanged.
 - 0.7.6 (2026-10-16): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.19.0` instead of 0.18.2. The registry availability check before installation is unchanged.
