@@ -8,6 +8,22 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.21.0] - 2026-10-18
+
+#### Breaking
+
+- `hue eval` runs up to four cases concurrently by default in one-shot and worker modes,
+  rather than one. Migration: pass `--concurrency 1` for serial execution. Explicit values
+  from 1 to 100 still take precedence. Case files and environments stay isolated. Existing
+  agent registrations and checkpoints remain compatible with earlier serial runs.
+- `hue eval` requests its run's pinned `llm_judge` evaluators by default after outputs upload.
+  Migration: pass `--no-judges` to keep the previous default. `--judges` remains accepted.
+  `--no-output` skips automatic judge requests, and explicitly combining it with `--judges`
+  remains an error. Preflight, runs without a pinned model judge, and judge creation alone
+  start no model jobs. Interrupted dispatch retains its existing idempotency and recovery.
+  Switching to `--no-judges` or `--no-output` with a pending dispatch stops before another
+  agent run and requires recovery with the original flags.
+
 ### [0.20.6] - 2026-10-18
 
 #### Added

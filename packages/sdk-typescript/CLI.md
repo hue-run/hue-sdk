@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.20.6`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.21.0`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -381,8 +381,8 @@ and Hue never receives or stores them. The command is part of the `hue` executab
 #   LANGFUSE_PUBLIC_KEY=pk-lf-...
 #   LANGFUSE_SECRET_KEY=sk-lf-...
 #   LANGFUSE_BASE_URL=https://cloud.langfuse.com
-npx -y @hue-run/sdk@0.20.6 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.20.6 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.21.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.21.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` come from the environment or `--env-path`
@@ -697,7 +697,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.20.6.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.21.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -708,7 +708,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.20.6.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.21.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -750,10 +750,10 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.20.6 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.20.6 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.20.6 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.20.6 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.21.0 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.21.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.21.0 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.21.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 One invocation creates one run holding every selected case; it prints the run URL
@@ -791,7 +791,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.20.6 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.21.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
@@ -833,21 +833,28 @@ former; a case failed for its telemetry has `state: "error"`,
 Hue-owned `world_outcome` checks are graded after the world seals. An experiment always covers
 every case of the saved version; there is no case subset.
 
-`--judges` requests the run's pinned
-`llm_judge` evaluators after outputs upload, before verdict polling. It is off by default and
-works in direct, simulation and worker modes. Requests use Hue's hosted judge budget;
-Hue applies its admission controls to new jobs. An accepted request remains replayable if the
-budget is later disabled. Cases without stored output are excluded, and combining
-`--judges` with `--no-output` is refused. `--check` creates no judge jobs.
+`hue eval` runs up to four cases at a time by default in one-shot and worker modes.
+`--concurrency 1` runs cases serially. Any explicit `--concurrency` value from 1 to 100 takes precedence.
+Each case keeps its own files, environment and checkpoint.
 
-With `--judges --wait 0`, the CLI requests the jobs and returns their current verdict state;
+The CLI requests the run's pinned `llm_judge` evaluators by default after outputs upload,
+before verdict polling, in direct, simulation and worker modes. `--no-judges` skips these requests;
+`--judges` remains accepted for existing commands. Requests use Hue's hosted judge budget;
+Hue applies its admission controls to new jobs. An accepted request remains replayable if the
+budget is later disabled. Cases without stored output are excluded. `--no-output` skips judge
+requests, and explicitly combining `--judges` with `--no-output` is refused. Without a pinned
+`llm_judge`, the CLI requests no model jobs. Creating a judge alone does not start one.
+`--check` creates no judge jobs.
+
+With `--wait 0`, the CLI requests the jobs and returns their current verdict state;
 pending jobs continue in Hue. Uploaded outputs are checkpointed before the attempt or worker
 queue is marked completed. If this handoff or dispatch fails, or its acknowledgement is lost,
 rerun the unchanged command with the same checkpoint directory. The CLI resumes judging the uploaded
-outputs without invoking the agent, using the same idempotency keys. After dispatch succeeds,
+outputs without invoking the agent, using the same idempotency keys. Changing to `--no-judges`
+or `--no-output` while that handoff is pending stops before a new agent run. After dispatch succeeds,
 the next ordinary invocation starts a new run as usual.
 
-`--worker --judges` discards cancelled or released handoffs. Once judge requests succeed, a
+`--worker` discards cancelled or released judge handoffs. Once judge requests succeed, a
 verdict-read failure is logged and the worker keeps accepting runs.
 
 `--command "<shell command>"` spawns the command once per case with the world's environment
