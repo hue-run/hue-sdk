@@ -430,17 +430,25 @@ without a parent are its children, and it lasts from the earliest of its timesta
 to their last end. Spans carry `service.name` `langfuse` (`--service-name` sets another) and the
 instrumentation scope `@hue-run/sdk/import/langfuse`.
 
+**Environment and Worlds.** A span whose observation, or v1 trace, records an environment also
+carries it as recorded in `hue.import.source_environment`, which marks the trace as imported; one
+that records none carries neither attribute, and the resource never declares
+`deployment.environment.name`, since one import can mix environments. A trace adds to its user's
+World only when Langfuse recorded it in its `production` environment: Hue reads the root's
+`langfuse.environment` as the trace's deployment environment, and never takes an imported trace in
+which any span names another environment, such as Langfuse's `default`, as production history.
+
 **Ids and resuming.** A Langfuse id that already is an OpenTelemetry id (32 lowercase hex digits for
 a trace, 16 for an observation, as Langfuse's OpenTelemetry SDKs write them) is kept; any other id,
 such as an older SDK's UUID, becomes one derived from it with SHA-256. The original ids are kept as
 `langfuse.trace.id` and `langfuse.observation.id`. Running the same command again sends the same
 spans, and Hue keeps one copy of an exact replay of a completed span, so an interrupted or partly
 failed import is resumed by running it again. Hue refuses a different payload for a span it already
-holds: keep `--media`, `--no-content` and `--service-name` the same when resuming, and expect a span
-whose Langfuse data changed after it was imported to be refused. For the same reason the import
-sends nothing that depends on the run: a trace's root never carries `hue.sdk.dropped_records`, and
-files and large values are stored before their span is sent. Leave out of the window any traces that
-already reached Hue through OpenTelemetry.
+holds: keep `--media`, `--no-content`, `--service-name` and the SDK version the same when
+resuming, and expect a span whose Langfuse data changed after it was imported to be refused. For
+the same reason the import sends nothing that depends on the run: a trace's root never carries
+`hue.sdk.dropped_records`, and files and large values are stored before their span is sent. Leave
+out of the window any traces that already reached Hue through OpenTelemetry.
 
 **Export and content.** Spans go through the SDK's own exporter, as `createHue` sends them: batched,
 compressed, retried and within the limits Hue advertises. Before a span is sent, its content is

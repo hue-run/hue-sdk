@@ -589,6 +589,60 @@ describe("hue import langfuse through the v2 API", () => {
     expect(result.stdout + result.stderr).not.toContain(HUE_KEY);
   });
 
+  test("stamps each span with Langfuse's environment as recorded, never a default", async () => {
+    // A trace in Langfuse's default environment, beside production trace A and trace B, which
+    // records no environment.
+    const DEFAULT_TRACE = "3333333333333333333333333333333e";
+    const lf = langfuse({
+      v2: [
+        ...v2Data().filter((row) => row.traceId === TRACE_A || row.traceId === TRACE_B),
+        {
+          id: "e1e2e3e4e5e6e7e8",
+          traceId: DEFAULT_TRACE,
+          type: "SPAN",
+          name: "playground",
+          startTime: "2026-03-10T00:00:00.000Z",
+          endTime: "2026-03-10T00:00:02.000Z",
+          parentObservationId: null,
+          environment: "default",
+        },
+        {
+          id: "f1f2f3f4f5f6f7f8",
+          traceId: DEFAULT_TRACE,
+          type: "GENERATION",
+          name: "draft",
+          startTime: "2026-03-10T00:00:01.000Z",
+          endTime: "2026-03-10T00:00:02.000Z",
+          parentObservationId: "e1e2e3e4e5e6e7e8",
+          environment: "default",
+        },
+      ],
+    });
+    const target = hue();
+    const result = await run(
+      ["langfuse", "--from", "2026-03-01", "--to", "2026-03-31T00:00:00Z", "--yes"],
+      environment(lf.url, target.url),
+    );
+    expect(result.code).toBe(0);
+    const spansOf = (traceId: string) => target.all().filter((span) => span.traceId === traceId);
+    const stamped = (traceId: string) =>
+      spansOf(traceId).map((span) => [
+        str(span, "hue.import.source_environment"),
+        str(span, "langfuse.environment"),
+      ]);
+    // Every span of the production trace declares it, as Hue's World capture reads each one.
+    expect(stamped(TRACE_A)).toEqual(Array(3).fill(["production", "production"]));
+    // Langfuse's default environment is copied as recorded, never taken for production.
+    expect(stamped(DEFAULT_TRACE)).toEqual(Array(2).fill(["default", "default"]));
+    // An absent environment stays absent: neither attribute.
+    expect(stamped(hueTraceId(TRACE_B))).toEqual(Array(2).fill([undefined, undefined]));
+    // The resource declares no deployment environment, since one import can mix them.
+    for (const span of target.all())
+      expect(span.resource?.some((item) => item.key.startsWith("deployment.environment"))).toBe(
+        false,
+      );
+  });
+
   test("--limit imports the newest traces only", async () => {
     const lf = langfuse({ v2: v2Data() });
     const target = hue();
@@ -671,6 +725,8 @@ describe("hue import langfuse through the v2 API", () => {
     ).toBeUndefined();
     expect(str(generation, "langfuse.observation.model.name")).toBe("gpt-4.1-mini");
     expect(str(target.span(TRACE_A, ROOT_A)!, "langfuse.observation.metadata.channel")).toBe("web");
+    // Import provenance is metadata, kept without content.
+    expect(str(generation, "hue.import.source_environment")).toBe("production");
   });
 
   test("traces whose spans Hue refused are named, and the exit code says so", async () => {
@@ -1356,6 +1412,10 @@ describe("hue import langfuse through the v1 API", () => {
     expect(str(top, "langfuse.trace.metadata.flags")).toBe('{"beta":true}');
     expect(attr(top, "langfuse.trace.public")?.boolValue).toBe(false);
     expect(str(top, "langfuse.version")).toBe("3");
+    // The trace's environment is stamped on its own span as recorded; its observations record
+    // none, so they carry none.
+    expect(str(top, "langfuse.environment")).toBe("default");
+    expect(str(top, "hue.import.source_environment")).toBe("default");
     // The trace's span covers its observations, from the earliest start to the last end.
     expect(top.startTimeUnixNano).toBe("1772539199900000000");
     expect(top.endTimeUnixNano).toBe("1772539204000000000");
@@ -1365,6 +1425,7 @@ describe("hue import langfuse through the v1 API", () => {
     expect(str(handle, "langfuse.observation.metadata.step")).toBe("1");
     expect(str(handle, "langfuse.trace.name")).toBe("checkout");
     expect(str(handle, "langfuse.user.id")).toBe("user-9");
+    expect(str(handle, "hue.import.source_environment")).toBeUndefined();
     const llm = target.span(traceId, hueSpanId(TRACE, "obs-llm"))!;
     expect(llm.parentSpanId).toBe(handle.spanId);
     expect(attr(llm, "gen_ai.usage.input_tokens")?.intValue).toBe("10");
