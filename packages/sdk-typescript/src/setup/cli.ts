@@ -55,6 +55,13 @@ const extensions = new Map<string, () => Promise<number>>([
         process.argv.slice(3),
       ),
   ],
+  [
+    "traces",
+    async () =>
+      (await loadCommand("traces", () => import("../cli/traces-import.js"))).runTracesCommand(
+        process.argv.slice(3),
+      ),
+  ],
 ]);
 
 function writeEvent(event: SetupEvent, mode: SetupOutputMode, width: number): void {
@@ -97,7 +104,7 @@ async function main(): Promise<number> {
   } catch {
     if (!agentRequested) {
       process.stderr.write(
-        "Usage: hue <setup|resume|status|claim|login|eval|mcp|listen|import> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
+        "Usage: hue <setup|resume|status|claim|login|eval|mcp|listen|import|traces> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
       );
       return 2;
     }
@@ -130,7 +137,7 @@ async function main(): Promise<number> {
       return 2;
     }
     process.stdout.write(
-      "Usage: hue <setup|resume|status|claim|login|eval|mcp|listen|import> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
+      "Usage: hue <setup|resume|status|claim|login|eval|mcp|listen|import|traces> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
     );
     return 0;
   }
@@ -166,7 +173,7 @@ async function main(): Promise<number> {
       process.stdout.write(`${renderJsonlEvent(event)}\n`);
     } else
       process.stderr.write(
-        "Usage: hue <setup|resume|status|claim|login|eval|mcp|listen|import> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
+        "Usage: hue <setup|resume|status|claim|login|eval|mcp|listen|import|traces> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
       );
     return 2;
   }

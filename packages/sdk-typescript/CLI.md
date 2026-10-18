@@ -115,6 +115,8 @@ hue login                 # validate keys created in Hue and store them in ./.en
 hue mcp install --client claude-code # write the Hue MCP configuration for a coding agent
 hue listen --subscription <id> --forward-to http://localhost:3000/slack/events # deliver events to a local bot
 hue import langfuse --from 2026-01-01 --dry-run # count a Langfuse project's traces, then import them
+hue traces import prepare ./exports --out ./exports.hue-import --json # convert exports into a bundle
+hue traces import upload ./exports.hue-import --authorization-file ./authorization.json --json # deliver it
 ```
 
 Hosted setup accepts HTTPS origins only. HTTP is accepted solely for `localhost`, `127.0.0.1` and
@@ -490,6 +492,97 @@ reading, sends what was read and exits `130`; a second Ctrl+C a second or more l
 once, abandoning exports still in flight for the next run to send. Exit codes: `0` every selected
 trace was imported, `1` a trace, span or file was not (or a key was refused), `2` usage error, `130`
 stopped.
+
+## Import a bundle of existing traces
+
+`hue traces import` brings historical traces into Hue from exports you already hold: OTLP/JSON
+trace exports (a `{"resourceSpans": […]}` document, a list of them, or one per line), complete
+Langfuse observation exports (the `data` or native `observations` envelope) and text ATIF v1.7 and
+v1.8 exports, embedded subagents included. It needs no project key. `prepare` runs on the machine
+that holds the exports and sends nothing; a Hue MCP connection then authorizes the delivery
+(`prepare_trace_import`); `upload` delivers the bundle with that authorization, and
+`get_trace_import` reports what arrived. The import routes the helper talks to arrive with a
+forthcoming Hue release.
+
+```sh
+npx -y @hue-run/sdk@latest traces import prepare ./exports --out ./exports.hue-import --json
+npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authorization-file ./authorization.json --json
+```
+
+**Prepare.** `prepare <path>` reads a file, a directory tree or a ZIP archive (members are inflated
+in memory; encrypted members, unsafe paths and nested archives are listed, not read) and
+recognizes each file by its content, never by its name. Every trace becomes gzip OTLP/JSON batches
+of at most 3 MiB decoded and 900 KiB on the wire, written to `--out` (default `<path>.hue-import`,
+created with mode 0700) beside `manifest.json`, which declares each trace's id, span count, batches
+(by the SHA-256 of each gzip body), large values, history owner and origin. A text value over 1 MiB
+is stored as a value of its own and listed in `hue.blobs`, as the exporter lists the values it
+uploads. OTLP spans are kept as recorded; a trace or span id that is not an OpenTelemetry id (an
+exporter's UUID, for example) is mapped to one derived from it by SHA-256, with the original kept
+as `hue.import.original_trace_id` or `hue.import.original_span_id`. A Langfuse observation becomes
+one span keeping its whole record (`hue.import.source_record`) beside the `langfuse.*` and GenAI
+attributes Hue reads; an id that is no OpenTelemetry id is mapped as `hue import langfuse` maps it,
+so an export and a live import of the same trace agree. An ATIF export becomes one trace: an agent
+span for the run, a model span per agent step with the conversation so far, a tool span per call,
+each embedded subagent as its own agent span under the call that spawned it, and the export's
+`extra.user_id` as the trace's `user.id`. ATIF records instants, not durations, so model and tool
+spans are points in time, and a tool's result is kept as text with no error status of the
+importer's making. The same trace in two files is one trace when the copies agree and a refusal
+when they differ; a trace with more than 100,000 spans, 64 batches or 1,000 values is refused and
+named. Nothing about where a file sat or what it was called reaches a span: a renamed, reordered
+or re-zipped copy of the bundle prepares to byte-identical batches and the same manifest digest.
+
+The report (`--json` prints it as one object) names `manifest_digest`, `totals` (traces, batches,
+spans, blobs, bytes) and `source`, which `prepare_trace_import` takes as given; the formats
+recognized and the traces each file held; the files it could not read, with the reason; the traces
+and spans it refused; the traces without a history owner (a root `user.id`, a Langfuse `userId`, an
+ATIF `extra.user_id`, or an explicit `hue.world.entity.namespace` and `hue.world.entity.id`), which
+import like any other trace but leave a gap in continuous history; the origin each source recorded
+(`production`, `evaluation`, `simulation` or `unknown`; evaluation and simulation traffic is
+imported and kept out of production history); and the traces whose vendor ids were mapped. An
+existing `--out` directory is accepted only while it holds nothing but an earlier preparation and
+no upload has started in it.
+
+**Authorize.** Call `prepare_trace_import` over the Hue MCP with the report's `manifest_digest`,
+`totals` and `source`. It answers the import id, `upload_url` and an `authorization` (`hue_it_` and
+43 characters) valid for an hour. Save its answer, or the authorization alone, in a private file
+(mode 0600; never in a transcript, a message or a shell history). The same digest in the same
+project is the same import: calling again renews the authorization for an interrupted upload and
+revokes the earlier one.
+
+**Upload.** `upload <directory> --authorization-file <file>` reads the authorization from the file
+(its JSON answer, or the authorization on the first line and the `upload_url` on the second;
+`--import-url` names the URL otherwise, and `--origin` refuses a URL on any other Hue origin),
+never from the command line or the environment, and never prints it. It registers the manifest's
+exact bytes, then, trace by trace in declared order and two requests at a time, reserves each large
+value, sends it to the URL Hue answers and completes it, posts each batch with its SHA-256 in
+`Hue-Import-Batch`, and reads the trace's receipt for every span id: a trace counts as verified only
+when Hue confirms every span. It then reconciles and completes the import. Progress is written to
+`progress.json` in the bundle as it goes; running the same command again resumes there, and what
+Hue already holds is not sent twice (a batch sent again after a lost acknowledgement is taken as
+duplicates). Connection failures, timeouts, `408`, `429` and `5xx` answers are retried after 1, 2,
+4, 8, 16 and 30 seconds, waiting for `Retry-After`; after eight retries the command stops and the
+next run resumes. Ctrl+C or `SIGTERM` finishes the requests in flight, saves progress and exits
+`130`; a second signal stops at once.
+
+**What Hue refuses.** Every refusal carries a fixed code, which the report names in `error.code`.
+An expired or replaced authorization (`401`), a lapsed connection (`403` `authority_lapsed`) and an
+expired import (`410`) stop the upload: call `prepare_trace_import` again with the same
+`manifest_digest` and `totals`, write the new authorization to the file and run the same command.
+A manifest whose digest or totals are not the import's (`409`), an authorization of another import
+(`403`), an unknown import (`404`) and a canceled import (`410`) are final. A batch or value Hue
+refuses for the trace's own sake (undeclared, another digest, another trace's records, fewer
+finished spans than declared, a size or type the manifest did not declare), or a record Hue already
+holds under the same id with other content, is a conflict: it is recorded, the trace is reported,
+none of its later records are sent, and the same bytes are never sent again. An import Hue reports
+already completed is done: the command exits `0` and points to `get_trace_import`.
+
+**Output and exit codes.** Without `--json`, the command prints the registration, every hundredth
+verified trace, each conflict and a summary. With `--json`, one progress object per line goes to
+stderr and the report to stdout: the state (`completed`, `incomplete`, `stopped` or `failed`), the
+traces verified and conflicted, the batches landed and values stored, Hue's own note and the traces
+it still lists when completion was refused, the conflicts with their codes, and `next_action`. Exit
+codes: `0` prepared or completed, `1` not completed (the report says what to do next), `2` usage
+error, `130` stopped.
 
 ## Local state and conflicts
 

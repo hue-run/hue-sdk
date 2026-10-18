@@ -558,6 +558,35 @@ The command has no Python counterpart; it runs with `npx` for an application in 
 [Import traces from Langfuse](CLI.md#import-traces-from-langfuse) for every option, the attribute
 mapping, media handling, limits and exit codes.
 
+## Import a bundle of existing traces
+
+`hue traces import` brings exports you already hold into Hue in two steps, with no project key.
+`prepare` converts the bundle on your machine and sends nothing; a Hue MCP connection authorizes
+the delivery with `prepare_trace_import`; `upload` delivers it with that authorization. Sources
+are files, directories or ZIP archives of OTLP/JSON trace exports, complete Langfuse observation
+exports and text ATIF v1.7 and v1.8 exports, recognized by content:
+
+```sh
+npx -y @hue-run/sdk@latest traces import prepare ./exports --out ./exports.hue-import --json
+# Call prepare_trace_import with the report's manifest_digest, totals and source, and save its
+# answer (or the authorization alone) in a private file.
+npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authorization-file ./authorization.json --json
+```
+
+- `prepare` writes each trace as gzip OTLP/JSON batches beside a manifest and reports the
+  manifest's digest and totals, the formats recognized, the files it could not read, invalid vendor
+  ids it mapped to OpenTelemetry ids, and the traces without a history owner (a root `user.id` or an
+  explicit entity). Nothing about a file's name or place reaches a span.
+- `upload` registers the manifest, sends each trace's large values and batches in order, two
+  requests at a time, checks every span's receipt, reconciles and completes the import. Interrupted,
+  run it again: it resumes from `progress.json` in the bundle. An expired authorization is renewed
+  by calling `prepare_trace_import` again with the same digest and totals.
+- The authorization (`hue_it_…`) is read only from the file and never printed. The import routes it
+  is presented to arrive with a forthcoming Hue release.
+
+See [Import a bundle of existing traces](CLI.md#import-a-bundle-of-existing-traces) for the
+formats, the report, what Hue refuses and the exit codes.
+
 ## Vercel AI SDK 6
 
 AI SDK 6 accepts a per-call tracer through `experimental_telemetry`. Pass
