@@ -37,6 +37,7 @@ HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES: tuple[str, ...] = (
     "hue_install_",
     "hue_at_",
     "hue_rt_",
+    "hue_it_",
     "hue_oauth_",
 )
 _HUE_CREDENTIAL_PREFIX_PATTERN = "|".join(
