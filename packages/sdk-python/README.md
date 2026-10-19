@@ -317,8 +317,9 @@ confirmation = hue.verify_trace(
 if confirmation.verified:
     print(confirmation.receipt.trace_url)
 else:
-    # The latest partial receipt, or None if this trace has not appeared yet.
-    print(confirmation.receipt)
+    # The latest partial receipt, or None if this trace has not appeared yet; then `project`
+    # names the project the key searched, so a key for another project is told apart.
+    print(confirmation.receipt, confirmation.project)
 ```
 
 Only require fields your instrumentation emits and your capture policy permits. For metadata-only

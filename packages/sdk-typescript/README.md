@@ -1045,7 +1045,9 @@ receipt request. It does not flush, run your application, create a test span, or
 read captured values. `fields` reports the presence of stored normalized input,
 output, model, usage, and session data across the trace; it does not establish
 content correctness or that every possible span has arrived. Leave unknown usage
-and intentionally disabled content out of `requiredFields`.
+and intentionally disabled content out of `requiredFields`. When Hue reports the trace
+missing, `project` names the project the key searched: a trace absent there was sent with a
+different key (for example one still exported in the shell) or is not stored yet.
 
 The default budget is 10 seconds; set `timeoutMillis` up to 60,000. Only a recognized
 missing trace, HTTP 429, or HTTP 503 is retried, respecting `Retry-After` and the

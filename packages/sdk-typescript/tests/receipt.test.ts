@@ -14,6 +14,8 @@ function receiver(reply: (request: Request, attempt: number) => Response | Promi
     fetch(request) {
       expect(request.method).toBe("GET");
       expect(request.headers.get("authorization")).toBe(`Bearer ${key}`);
+      if (new URL(request.url).pathname === "/api/v1/projects/current")
+        return Response.json(project);
       expect(new URL(request.url).pathname).toBe(`/api/v1/traces/${traceId}/receipt`);
       return reply(request, ++hits);
     },
@@ -26,6 +28,13 @@ function receiver(reply: (request: Request, attempt: number) => Response | Promi
   });
   return { server, hue, hits: () => hits };
 }
+
+const project = {
+  id: "synthetic-project",
+  name: "Synthetic",
+  slug: "synthetic",
+  organizationId: "org",
+};
 
 function receipt(request: Request, overrides: Record<string, unknown> = {}) {
   return {
@@ -159,6 +168,22 @@ describe("stored trace verification", () => {
         true,
       );
       expect(endpoint.hits()).toBe(2);
+    } finally {
+      await endpoint.hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("a trace Hue reports missing names the project the key searched", async () => {
+    const endpoint = receiver(() =>
+      Response.json({ error: "Trace not found.", code: "TRACE_NOT_FOUND" }, { status: 404 }),
+    );
+    try {
+      expect(await endpoint.hue.verifyTrace(traceId, { timeoutMillis: 100 })).toEqual({
+        verified: false,
+        receipt: null,
+        project,
+      });
     } finally {
       await endpoint.hue.shutdown();
       endpoint.server.stop(true);
