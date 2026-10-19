@@ -12,7 +12,6 @@ refuses to publish a version without a matching entry below.
 
 - `hue login` prints next steps that fit the repository: `hue mcp install --client` names the one client whose configuration the root holds (`.mcp.json` or `.claude`, `.cursor`, `.vscode`, `.codex`, `.gemini`, `.windsurf`) and otherwise lists the clients; the `hue eval` hint shows `./hue-agent.ts` for a TypeScript repository, `--command` for a Python one and nothing when the language is unknown.
 
-||||||| 87c9c63
 ### [0.20.8] - 2026-10-19
 
 #### Fixed
