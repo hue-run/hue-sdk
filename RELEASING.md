@@ -201,11 +201,10 @@ All integration checks use synthetic services. No paid model API or production H
 
 ## Registry aliases
 
-`packages/aliases/npm-hue-run` and `packages/aliases/pypi-hue-sdk` are thin alias packages: `hue-run`
-on npm re-exports `@hue-run/sdk`, and `hue-sdk` on PyPI depends on `hue-run`. Published, they make the
-sibling name on each registry resolve to the real SDK instead of an unrelated or squatted package (the
-Python import module is `hue_sdk`). Bump each alias to the same version as its package with every
-release, with its pinned dependency.
+`packages/aliases/npm-hue-run` is a thin alias package: `hue-run` on npm re-exports `@hue-run/sdk`.
+Published, it makes the Python distribution's name resolve on npm to the real SDK instead of an
+unrelated or squatted package. Bump it to the same version as `@hue-run/sdk` with every release, with
+its pinned dependency.
 
 **npm.** The release workflow publishes `hue-run` through npm trusted publishing (owner `hue-run`,
 repository `hue-sdk`, workflow `release.yml`, environment `npm`), with provenance and no token. After
@@ -226,10 +225,5 @@ from a later `main` commit whose package is unchanged therefore ships an alias t
 release without republishing the SDK. Python has no such path: PyPI refuses a second upload of a
 version.
 
-**PyPI.** `hue-sdk` is not on PyPI, so `pip install hue-sdk` does not install Hue's SDK; use
-`hue-run`. Its first publication is manual, by the authorized account, before a trusted publisher can
-be registered:
-
-```bash
-(cd packages/aliases/pypi-hue-sdk && uvx --from build pyproject-build . && uvx --from twine==7.0.0 twine upload dist/*)
-```
+**PyPI.** PyPI blocks `hue-sdk` as too similar to the unrelated `huesdk`, so there is no PyPI alias;
+the Python package is `hue-run`.
