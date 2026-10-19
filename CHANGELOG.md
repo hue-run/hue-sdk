@@ -13,7 +13,6 @@ refuses to publish a version without a matching entry below.
 - `verifyTrace` adds `project` to a result without a receipt once Hue reports the trace missing: the project the key searched (`checkConnection()` shape), so a key for another project is told apart from a trace that is not stored yet. `verified` and `receipt` are unchanged.
 - `hue login` warns on stderr when the shell already exports a different `HUE_API_KEY`, naming the project each key resolves to and never the keys: loaders such as `uv run --env-file` and dotenv keep the exported value over the env file.
 
-||||||| 87c9c63
 ### [0.20.8] - 2026-10-19
 
 #### Fixed
