@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { lstat, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -29,6 +38,8 @@ const EVAL_KEY = `hue_live_evaluations_${"e".repeat(40)}`;
 const MCP_KEY = `hue_live_agent_${"m".repeat(40)}`;
 /** One "Read and write" key: the default login stores it for evaluations and the coding agent. */
 const KEY = `hue_live_read_write_${"k".repeat(40)}`;
+// git must stay on PATH, but a key exported in the developer's shell must not reach the tests.
+const shellEnv = { ...process.env, HUE_API_KEY: undefined };
 /** A "Read" key: it reaches the project and the MCP server but cannot use evaluations. */
 const READ_KEY = `hue_live_read_${"r".repeat(40)}`;
 const SETTINGS_URL = `${ORIGIN}/settings/integrations`;
@@ -200,11 +211,12 @@ describe("hue login", () => {
     expect(result.stdout).toContain(
       `Stored the key (${KEY.length} chars) as HUE_API_KEY and HUE_MCP_KEY, with HUE_BASE_URL and HUE_MCP_URL, in .env.hue.`,
     );
-    // A non-default origin stores its own MCP endpoint, so the printed next step carries it.
+    // A non-default origin stores its own MCP endpoint, so the printed next step carries it. An
+    // empty repository names no client and gets no eval hint for an unknown language.
     expect(result.stdout).toContain(
-      `hue mcp install --client claude-code --auth key --url ${ORIGIN}/api/mcp`,
+      `hue mcp install --client <claude-code|codex|conductor|cursor|vscode|windsurf|gemini> --auth key --url ${ORIGIN}/api/mcp`,
     );
-    expect(result.stdout).toContain('hue eval --case "<name>" ./hue-agent.ts\n');
+    expect(result.stdout).not.toContain("hue eval");
     expect(result.stdout).not.toContain(KEY);
     expect(result.stdout).not.toContain("Opened");
     const envPath = join(root, ".env.hue");
@@ -227,6 +239,67 @@ describe("hue login", () => {
       id: 1,
       method: "tools/list",
     });
+  });
+
+  test("next steps name the detected MCP client and the repository's language", async () => {
+    const root = await temporaryRoot();
+    await mkdir(join(root, ".cursor"));
+    await writeFile(join(root, "pyproject.toml"), '[project]\nname = "agent"\n');
+    await writeFile(join(root, "package.json"), '{ "devDependencies": { "prettier": "3" } }\n');
+    const python = await login(["--origin", ORIGIN], { cwd: root, lines: [KEY] });
+    expect(python.code).toBe(0);
+    expect(python.stdout).toContain(
+      `Next steps:\n  hue mcp install --client cursor --auth key --url ${ORIGIN}/api/mcp\n  hue eval --case "<name>" --command "<agent start command>"\n`,
+    );
+    // Several clients' files leave the client to the user; a tsconfig selects the adapter form.
+    await mkdir(join(root, ".vscode"));
+    await writeFile(join(root, "tsconfig.json"), "{}\n");
+    const typescript = await login(["--origin", ORIGIN], { cwd: root, lines: [KEY] });
+    expect(typescript.code).toBe(0);
+    expect(typescript.stdout).toContain(
+      `  hue mcp install --client <claude-code|codex|conductor|cursor|vscode|windsurf|gemini> --auth key --url ${ORIGIN}/api/mcp\n  hue eval --case "<name>" ./hue-agent.ts\n`,
+    );
+  });
+
+  test("warns when the shell exports a different HUE_API_KEY, naming projects only", async () => {
+    const root = await temporaryRoot();
+    const shellKey = `hue_live_read_write_${"s".repeat(40)}`;
+    const other = await login(["--origin", ORIGIN], {
+      cwd: root,
+      lines: [KEY],
+      env: { PATH: "", HUE_API_KEY: shellKey, HUE_BASE_URL: ORIGIN },
+      fetch: syntheticHue({ evalKeys: [KEY, shellKey] }).fetchImpl,
+    });
+    expect(other.code).toBe(0);
+    expect(other.stderr).toBe(
+      'Warning: this shell already exports a different HUE_API_KEY for project "Synthetic". It takes precedence over .env.hue (project "Synthetic") in tools that load env files without overriding them; unset it before running the application.\n',
+    );
+    const rejected = await login(["--origin", ORIGIN], {
+      cwd: root,
+      lines: [KEY],
+      env: { PATH: "", HUE_API_KEY: shellKey, HUE_BASE_URL: ORIGIN },
+    });
+    expect(rejected.stderr).toContain("a different HUE_API_KEY that Hue does not accept.");
+    // A key exported for another server is never sent to this origin.
+    const elsewhere = syntheticHue();
+    const foreign = await login(["--origin", ORIGIN], {
+      cwd: root,
+      lines: [KEY],
+      env: { PATH: "", HUE_API_KEY: shellKey },
+      fetch: elsewhere.fetchImpl,
+    });
+    expect(foreign.stderr).toContain("a different HUE_API_KEY for https://app.hue.run.");
+    for (const call of elsewhere.calls) expect(call.authorization).toBe(`Bearer ${KEY}`);
+    for (const result of [other, rejected, foreign]) {
+      expect(result.stderr).not.toContain(shellKey);
+      expect(result.stderr).not.toContain(KEY);
+    }
+    const same = await login(["--origin", ORIGIN], {
+      cwd: root,
+      lines: [KEY],
+      env: { PATH: "", HUE_API_KEY: KEY },
+    });
+    expect(same.stderr).toBe("");
   });
 
   test("maps origins to the MCP endpoint and refuses non-origin values", () => {
@@ -379,6 +452,8 @@ describe("hue login", () => {
       `# local settings\nOTHER=1\nexport HUE_API_KEY=hue_live_previous\nHUE_BASE_URL=${ORIGIN}\nTRAILING=yes\n`,
     );
 
+    // The eval hint prints for a detected language and carries the non-default env file.
+    await writeFile(join(root, "tsconfig.json"), "{}\n");
     const forced = await login(["--origin", ORIGIN, "--env-file", "config/.env.local", "--force"], {
       cwd: root,
       lines: [KEY],
@@ -451,7 +526,7 @@ describe("hue login", () => {
     const first = await login(["--origin", ORIGIN, "--keys", "evaluations"], {
       cwd: root,
       lines: [EVAL_KEY],
-      env: process.env,
+      env: shellEnv,
     });
     expect(first.code).toBe(0);
     expect(first.stderr).toContain("Warning: .env.hue is not ignored by git.");
@@ -459,7 +534,7 @@ describe("hue login", () => {
     const fixed = await login(["--origin", ORIGIN, "--keys", "evaluations", "--gitignore"], {
       cwd: root,
       lines: [EVAL_KEY],
-      env: process.env,
+      env: shellEnv,
     });
     expect(fixed.code).toBe(0);
     expect(fixed.stderr).toBe("");
@@ -469,7 +544,7 @@ describe("hue login", () => {
     const again = await login(["--origin", ORIGIN, "--keys", "evaluations", "--gitignore"], {
       cwd: root,
       lines: [EVAL_KEY],
-      env: process.env,
+      env: shellEnv,
     });
     expect(again.code).toBe(0);
     expect(again.stderr).toBe("");
@@ -485,7 +560,7 @@ describe("hue login", () => {
     const result = await login(["--origin", ORIGIN, "--gitignore"], {
       cwd: root,
       lines: [KEY],
-      env: process.env,
+      env: shellEnv,
     });
     expect(result.code).toBe(0);
     expect(await readFile(join(root, ".gitignore"), "utf8")).toBe(".env.hue\n");
@@ -498,7 +573,7 @@ describe("hue login", () => {
       cwd: empty,
       lines: ["hue_live_other_key"],
       fetch: syntheticHue().fetchImpl,
-      env: process.env,
+      env: shellEnv,
     });
     expect(nothing.code).toBe(1);
     expect(nothing.stdout).not.toContain("Added .env.hue");

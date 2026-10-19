@@ -8,6 +8,15 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [Unreleased]
+
+- `hue login` prints next steps that fit the repository: `hue mcp install --client` names the one client whose configuration the root holds (`.mcp.json` or `.claude`, `.cursor`, `.vscode`, `.codex`, `.gemini`, `.windsurf`) and otherwise lists the clients; the `hue eval` hint shows `./hue-agent.ts` for a TypeScript repository, `--command` for a Python one and nothing when the language is unknown.
+
+- The optional Vercel AI SDK peers widen to `ai@^6.0.0 || ^7.0.0` and `@ai-sdk/otel@^1.0.0`. `hueTelemetry` uses only the per-call `integrations` option and `OpenTelemetry({ tracer, usage })`, present since `ai@7.0.0` / `@ai-sdk/otel@1.0.0`, so apps on other AI SDK 7 patch releases no longer get peer warnings. The installed-package tests still run the `7.0.99 / 1.0.99` and `7.0.100 / 1.0.100` pairs.
+
+- `verifyTrace` adds `project` to a result without a receipt once Hue reports the trace missing: the project the key searched (`checkConnection()` shape), so a key for another project is told apart from a trace that is not stored yet. `verified` and `receipt` are unchanged.
+- `hue login` warns on stderr when the shell already exports a different `HUE_API_KEY`, naming the project each key resolves to and never the keys: loaders such as `uv run --env-file` and dotenv keep the exported value over the env file.
+
 ### [0.20.8] - 2026-10-19
 
 #### Fixed
@@ -1647,6 +1656,10 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
+### [Unreleased]
+
+- `verify_trace` adds `project` (a `Project` or `None`, default `None`) to `TraceVerificationResult` once Hue reports the trace missing: the project the key searched, so a key for another project is told apart from a trace that is not stored yet. `verified` and `receipt` are unchanged.
+
 ### [0.13.2] - 2026-10-18
 
 #### Added
@@ -2300,7 +2313,8 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
-- 0.8.12 (2026-10-19): the integration table routes an application whose framework owns the agent loop or the root span (LangChain, LangGraph) to the LangChain and LangGraph integration page and the OpenTelemetry root-span section.
+- 0.8.13 (2026-10-19): the integration table routes an application whose framework owns the agent loop or the root span (LangChain, LangGraph) to the LangChain and LangGraph integration page and the OpenTelemetry root-span section.
+- 0.8.12 (2026-10-19): the file is formatted with Prettier's defaults (table cell alignment), so `prettier --check` passes in repositories that vendor it. No wording changes.
 - 0.8.11 (2026-10-19): **Verify delivery** gives the running-server pattern (log or return the request span's `traceId`, verify from a diagnostic client), names the receipt fields once and says what a `null` receipt means.
 - 0.8.10 (2026-10-19): the TypeScript installation command pins `@hue-run/sdk@0.20.8`.
 - 0.8.9 (2026-10-19): the other-workflows table routes importing existing traces from OTLP JSON, Langfuse or ATIF exports to the bulk import guide (`load_hue_guide` with `import` returns the same guide).

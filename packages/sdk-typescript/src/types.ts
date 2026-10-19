@@ -425,4 +425,9 @@ export interface TraceVerification {
   verified: boolean;
   /** Latest receipt observed, or `null` when the trace was never found. */
   receipt: TraceReceipt | null;
+  /**
+   * The project the key searched, looked up when no receipt arrived: a trace missing there was
+   * sent with a different key or is not stored yet. Absent when that lookup failed.
+   */
+  project?: ProjectConnection;
 }
