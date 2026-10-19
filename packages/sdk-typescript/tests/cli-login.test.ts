@@ -29,6 +29,8 @@ const EVAL_KEY = `hue_live_evaluations_${"e".repeat(40)}`;
 const MCP_KEY = `hue_live_agent_${"m".repeat(40)}`;
 /** One "Read and write" key: the default login stores it for evaluations and the coding agent. */
 const KEY = `hue_live_read_write_${"k".repeat(40)}`;
+// git must stay on PATH, but a key exported in the developer's shell must not reach the tests.
+const shellEnv = { ...process.env, HUE_API_KEY: undefined };
 /** A "Read" key: it reaches the project and the MCP server but cannot use evaluations. */
 const READ_KEY = `hue_live_read_${"r".repeat(40)}`;
 const SETTINGS_URL = `${ORIGIN}/settings/integrations`;
@@ -227,6 +229,37 @@ describe("hue login", () => {
       id: 1,
       method: "tools/list",
     });
+  });
+
+  test("warns when the shell exports a different HUE_API_KEY, naming projects only", async () => {
+    const root = await temporaryRoot();
+    const shellKey = `hue_live_read_write_${"s".repeat(40)}`;
+    const other = await login(["--origin", ORIGIN], {
+      cwd: root,
+      lines: [KEY],
+      env: { PATH: "", HUE_API_KEY: shellKey },
+      fetch: syntheticHue({ evalKeys: [KEY, shellKey] }).fetchImpl,
+    });
+    expect(other.code).toBe(0);
+    expect(other.stderr).toBe(
+      'Warning: this shell already exports a different HUE_API_KEY for project "Synthetic". It takes precedence over .env.hue (project "Synthetic") in tools that load env files without overriding them; unset it before running the application.\n',
+    );
+    const rejected = await login(["--origin", ORIGIN], {
+      cwd: root,
+      lines: [KEY],
+      env: { PATH: "", HUE_API_KEY: shellKey },
+    });
+    expect(rejected.stderr).toContain("a different HUE_API_KEY that Hue does not accept.");
+    for (const result of [other, rejected]) {
+      expect(result.stderr).not.toContain(shellKey);
+      expect(result.stderr).not.toContain(KEY);
+    }
+    const same = await login(["--origin", ORIGIN], {
+      cwd: root,
+      lines: [KEY],
+      env: { PATH: "", HUE_API_KEY: KEY },
+    });
+    expect(same.stderr).toBe("");
   });
 
   test("maps origins to the MCP endpoint and refuses non-origin values", () => {
@@ -451,7 +484,7 @@ describe("hue login", () => {
     const first = await login(["--origin", ORIGIN, "--keys", "evaluations"], {
       cwd: root,
       lines: [EVAL_KEY],
-      env: process.env,
+      env: shellEnv,
     });
     expect(first.code).toBe(0);
     expect(first.stderr).toContain("Warning: .env.hue is not ignored by git.");
@@ -459,7 +492,7 @@ describe("hue login", () => {
     const fixed = await login(["--origin", ORIGIN, "--keys", "evaluations", "--gitignore"], {
       cwd: root,
       lines: [EVAL_KEY],
-      env: process.env,
+      env: shellEnv,
     });
     expect(fixed.code).toBe(0);
     expect(fixed.stderr).toBe("");
@@ -469,7 +502,7 @@ describe("hue login", () => {
     const again = await login(["--origin", ORIGIN, "--keys", "evaluations", "--gitignore"], {
       cwd: root,
       lines: [EVAL_KEY],
-      env: process.env,
+      env: shellEnv,
     });
     expect(again.code).toBe(0);
     expect(again.stderr).toBe("");
@@ -485,7 +518,7 @@ describe("hue login", () => {
     const result = await login(["--origin", ORIGIN, "--gitignore"], {
       cwd: root,
       lines: [KEY],
-      env: process.env,
+      env: shellEnv,
     });
     expect(result.code).toBe(0);
     expect(await readFile(join(root, ".gitignore"), "utf8")).toBe(".env.hue\n");
@@ -498,7 +531,7 @@ describe("hue login", () => {
       cwd: empty,
       lines: ["hue_live_other_key"],
       fetch: syntheticHue().fetchImpl,
-      env: process.env,
+      env: shellEnv,
     });
     expect(nothing.code).toBe(1);
     expect(nothing.stdout).not.toContain("Added .env.hue");
