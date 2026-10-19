@@ -3,7 +3,7 @@ name: hue
 description: "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction."
 metadata:
   author: hue-run
-  version: "0.8.9"
+  version: "0.8.10"
 ---
 
 # Hue
@@ -19,6 +19,7 @@ Read the application's repository instructions and inspect its runtime, dependen
 | Node.js 22 or 24, or Bun 1.4 (server-side), without existing OTel setup | [TypeScript SDK](https://docs.hue.run/sdks/typescript) |
 | Python 3.10+ | [Python SDK](https://docs.hue.run/sdks/python) |
 | Existing OTel provider, Langfuse, or framework instrumentation | [OpenTelemetry integration](https://docs.hue.run/integrations/opentelemetry); keep the provider and its other exporters |
+| A framework owns the agent loop or the root span | [LangChain and LangGraph](https://docs.hue.run/integrations/langchain) for LangChain agents; otherwise [mark the framework's root span](https://docs.hue.run/integrations/opentelemetry#mark-the-root-span) through the OpenTelemetry integration |
 
 Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed package's API before editing. Read only the guides relevant to the application's stack; [Traces and spans](https://docs.hue.run/guides/traces) describes the span structure every path should produce, and the [documentation index](https://docs.hue.run/llms.txt) lists the rest.
 
