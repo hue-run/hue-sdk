@@ -8,7 +8,7 @@
 
 ## Verification
 
-<!-- Tick what you ran; paste nothing sensitive. -->
+<!-- Name the verify skill you ran (verify-sdk, verify-package or verify-examples) and paste its output in a code block. Tick what else you ran; paste nothing sensitive. -->
 
 - [ ] `node packages/sdk-typescript/scripts/verify-package.mjs`
 - [ ] `python3 -m unittest discover -s scripts -p 'test_*.py'`
