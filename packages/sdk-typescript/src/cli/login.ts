@@ -744,9 +744,19 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
       // Loaders such as `uv run --env-file` and dotenv keep an exported variable over the file,
       // so a stale shell key silently sends traces to another project. Name projects, never keys.
       if (kind === "evaluations" && env.HUE_API_KEY && env.HUE_API_KEY !== value) {
-        const shell = await checkProject(fetchImpl, origin, env.HUE_API_KEY);
+        // The shell key only goes to the server it was exported for.
+        const shellOrigin = env.HUE_BASE_URL ?? DEFAULT_ORIGIN;
+        const shell =
+          shellOrigin === origin ? await checkProject(fetchImpl, origin, env.HUE_API_KEY) : null;
+        const owner = !shell
+          ? ` for ${shellOrigin}`
+          : shell.ok
+            ? ` for project "${shell.detail}"`
+            : shell.rejected
+              ? " that Hue does not accept"
+              : " whose project could not be checked";
         stderr.write(
-          `Warning: this shell already exports a different HUE_API_KEY${shell.ok ? ` for project "${shell.detail}"` : " that Hue does not accept"}. It takes precedence over ${envDisplay} (project "${check.detail}") in tools that load env files without overriding them; unset it before running the application.\n`,
+          `Warning: this shell already exports a different HUE_API_KEY${owner}. It takes precedence over ${envDisplay} (project "${check.detail}") in tools that load env files without overriding them; unset it before running the application.\n`,
         );
       }
     }

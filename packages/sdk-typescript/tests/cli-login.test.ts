@@ -237,7 +237,7 @@ describe("hue login", () => {
     const other = await login(["--origin", ORIGIN], {
       cwd: root,
       lines: [KEY],
-      env: { PATH: "", HUE_API_KEY: shellKey },
+      env: { PATH: "", HUE_API_KEY: shellKey, HUE_BASE_URL: ORIGIN },
       fetch: syntheticHue({ evalKeys: [KEY, shellKey] }).fetchImpl,
     });
     expect(other.code).toBe(0);
@@ -247,10 +247,20 @@ describe("hue login", () => {
     const rejected = await login(["--origin", ORIGIN], {
       cwd: root,
       lines: [KEY],
-      env: { PATH: "", HUE_API_KEY: shellKey },
+      env: { PATH: "", HUE_API_KEY: shellKey, HUE_BASE_URL: ORIGIN },
     });
     expect(rejected.stderr).toContain("a different HUE_API_KEY that Hue does not accept.");
-    for (const result of [other, rejected]) {
+    // A key exported for another server is never sent to this origin.
+    const elsewhere = syntheticHue();
+    const foreign = await login(["--origin", ORIGIN], {
+      cwd: root,
+      lines: [KEY],
+      env: { PATH: "", HUE_API_KEY: shellKey },
+      fetch: elsewhere.fetchImpl,
+    });
+    expect(foreign.stderr).toContain("a different HUE_API_KEY for https://app.hue.run.");
+    for (const call of elsewhere.calls) expect(call.authorization).toBe(`Bearer ${KEY}`);
+    for (const result of [other, rejected, foreign]) {
       expect(result.stderr).not.toContain(shellKey);
       expect(result.stderr).not.toContain(KEY);
     }

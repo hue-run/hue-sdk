@@ -244,12 +244,13 @@ def verify_trace(
         return TraceVerificationResult(False, None)
     done, cancelled, lock = Event(), Event(), Lock()
     latest: TraceReceipt | None = None
-    missing = False
+    lookup: Thread | None = None
+    project: list[Project | None] = []
     result: TraceVerificationResult | None = None
     error: TraceVerificationError | None = None
 
     def poll() -> None:
-        nonlocal latest, result, error, missing
+        nonlocal latest, result, error, lookup
         backoff = 0.25
         try:
             with SafeSession() as session:
@@ -291,7 +292,15 @@ def verify_trace(
                                     code="http",
                                     status_code=status,
                                 )
-                            missing = True
+                            # Look up the project while polling continues, so the answer fits
+                            # the same budget.
+                            if on_missing is not None and lookup is None:
+                                lookup = Thread(
+                                    target=lambda: project.append(on_missing()),
+                                    name="hue-verify-project",
+                                    daemon=True,
+                                )
+                                lookup.start()
                         elif status in (429, 503):
                             delay = _retry_delay(response.headers.get("Retry-After"), backoff)
                         elif status in (401, 403):
@@ -350,6 +359,7 @@ def verify_trace(
         cancelled.set()
         if error is not None:
             raise error from None
-        if result is None and latest is None and missing and on_missing is not None:
-            return TraceVerificationResult(False, None, on_missing())
+        if lookup is not None and result is None and latest is None:
+            lookup.join(max(0.0, deadline - monotonic()))
+            return TraceVerificationResult(False, None, project[0] if project else None)
         return result or TraceVerificationResult(False, latest)

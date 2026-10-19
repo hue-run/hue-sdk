@@ -242,7 +242,7 @@ async function verifyTraceAtPath(
   const timer = setTimeout(() => controller.abort(), timeout);
   const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   let receipt: TraceReceipt | null = null;
-  let missing = false;
+  let lookup: Promise<ProjectConnection | undefined> | undefined;
   let delay = 250;
   try {
     while (!requestSignal.aborted && performance.now() < deadline) {
@@ -271,7 +271,8 @@ async function verifyTraceAtPath(
             "This Hue server does not support trace receipts. Check the server version and baseUrl.",
             404,
           );
-        missing = true;
+        // Look up the project while polling continues, so the answer fits the same budget.
+        lookup ??= onMissing?.();
       } else {
         await response.body?.cancel();
         if (response.status === 429 || response.status === 503) {
@@ -310,8 +311,11 @@ async function verifyTraceAtPath(
   } finally {
     clearTimeout(timer);
   }
-  if (missing && !receipt && onMissing) {
-    const project = await onMissing();
+  if (lookup && !receipt) {
+    const project = await Promise.race([
+      lookup,
+      pause(Math.max(0, deadline - performance.now()), controller.signal),
+    ]);
     if (project) return { verified: false, receipt, project };
   }
   return { verified: false, receipt };
