@@ -22,11 +22,14 @@ export type TraceImportOrigin = (typeof traceImportOrigins)[number];
 
 /** The bounds the import routes hold a manifest to. */
 export const traceImportLimits = {
-  traces: 10_000,
-  batchesPerTrace: 64,
-  blobsPerTrace: 1_000,
+  traces: 25_000,
+  batchesPerTrace: 512,
+  blobsPerTrace: 10_000,
   spansPerTrace: 100_000,
-  manifestBytes: 8 * 1024 * 1024,
+  /** The manifest decoded. */
+  manifestBytes: 32 * 1024 * 1024,
+  /** The manifest as registration takes it, gzip. */
+  manifestWireBytes: 4 * 1024 * 1024,
   batchBytes: 4 * 1024 * 1024,
   blobBytes: 1_000_000_000,
 } as const;

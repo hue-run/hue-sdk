@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.20.6`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.20.7`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -381,8 +381,8 @@ and Hue never receives or stores them. The command is part of the `hue` executab
 #   LANGFUSE_PUBLIC_KEY=pk-lf-...
 #   LANGFUSE_SECRET_KEY=sk-lf-...
 #   LANGFUSE_BASE_URL=https://cloud.langfuse.com
-npx -y @hue-run/sdk@0.20.6 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.20.6 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.20.7 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.20.7 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` come from the environment or `--env-path`
@@ -536,8 +536,9 @@ instrumentation scope `hue.import.atif`, and the run's agent span is named `invo
 <agent.name>` from the export's own agent. ATIF records instants, not durations, so model and tool
 spans are points in time, and a tool's result is kept as text with no error status of the
 importer's making. The same trace in two files is one trace when the copies agree and a refusal
-when they differ; a trace with more than 100,000 spans, 64 batches or 1,000 values is refused and
-named. Nothing about where a file sat or what it was called reaches a span: a renamed, reordered
+when they differ; a trace with more than 100,000 spans, 512 batches or 10,000 values is refused and
+named, and an input of more than 25,000 traces, or whose manifest would exceed 32 MiB (4 MiB
+compressed), is refused whole. Nothing about where a file sat or what it was called reaches a span: a renamed, reordered
 or re-zipped copy of the bundle prepares to byte-identical batches and the same manifest digest.
 
 The report (`--json` prints it as one object) names `manifest_digest`, `totals` (traces, batches,
@@ -553,7 +554,7 @@ no upload has started in it.
 
 **Authorize.** Call `prepare_trace_import` over the Hue MCP with the report's `manifest_digest`,
 `totals` and `source`. It answers the import id, `upload_url` and an `authorization` (`hue_it_` and
-43 characters) valid for an hour. Save its answer, or the authorization alone, in a private file
+43 characters) valid for a day. Save its answer, or the authorization alone, in a private file
 (mode 0600; never in a transcript, a message or a shell history). The same digest in the same
 project is the same import: calling again renews the authorization for an interrupted upload and
 revokes the earlier one.
@@ -697,7 +698,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.20.6.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.20.7.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -708,7 +709,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.20.6.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.20.7.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -750,10 +751,10 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.20.6 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.20.6 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.20.6 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.20.6 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.20.7 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.20.7 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.20.7 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.20.7 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 One invocation creates one run holding every selected case; it prints the run URL
@@ -791,7 +792,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.20.6 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.20.7 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
