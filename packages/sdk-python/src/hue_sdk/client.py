@@ -1463,6 +1463,15 @@ class Hue:
         network read may finish in the background after timeout.
         """
         self._ensure_open()
+
+        def project_or_none() -> Project | None:
+            try:
+                return self.validate_project()
+            except ProjectValidationError:
+                return None
+
+        # Once Hue reports the trace missing, name the project this key searched so a wrong key
+        # reads differently from a trace that is not stored yet.
         return verify_trace(
             self.base_url,
             self._headers,
@@ -1472,6 +1481,7 @@ class Hue:
             timeout_millis=timeout_millis,
             request_timeout=self._timeout,
             poll_lock=self._receipt_lock,
+            on_missing=project_or_none,
         )
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:

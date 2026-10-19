@@ -5,18 +5,21 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from threading import Event, Lock, Thread
 from time import monotonic
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 import requests
 
 from .transport import SafeSession
+
+if TYPE_CHECKING:
+    from .client import Project
 
 TraceReceiptField = Literal["input", "output", "model", "usage", "session"]
 _FIELDS = ("input", "output", "model", "usage", "session")
@@ -59,6 +62,9 @@ class TraceReceipt:
 class TraceVerificationResult:
     verified: bool
     receipt: TraceReceipt | None
+    #: The project the key searched, looked up when no receipt arrived: a trace missing there was
+    #: sent with a different key or is not stored yet. ``None`` when that lookup failed.
+    project: Project | None = None
 
 
 def _valid_id(value: Any, length: int) -> bool:
@@ -193,7 +199,9 @@ def verify_trace(
     timeout_millis: float,
     request_timeout: float,
     poll_lock: Lock,
+    on_missing: Callable[[], Project | None] | None = None,
 ) -> TraceVerificationResult:
+    """``on_missing`` names the project the key searched once Hue reports the trace missing."""
     if not _valid_id(trace_id, 32):
         raise ValueError("trace_id must be a nonzero 32-character lowercase hexadecimal ID.")
     if (
@@ -236,11 +244,14 @@ def verify_trace(
         return TraceVerificationResult(False, None)
     done, cancelled, lock = Event(), Event(), Lock()
     latest: TraceReceipt | None = None
+    missing = False
+    lookup = False
+    project: list[Project | None] = []
     result: TraceVerificationResult | None = None
     error: TraceVerificationError | None = None
 
     def poll() -> None:
-        nonlocal latest, result, error
+        nonlocal latest, result, error, missing, lookup
         backoff = 0.25
         try:
             with SafeSession() as session:
@@ -282,6 +293,7 @@ def verify_trace(
                                     code="http",
                                     status_code=status,
                                 )
+                            missing = True
                         elif status in (429, 503):
                             delay = _retry_delay(response.headers.get("Retry-After"), backoff)
                         elif status in (401, 403):
@@ -299,12 +311,22 @@ def verify_trace(
                                 status_code=status,
                             )
                     remaining = deadline - monotonic()
-                    if remaining <= 0 or cancelled.wait(min(delay, remaining)):
+                    if remaining <= 0:
+                        break
+                    # Once the backoff would outlast the budget, the rest of it names the
+                    # project the key searched instead of sleeping.
+                    if delay >= remaining and missing and on_missing is not None:
+                        lookup = True
+                        break
+                    if cancelled.wait(min(delay, remaining)):
                         break
                     # A truncated backoff exhausts this call even if the wait wakes early.
                     if delay >= remaining:
                         break
                     backoff = min(backoff * 2, 1)
+            # Still this worker, under poll_lock: a stalled lookup cannot pile up across calls.
+            if lookup and on_missing is not None:
+                project.append(on_missing())
         except TimeoutError:
             pass
         except Exception as failure:
@@ -340,4 +362,6 @@ def verify_trace(
         cancelled.set()
         if error is not None:
             raise error from None
+        if result is None and latest is None and project:
+            return TraceVerificationResult(False, None, project[0])
         return result or TraceVerificationResult(False, latest)

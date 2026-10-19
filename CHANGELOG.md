@@ -8,6 +8,11 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [Unreleased]
+
+- `verifyTrace` adds `project` to a result without a receipt once Hue reports the trace missing: the project the key searched (`checkConnection()` shape), so a key for another project is told apart from a trace that is not stored yet. `verified` and `receipt` are unchanged.
+- `hue login` warns on stderr when the shell already exports a different `HUE_API_KEY`, naming the project each key resolves to and never the keys: loaders such as `uv run --env-file` and dotenv keep the exported value over the env file.
+
 ### [0.20.8] - 2026-10-19
 
 #### Fixed
@@ -1646,6 +1651,10 @@ No registry release is claimed until publication and registry acceptance complet
 - Documented runtime and integration matrix, including dependency-resolution and cross-language content and delivery boundaries; verified release archives and registry bytes.
 
 ## hue-run (Python)
+
+### [Unreleased]
+
+- `verify_trace` adds `project` (a `Project` or `None`, default `None`) to `TraceVerificationResult` once Hue reports the trace missing: the project the key searched, so a key for another project is told apart from a trace that is not stored yet. `verified` and `receipt` are unchanged.
 
 ### [0.13.2] - 2026-10-18
 

@@ -252,11 +252,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 type KeyCheck = { ok: true; detail: string } | { ok: false; rejected: boolean; detail: string };
 
-/**
- * Mirrors `checkConnection()` with `GET /api/v1/projects/current`, then confirms evaluation access
- * with `GET /api/v1/datasets`. No redirects are followed.
- */
-async function checkEvaluationsKey(
+/** Mirrors `checkConnection()` with `GET /api/v1/projects/current`; `detail` is the project name. */
+async function checkProject(
   fetchImpl: typeof fetch,
   origin: string,
   apiKey: string,
@@ -288,14 +285,23 @@ async function checkEvaluationsKey(
       detail: `Hue answered HTTP ${response.status} while checking the evaluations key.`,
     };
   }
-  let projectName: string;
   try {
     const project: unknown = JSON.parse(await readBoundedText(response));
     if (!isRecord(project) || typeof project.name !== "string") throw new Error("Invalid project");
-    projectName = project.name;
+    return { ok: true, detail: project.name };
   } catch {
     return { ok: false, rejected: false, detail: "Hue returned an unexpected project response." };
   }
+}
+
+/** {@link checkProject}, then confirms evaluation access with `GET /api/v1/datasets`. */
+async function checkEvaluationsKey(
+  fetchImpl: typeof fetch,
+  origin: string,
+  apiKey: string,
+): Promise<KeyCheck> {
+  const project = await checkProject(fetchImpl, origin, apiKey);
+  if (!project.ok) return project;
   // Every valid key reaches the project check; only a key with write access can list eval sets,
   // so a Read or Tracing only key is refused here instead of failing later in `hue eval`.
   let evaluations: Response;
@@ -322,7 +328,7 @@ async function checkEvaluationsKey(
       rejected: false,
       detail: `Hue answered HTTP ${evaluations.status} while checking evaluation access.`,
     };
-  return { ok: true, detail: projectName };
+  return project;
 }
 
 /** Reads JSON-RPC messages from a JSON body or a `text/event-stream` body. */
@@ -735,6 +741,24 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
           ? `Evaluations access accepted for project "${check.detail}".`
           : `Coding-agent access accepted; the Hue MCP server lists ${check.detail} tools.`,
       );
+      // Loaders such as `uv run --env-file` and dotenv keep an exported variable over the file,
+      // so a stale shell key silently sends traces to another project. Name projects, never keys.
+      if (kind === "evaluations" && env.HUE_API_KEY && env.HUE_API_KEY !== value) {
+        // The shell key only goes to the server it was exported for.
+        const shellOrigin = env.HUE_BASE_URL ?? DEFAULT_ORIGIN;
+        const shell =
+          shellOrigin === origin ? await checkProject(fetchImpl, origin, env.HUE_API_KEY) : null;
+        const owner = !shell
+          ? ` for ${shellOrigin}`
+          : shell.ok
+            ? ` for project "${shell.detail}"`
+            : shell.rejected
+              ? " that Hue does not accept"
+              : " whose project could not be checked";
+        stderr.write(
+          `Warning: this shell already exports a different HUE_API_KEY${owner}. It takes precedence over ${envDisplay} (project "${check.detail}") in tools that load env files without overriding them; unset it before running the application.\n`,
+        );
+      }
     }
     if (!failure) {
       const text = mergeEnvText(envFile.text, updates);
