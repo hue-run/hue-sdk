@@ -12,6 +12,18 @@ refuses to publish a version without a matching entry below.
 
 - The optional Vercel AI SDK peers widen to `ai@^6.0.0 || ^7.0.0` and `@ai-sdk/otel@^1.0.0`. `hueTelemetry` uses only the per-call `integrations` option and `OpenTelemetry({ tracer, usage })`, present since `ai@7.0.0` / `@ai-sdk/otel@1.0.0`, so apps on other AI SDK 7 patch releases no longer get peer warnings. The installed-package tests still run the `7.0.99 / 1.0.99` and `7.0.100 / 1.0.100` pairs.
 
+||||||| 87c9c63
+### [0.20.8] - 2026-10-19
+
+#### Fixed
+
+- Exports work when a framework bundles the SDK into its server, as Next.js (Turbopack and
+  webpack) does by default. The transport loaded `node:http` or `node:https` through one dynamic
+  import with a computed specifier, which bundlers replace with a throw, so every export failed
+  with `Hue telemetry request failed` and no status while plain Node was unaffected. Both modules
+  are now literal imports, and the package verifier rejects a computed specifier in any module an
+  application bundles. `serverExternalPackages` is no longer needed.
+
 ### [0.20.7] - 2026-10-18
 
 #### Changed
