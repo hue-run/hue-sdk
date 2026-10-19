@@ -245,7 +245,7 @@ def verify_trace(
     done, cancelled, lock = Event(), Event(), Lock()
     latest: TraceReceipt | None = None
     missing = False
-    lookup: Thread | None = None
+    lookup = False
     project: list[Project | None] = []
     result: TraceVerificationResult | None = None
     error: TraceVerificationError | None = None
@@ -316,12 +316,7 @@ def verify_trace(
                     # Once the backoff would outlast the budget, the rest of it names the
                     # project the key searched instead of sleeping.
                     if delay >= remaining and missing and on_missing is not None:
-                        lookup = Thread(
-                            target=lambda: project.append(on_missing()),
-                            name="hue-verify-project",
-                            daemon=True,
-                        )
-                        lookup.start()
+                        lookup = True
                         break
                     if cancelled.wait(min(delay, remaining)):
                         break
@@ -329,6 +324,9 @@ def verify_trace(
                     if delay >= remaining:
                         break
                     backoff = min(backoff * 2, 1)
+            # Still this worker, under poll_lock: a stalled lookup cannot pile up across calls.
+            if lookup and on_missing is not None:
+                project.append(on_missing())
         except TimeoutError:
             pass
         except Exception as failure:
@@ -364,7 +362,6 @@ def verify_trace(
         cancelled.set()
         if error is not None:
             raise error from None
-        if lookup is not None and result is None and latest is None:
-            lookup.join(max(0.0, deadline - monotonic()))
-            return TraceVerificationResult(False, None, project[0] if project else None)
+        if result is None and latest is None and project:
+            return TraceVerificationResult(False, None, project[0])
         return result or TraceVerificationResult(False, latest)
