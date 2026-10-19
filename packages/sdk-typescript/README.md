@@ -610,7 +610,8 @@ installed `ai` major version once per process and throws a `TypeError` below 7.
 
 ## Vercel AI SDK 7
 
-Compatible optional peers are `ai@^7.0.99` and `@ai-sdk/otel@^1.0.99`, alongside
+Compatible optional peers are `ai@^7.0.0` and `@ai-sdk/otel@^1.0.0` (install `@ai-sdk/otel` at
+the same version as `ai`; each `@ai-sdk/otel` release depends on exactly that `ai` release), alongside
 `@opentelemetry/api@1.9.1`. For an app without global AI SDK telemetry integrations,
 configure telemetry on each agent or generation call:
 
