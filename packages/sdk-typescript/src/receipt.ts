@@ -242,6 +242,7 @@ async function verifyTraceAtPath(
   const timer = setTimeout(() => controller.abort(), timeout);
   const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   let receipt: TraceReceipt | null = null;
+  let missing = false;
   let lookup: Promise<ProjectConnection | undefined> | undefined;
   let delay = 250;
   try {
@@ -271,8 +272,7 @@ async function verifyTraceAtPath(
             "This Hue server does not support trace receipts. Check the server version and baseUrl.",
             404,
           );
-        // Look up the project while polling continues, so the answer fits the same budget.
-        lookup ??= onMissing?.();
+        missing = true;
       } else {
         await response.body?.cancel();
         if (response.status === 429 || response.status === 503) {
@@ -294,6 +294,12 @@ async function verifyTraceAtPath(
       const remaining = deadline - performance.now();
       if (remaining <= 0) break;
       const wait = Math.max(delay, retryAfter);
+      // Once the backoff would outlast the budget, the rest of it names the project the key
+      // searched instead of sleeping.
+      if (wait >= remaining && missing && onMissing) {
+        lookup = onMissing();
+        break;
+      }
       await pause(Math.min(wait, remaining), requestSignal);
       // A truncated backoff exhausts this call even if a timer wakes just early.
       if (wait >= remaining) break;
