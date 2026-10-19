@@ -800,6 +800,7 @@ function documentStandIn(
         execution.state = body.state as Execution["state"];
         calls.completions.push({
           ...body,
+          caseKey: frozenCase.externalKey,
           executionId: execution.id,
           filenames: ids.map((id) => artifacts.get(id)!.filename),
         });
@@ -1897,7 +1898,10 @@ describe("hue eval command workers", () => {
           expect(standIn.calls.starts).toBe(kinds.length);
           expect(standIn.calls.completions).toHaveLength(kinds.length);
           expect(standIn.worlds.size).toBe(kinds.filter((kind) => kind === "world").length);
-          for (const [index, completion] of standIn.calls.completions.entries()) {
+          const expectedKinds = new Map(kinds.map((kind, index) => [`${kind}-${index}`, kind]));
+          for (const completion of standIn.calls.completions) {
+            const kind = expectedKinds.get(String(completion.caseKey));
+            expect(kind).toBeDefined();
             const answer = completion.output as Record<string, unknown>;
             expect(completion.state).toBe("succeeded");
             expect(answer).toMatchObject({
@@ -1905,9 +1909,9 @@ describe("hue eval command workers", () => {
               config: { configured: true },
               cwd,
               relativeDependency: "application settings",
-              hasWorld: kinds[index] === "world",
-              hasMcp: kinds[index] === "world",
-              hasMirror: kinds[index] === "world",
+              hasWorld: kind === "world",
+              hasMcp: kind === "world",
+              hasMirror: kind === "world",
               staleMirror: null,
               hueKey: null,
               mcpKey: null,
@@ -1920,8 +1924,8 @@ describe("hue eval command workers", () => {
                 "outputDirectory",
               ],
             });
-            if (kinds[index] === "direct") expect(answer.environmentRunId).toBeNull();
-            expect(existsSync(String(answer.caseDirectory))).toBe(kinds[index] === "direct");
+            if (kind === "direct") expect(answer.environmentRunId).toBeNull();
+            expect(existsSync(String(answer.caseDirectory))).toBe(kind === "direct");
           }
           expect([...standIn.worlds.values()].every((world) => world.status === "completed")).toBe(
             true,
