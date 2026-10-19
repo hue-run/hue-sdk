@@ -12,7 +12,6 @@ refuses to publish a version without a matching entry below.
 
 - The optional Vercel AI SDK peers widen to `ai@^6.0.0 || ^7.0.0` and `@ai-sdk/otel@^1.0.0`. `hueTelemetry` uses only the per-call `integrations` option and `OpenTelemetry({ tracer, usage })`, present since `ai@7.0.0` / `@ai-sdk/otel@1.0.0`, so apps on other AI SDK 7 patch releases no longer get peer warnings. The installed-package tests still run the `7.0.99 / 1.0.99` and `7.0.100 / 1.0.100` pairs.
 
-||||||| 87c9c63
 ### [0.20.8] - 2026-10-19
 
 #### Fixed
