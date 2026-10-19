@@ -836,11 +836,12 @@ async function detectMcpClient(cwd: string): Promise<string | undefined> {
 /** Manifests in the repository root that name its language; the CLI stays outside `hue setup`. */
 const LANGUAGE_MARKERS: ReadonlyArray<readonly [agent: string, marker: string]> = [
   ["./hue-agent.ts", "tsconfig.json"],
-  ["./hue-agent.ts", "package.json"],
   ['--command "<agent start command>"', "pyproject.toml"],
   ['--command "<agent start command>"', "requirements.txt"],
   ['--command "<agent start command>"', "uv.lock"],
   ['--command "<agent start command>"', "poetry.lock"],
+  // Last: a Python repository often carries a package.json for its tooling.
+  ["./hue-agent.ts", "package.json"],
 ];
 
 /** The `hue eval` agent argument for the repository's language; undefined when it is unknown. */

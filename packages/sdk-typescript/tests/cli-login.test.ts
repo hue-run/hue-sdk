@@ -243,6 +243,7 @@ describe("hue login", () => {
     const root = await temporaryRoot();
     await mkdir(join(root, ".cursor"));
     await writeFile(join(root, "pyproject.toml"), '[project]\nname = "agent"\n');
+    await writeFile(join(root, "package.json"), '{ "devDependencies": { "prettier": "3" } }\n');
     const python = await login(["--origin", ORIGIN], { cwd: root, lines: [KEY] });
     expect(python.code).toBe(0);
     expect(python.stdout).toContain(
