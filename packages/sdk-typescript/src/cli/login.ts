@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import { isLoopbackHost } from "../config.js";
+import { detectSetupProject } from "../setup/detect.js";
 import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
 
 /**
@@ -787,16 +788,61 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
   }
   if (failure) return fail(failure.message, failure.code);
 
-  out("Next steps:");
+  const steps: string[] = [];
   if (stored.includes("coding-agent"))
     // `hue mcp install` defaults to production; a non-default origin needs its own endpoint.
     // Without --auth it configures sign-in unless HUE_MCP_KEY is exported, so name the key stored.
-    out(
-      `  hue mcp install --client claude-code --auth key${mcpUrl === mcpUrlForOrigin(DEFAULT_ORIGIN) ? "" : ` --url ${mcpUrl}`}`,
+    steps.push(
+      `hue mcp install --client ${(await detectMcpClient(cwd)) ?? "<claude-code|codex|conductor|cursor|vscode|windsurf|gemini>"} --auth key${mcpUrl === mcpUrlForOrigin(DEFAULT_ORIGIN) ? "" : ` --url ${mcpUrl}`}`,
     );
-  if (stored.includes("evaluations"))
-    out(
-      `  hue eval --case "<name>" ./hue-agent.ts${envDisplay === DEFAULT_ENV_FILE ? "" : ` --env-file ${envDisplay}`}`,
-    );
+  if (stored.includes("evaluations")) {
+    const agent = await detectEvalAgent(cwd);
+    if (agent)
+      steps.push(
+        `hue eval --case "<name>" ${agent}${envDisplay === DEFAULT_ENV_FILE ? "" : ` --env-file ${envDisplay}`}`,
+      );
+  }
+  if (steps.length > 0) {
+    out("Next steps:");
+    for (const step of steps) out(`  ${step}`);
+  }
   return 0;
+}
+
+/** Client configuration present in the repository root; `hue mcp install` writes the first three. */
+const MCP_CLIENT_MARKERS: ReadonlyArray<readonly [client: string, marker: string]> = [
+  ["claude-code", ".mcp.json"],
+  ["cursor", ".cursor"],
+  ["vscode", ".vscode"],
+  ["claude-code", ".claude"],
+  ["codex", ".codex"],
+  ["gemini", ".gemini"],
+  ["windsurf", ".windsurf"],
+];
+
+/** The one client whose configuration the repository holds; undefined when none or several do. */
+async function detectMcpClient(cwd: string): Promise<string | undefined> {
+  const found = new Set<string>();
+  for (const [client, marker] of MCP_CLIENT_MARKERS)
+    if (
+      await access(join(cwd, marker)).then(
+        () => true,
+        () => false,
+      )
+    )
+      found.add(client);
+  return found.size === 1 ? [...found][0] : undefined;
+}
+
+/** The `hue eval` agent argument for the repository's language; undefined when it is unknown. */
+async function detectEvalAgent(cwd: string): Promise<string | undefined> {
+  let languages: readonly string[] = [];
+  try {
+    ({ languages } = await detectSetupProject(cwd));
+  } catch {
+    // An unreadable manifest only hides the hint.
+  }
+  if (languages.includes("typescript")) return "./hue-agent.ts";
+  if (languages.includes("python")) return '--command "<agent start command>"';
+  return undefined;
 }
