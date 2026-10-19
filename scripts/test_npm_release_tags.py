@@ -6,6 +6,9 @@ import importlib.util
 import io
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -454,6 +457,99 @@ class NpmReleaseTagTests(unittest.TestCase):
         self.assertIn('prerelease="--prerelease"', workflow)
         self.assertNotIn("npm dist-tag add", workflow)
 
+    def test_workflow_publishes_each_npm_version_once_and_the_alias_after_acceptance(self):
+        jobs = workflow_jobs()
+        alias = jobs["publish-npm-alias"]
+        self.assertIn("needs: accept-npm", alias)
+        self.assertIn("inputs.npm_dist_tag == 'latest'", alias)
+        self.assertIn("id-token: write", alias)
+        # The job holding the publishing identity runs no repository script; acceptance is apart.
+        self.assertNotIn("scripts/", alias)
+        self.assertIn("needs: publish-npm-alias", jobs["accept-npm-alias"])
+        self.assertNotIn("id-token", jobs["accept-npm-alias"])
+        self.assertIn("--npm-package hue-run", jobs["accept-npm-alias"])
+        self.assertIn(
+            "working-directory: packages/aliases/npm-hue-run\n"
+            "        run: npm publish --access public --ignore-scripts",
+            alias,
+        )
+        self.assertIn(
+            "if: steps.registry.outputs.already-published == 'false'\n"
+            '        run: npm publish ".artifacts/hue-run-sdk-',
+            jobs["publish-npm"],
+        )
+        sdk = step_script(jobs["publish-npm"], "Check whether npm already holds this version")
+        self.assertEqual(run_step(sdk, 404, "9.9.9"), (0, {"already-published": "false"}))
+        self.assertEqual(run_step(sdk, 200, "9.9.9"), (0, {"already-published": "true"}))
+        self.assertEqual(run_step(sdk, 503, "9.9.9")[0], 1)
+
+    @unittest.skipIf(shutil.which("node") is None, "the alias check reads package.json with node")
+    def test_the_alias_is_published_only_at_the_released_version_pinning_that_sdk(self):
+        check = step_script(
+            workflow_jobs()["publish-npm-alias"],
+            "Require the alias at the released version, pinning exactly that SDK",
+        )
+        directory = ROOT / "packages/aliases/npm-hue-run"
+        manifest = json.loads((directory / "package.json").read_text())
+        version = manifest["version"]
+        # The committed alias is at its own version and pins exactly that SDK.
+        self.assertEqual(manifest["dependencies"], {"@hue-run/sdk": version})
+        published = {"publish": "true", "accept": "true"}
+        self.assertEqual(run_step(check, 404, version, directory), (0, published))
+        self.assertEqual(
+            run_step(check, 200, version, directory), (0, {**published, "publish": "false"})
+        )
+        self.assertEqual(run_step(check, 503, version, directory)[0], 1)
+        # An alias at another version, or pinning another SDK, publishes nothing.
+        self.assertEqual(run_step(check, 404, "99.0.0", directory), (1, {}))
+        with tempfile.TemporaryDirectory() as temporary:
+            stale = {**manifest, "dependencies": {"@hue-run/sdk": "0.0.1"}}
+            (Path(temporary) / "package.json").write_text(json.dumps(stale))
+            self.assertEqual(run_step(check, 404, version, temporary), (1, {}))
+
+    def test_the_package_check_refuses_an_alias_that_does_not_match_the_sdk(self):
+        # verify-package.mjs, which prepare and accept-npm run before the alias job, refuses a
+        # release whose alias differs, so the alias job never sees one.
+        verify = (ROOT / "packages/sdk-typescript/scripts/verify-package.mjs").read_text()
+        self.assertIn(
+            "if (aliasPkg.version !== pkg.version || aliasPkg.dependencies?.[pkg.name] !== pkg.version)\n"
+            '  throw new Error("The hue-run alias version and dependency must match @hue-run/sdk");',
+            verify,
+        )
+        jobs = workflow_jobs()
+        self.assertIn("verify-package.mjs --artifacts-dir", jobs["prepare"])
+        self.assertIn("needs: accept-npm", jobs["publish-npm-alias"])
+
+
+ROOT = Path(__file__).parents[1]
+
+
+def workflow_jobs() -> dict[str, str]:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text()
+    return {job.split(":", 1)[0]: job for job in re.split(r"(?m)^  (?=[a-z-]+:$)", workflow)}
+
+
+def step_script(job: str, name: str) -> str:
+    step = next(s for s in re.split(r"(?m)^      - ", job) if f"name: {name}\n" in s)
+    body = step.split("run: |\n", 1)[1].splitlines()
+    return "\n".join(line[10:] for line in body if line.startswith("          ") or not line)
+
+
+def run_step(command: str, status: int, version: str, cwd=ROOT) -> tuple[int, dict[str, str]]:
+    """Runs a release step with `curl` answering `status`: its exit code and its outputs."""
+    with tempfile.TemporaryDirectory() as temporary:
+        curl = Path(temporary) / "curl"
+        curl.write_text(f"#!/bin/sh\nprintf {status}\n")
+        curl.chmod(0o700)
+        output = Path(temporary) / "output"
+        output.touch()
+        result = subprocess.run(
+            ["bash", "-e", "-c", command], cwd=cwd, capture_output=True, timeout=30,
+            env={**os.environ, "PATH": temporary + os.pathsep + os.environ["PATH"],
+                 "GITHUB_OUTPUT": str(output), "RELEASE_VERSION": version},
+        )
+        pairs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        return result.returncode, pairs
 
 if __name__ == "__main__":
     unittest.main()
