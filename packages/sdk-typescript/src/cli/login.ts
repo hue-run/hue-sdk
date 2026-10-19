@@ -7,7 +7,6 @@ import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import { isLoopbackHost } from "../config.js";
-import { detectSetupProject } from "../setup/detect.js";
 import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
 
 /**
@@ -834,15 +833,25 @@ async function detectMcpClient(cwd: string): Promise<string | undefined> {
   return found.size === 1 ? [...found][0] : undefined;
 }
 
+/** Manifests in the repository root that name its language; the CLI stays outside `hue setup`. */
+const LANGUAGE_MARKERS: ReadonlyArray<readonly [agent: string, marker: string]> = [
+  ["./hue-agent.ts", "tsconfig.json"],
+  ["./hue-agent.ts", "package.json"],
+  ['--command "<agent start command>"', "pyproject.toml"],
+  ['--command "<agent start command>"', "requirements.txt"],
+  ['--command "<agent start command>"', "uv.lock"],
+  ['--command "<agent start command>"', "poetry.lock"],
+];
+
 /** The `hue eval` agent argument for the repository's language; undefined when it is unknown. */
 async function detectEvalAgent(cwd: string): Promise<string | undefined> {
-  let languages: readonly string[] = [];
-  try {
-    ({ languages } = await detectSetupProject(cwd));
-  } catch {
-    // An unreadable manifest only hides the hint.
-  }
-  if (languages.includes("typescript")) return "./hue-agent.ts";
-  if (languages.includes("python")) return '--command "<agent start command>"';
+  for (const [agent, marker] of LANGUAGE_MARKERS)
+    if (
+      await access(join(cwd, marker)).then(
+        () => true,
+        () => false,
+      )
+    )
+      return agent;
   return undefined;
 }
