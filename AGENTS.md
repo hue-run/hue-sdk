@@ -24,10 +24,23 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 
 CI runs the same checks on Node 22, 24 and 26 (the installed package also under Bun 1.4.2) and on Python 3.10 and 3.14. Documentation-only changes need accurate, runnable snippets and working links. See CONTRIBUTING.md for review expectations, RELEASING.md for releases, VERSIONING.md for the compatibility policy and SECURITY.md for vulnerability reports.
 
+## Pstack skills
+
+The pstack skills in `.agents/skills/` are not loaded automatically (`disable-model-invocation`), so read each `SKILL.md` yourself at the step below.
+
+- **Start:** plan the change with ponytail (`.cursor/rules/ponytail.mdc`). If no `verify-*` skill covers the area you are changing, run `create-verification-skill` first. For a bug, apply `principle-fix-root-causes` before you write the fix.
+- **Throughout:** apply `unslop` to everything you write, and `technical-writing` to docs, commit messages and PR descriptions. When you edit a `.ts` or `.tsx` file, apply `typescript-best-practices`.
+- **Before you call it done:** apply `principle-prove-it-works`. Run `blast-radius` when the change reaches past its diff (shared code, a changed signature, schema or wire format). Then run the matching `verify-*` skill (see Before opening a PR).
+- **When a `verify-*` skill falls behind** (a feature change outgrows its `features/` map, or a periodic audit): run `maintain-verification-skill`.
+
 ## Before opening a PR
 
-- Keep the change minimal (ponytail), never at the cost of validation, error handling, security or accessibility, and run `/ponytail-review` on the diff where the host supports it.
-- Verify the change with the matching `.agents/skills/verify-*` skill (`verify-sdk`, `verify-package`, `verify-examples`) and paste its evidence into the PR: text output by default, one screenshot only for a visible UI change, never a recording. Run the narrowest check the skill names; CI runs the full commands above.
+- Keep the change minimal (ponytail), never at the cost of validation, error handling, security or accessibility, and run `/ponytail-review` on the diff.
+- Verify the change with the matching `.agents/skills/verify-*` skill (`verify-sdk`, `verify-package`, `verify-examples`) and paste its evidence into the PR: text output by default, one screenshot only for a visible UI change, never a recording. Run the narrowest check the skill names; CI runs the full commands above. The `Verification evidence` check fails a ready PR whose description names no `verify-*` skill or has no pasted output.
 - If the change adds or alters a feature, update that skill's `features/` map (`maintain-verification-skill` for bigger changes) and any affected user-facing docs (`technical-writing`).
 
 `create-verification-skill` and `maintain-verification-skill` say `.cursor/skills/`; in this repository they write to `.agents/skills/verify-<area>/` (`.claude/skills` links there).
+
+## Landing
+
+Once every required check passes on the PR head and every review thread is addressed and resolved, squash-merge the PR yourself (`gh pr merge <number> --squash --match-head-commit <head-sha>`); no maintainer approval is needed. Never merge with `--admin` or past a failing check. Releases and publishing stay with the maintainer (RELEASING.md).
