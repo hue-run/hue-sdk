@@ -395,9 +395,13 @@ export class HueClient {
    * @throws HueTraceVerificationError for authentication, unsupported endpoint, transport or invalid response failures.
    * @throws TypeError for an invalid trace ID or options.
    */
-  verifyTrace(traceId: string, options: VerifyTraceOptions = {}): Promise<TraceVerification> {
-    if (!this.enabled) return Promise.reject(new HueConnectionError("Hue telemetry is disabled"));
-    return verifyTrace(this.transport.options, traceId, options);
+  async verifyTrace(traceId: string, options: VerifyTraceOptions = {}): Promise<TraceVerification> {
+    if (!this.enabled) throw new HueConnectionError("Hue telemetry is disabled");
+    // Once Hue reports the trace missing, name the project this key searched so a wrong key reads
+    // differently from a trace that is not stored yet.
+    return verifyTrace(this.transport.options, traceId, options, () =>
+      this.checkConnection().catch(() => undefined),
+    );
   }
 
   /** The helper's current context: the innermost active Hue span, else the OpenTelemetry active context. */

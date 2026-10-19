@@ -11,6 +11,7 @@ import pytest
 import requests
 
 from hue_sdk import Hue, TraceReceipt, TraceVerificationError, TraceVerificationResult
+from hue_sdk.client import Project
 from hue_sdk.transport import SafeSession
 
 TRACE_ID = "a" * 32
@@ -100,11 +101,14 @@ def test_required_fields_wait_for_field_presence(receiver):
     assert len(receiver.requests) == 2
 
 
-def test_timeout_without_receipt_is_unverified(receiver):
+def test_timeout_without_receipt_is_unverified_and_names_the_project_searched(receiver):
     reply(receiver, {"code": "TRACE_NOT_FOUND"}, status=404)
     with Hue(receiver.url, KEY, capture_content=False) as hue:
         result = hue.verify_trace(TRACE_ID, timeout_millis=50)
-    assert result == TraceVerificationResult(False, None)
+    assert (result.verified, result.receipt) == (False, None)
+    assert isinstance(result.project, Project)
+    assert result.project.name == "Synthetic SDK project"
+    assert receiver.requests[-1][0] == "/api/v1/projects/current"
 
 
 @pytest.mark.parametrize("status", [429, 503])

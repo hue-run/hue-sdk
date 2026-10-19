@@ -610,7 +610,9 @@ installed `ai` major version once per process and throws a `TypeError` below 7.
 
 ## Vercel AI SDK 7
 
-Compatible optional peers are `ai@^7.0.99` and `@ai-sdk/otel@^1.0.99`, alongside
+Compatible optional peers are `ai@^7.0.0` and `@ai-sdk/otel@^1.0.0` (install `@ai-sdk/otel` with
+the matching patch number, for example `ai@7.0.99` with `@ai-sdk/otel@1.0.99`; each `@ai-sdk/otel`
+release depends on exactly that `ai` release), alongside
 `@opentelemetry/api@1.9.1`. For an app without global AI SDK telemetry integrations,
 configure telemetry on each agent or generation call:
 
@@ -1043,7 +1045,9 @@ receipt request. It does not flush, run your application, create a test span, or
 read captured values. `fields` reports the presence of stored normalized input,
 output, model, usage, and session data across the trace; it does not establish
 content correctness or that every possible span has arrived. Leave unknown usage
-and intentionally disabled content out of `requiredFields`.
+and intentionally disabled content out of `requiredFields`. When Hue reports the trace
+missing, `project` names the project the key searched: a trace absent there was sent with a
+different key (for example one still exported in the shell) or is not stored yet.
 
 The default budget is 10 seconds; set `timeoutMillis` up to 60,000. Only a recognized
 missing trace, HTTP 429, or HTTP 503 is retried, respecting `Retry-After` and the
