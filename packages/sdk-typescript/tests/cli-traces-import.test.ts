@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import {
   chmod,
@@ -29,6 +29,7 @@ import {
 } from "../src/cli/traces-import-convert.js";
 import { ZipArchive, unsafeZipPath } from "../src/cli/traces-import-zip.js";
 import { Progress } from "../src/cli/traces-import-upload.js";
+import { manifestTooLarge } from "../src/cli/traces-import-prepare.js";
 import { textContentType } from "../src/blobs.js";
 
 // Synthetic exports (OTLP/JSON, Langfuse observations, ATIF) and a loopback stand-in for Hue's
@@ -868,6 +869,86 @@ describe("hue traces import prepare", () => {
     );
     expect(validateManifest(manifest([]))).toContain("no traces");
     expect(validateManifest({ ...manifest([trace]), version: 2 })).toContain("version");
+    // The ceilings current servers accept: 512 batches and 10,000 values a trace, 25,000 traces.
+    const batches = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        sha256: sha256(`batch-${index}`),
+        bytes: 10,
+        span_count: 1,
+      }));
+    const withBatches = (count: number) => ({
+      ...trace,
+      span_count: count,
+      batches: batches(count),
+    });
+    expect(validateManifest(manifest([withBatches(65)]))).toBeUndefined();
+    expect(validateManifest(manifest([withBatches(512)]))).toBeUndefined();
+    expect(validateManifest(manifest([withBatches(513)]))).toContain("invalid batch list");
+    const values = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        sha256: sha256(`value-${index}`),
+        byte_size: 5,
+        content_type: "text/plain",
+      }));
+    expect(validateManifest(manifest([{ ...trace, blobs: values(1_001) }]))).toBeUndefined();
+    expect(validateManifest(manifest([{ ...trace, blobs: values(10_000) }]))).toBeUndefined();
+    expect(validateManifest(manifest([{ ...trace, blobs: values(10_001) }]))).toContain(
+      "invalid value list",
+    );
+    const traces = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        ...trace,
+        trace_id: sha256(`trace-${index}`).slice(0, 32),
+        batches: [{ ...batch, sha256: sha256(`trace-batch-${index}`) }],
+      }));
+    expect(validateManifest(manifest(traces(25_000)))).toBeUndefined();
+    expect(validateManifest(manifest(traces(25_001)))).toContain("more than 25000 traces");
+  });
+
+  test("refuses an upload whose valid manifest Hue could not register, before any request", async () => {
+    // Valid in every rule, and over the 32 MiB decoded bound: 2,100 traces whose history owner
+    // is a 16 KiB identifier (the longest the manifest allows).
+    const traces = Array.from({ length: 2_100 }, (_, index) => ({
+      trace_id: sha256(`big-${index}`).slice(0, 32),
+      span_count: 1,
+      batches: [{ sha256: sha256(`big-batch-${index}`), bytes: 10, span_count: 1 }],
+      blobs: [],
+      identity: { user: "u".repeat(16_384) },
+      origin: "unknown",
+    }));
+    const manifest = { version: 1, source: { formats: ["otlp_json"], helper: "hue-sdk" }, traces };
+    expect(validateManifest(manifest)).toBeUndefined();
+    const bytes = Buffer.from(JSON.stringify(manifest));
+    expect(bytes.byteLength).toBeGreaterThan(32 * 1024 * 1024);
+    const directory = await scratch();
+    await writeFile(join(directory, "manifest.json"), bytes);
+    const file = await authorizationFile(directory, [
+      TOKEN,
+      `http://127.0.0.1:9/api/v1/trace-imports/${IMPORT_ID}`,
+    ]);
+    let requests = 0;
+    const result = await run(
+      ["import", "upload", directory, "--authorization-file", file, "--json"],
+      {
+        fetch: async () => {
+          requests++;
+          throw new Error("no request was expected");
+        },
+      },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("over the 32 MiB");
+    expect(result.stderr).toContain("prepare the input in smaller parts");
+    expect(requests).toBe(0);
+    expect(await readdir(directory)).not.toContain("progress.json");
+  });
+
+  test("refuses a manifest Hue could not register before anything is sent", () => {
+    expect(manifestTooLarge(Buffer.from(JSON.stringify({ version: 1 })))).toBeUndefined();
+    // Over the decoded bound, however well it compresses.
+    expect(manifestTooLarge(Buffer.alloc(32 * 1024 * 1024 + 1))).toContain("over the 32 MiB");
+    // Within the decoded bound, over the 4 MiB a gzip registration takes.
+    expect(manifestTooLarge(randomBytes(5 * 1024 * 1024))).toContain("compressed, over the 4 MiB");
   });
 
   test("reads ZIP members in memory within bounds and refuses unsafe ones", async () => {

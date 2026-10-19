@@ -536,8 +536,8 @@ the Langfuse project's own keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, a
 `HUE_API_KEY`:
 
 ```sh
-npx -y @hue-run/sdk@0.20.5 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.20.5 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.20.7 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.20.7 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 - It reads Langfuse Cloud and self-hosted v4 through the Observations API v2, and self-hosted v3
@@ -547,6 +547,8 @@ npx -y @hue-run/sdk@0.20.5 import langfuse --env-path .env.langfuse --from 2026-
   `langfuse.observation.*` and `langfuse.trace.*` attributes Hue reads, the user, session, release
   and environment, and the model and token counts as GenAI attributes. Hex ids are kept and other
   ids derived from them, so running the same command again resumes an import without duplicates.
+- Langfuse's environment is also sent, as recorded, as `hue.import.source_environment`; only
+  traces Langfuse recorded in `production` add to a user's World.
 - Spans are exported by the SDK's transport with its content-capture default; `--no-content`
   sends metadata only.
 - With `--media`, files that Langfuse media references point to are downloaded and uploaded under
