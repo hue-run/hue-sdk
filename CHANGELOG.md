@@ -2300,7 +2300,8 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
-- 0.8.10 (2026-10-19): **Verify delivery** gives the running-server pattern (log or return the request span's `traceId`, verify from a diagnostic client), names the receipt fields once and says what a `null` receipt means.
+- 0.8.11 (2026-10-19): **Verify delivery** gives the running-server pattern (log or return the request span's `traceId`, verify from a diagnostic client), names the receipt fields once and says what a `null` receipt means.
+- 0.8.10 (2026-10-19): the TypeScript installation command pins `@hue-run/sdk@0.20.8`.
 - 0.8.9 (2026-10-19): the other-workflows table routes importing existing traces from OTLP JSON, Langfuse or ATIF exports to the bulk import guide (`load_hue_guide` with `import` returns the same guide).
 - 0.8.8 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.7`.
 - 0.8.7 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.6`.
