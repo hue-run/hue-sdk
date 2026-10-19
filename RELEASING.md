@@ -212,10 +212,11 @@ repository `hue-sdk`, workflow `release.yml`, environment `npm`), with provenanc
 `accept-npm` accepts an ordinary `latest` TypeScript release, `publish-npm-alias` publishes
 `packages/aliases/npm-hue-run` when its version equals the released version and it pins exactly that
 `@hue-run/sdk`; `accept-npm-alias` then waits until npm serves it under `latest` and checks its
-provenance and pin. The alias is packed from its static files at the release commit, the one
-exception to publishing only prepared archives, and its publishing job runs no repository script. An
-alias left at another version is skipped with a warning; an activation candidate never publishes it;
-a version npm already holds is not published again.
+provenance and pin. `verify-package.mjs` already refuses a release whose alias is at another
+version or pins another SDK, and installs the packed alias beside the tested archive. The alias is
+packed from its static files at the release commit, the one exception to publishing only prepared
+archives, and its publishing job runs no repository script. An activation candidate never publishes
+it, and a version npm already holds is not published again.
 
 A dispatch for a TypeScript version npm already holds publishes nothing new to npm: `publish-npm`
 skips the publish, `accept-npm` still checks the held bytes against the archive the run rebuilt and

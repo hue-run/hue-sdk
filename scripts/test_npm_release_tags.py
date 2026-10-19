@@ -500,14 +500,25 @@ class NpmReleaseTagTests(unittest.TestCase):
             run_step(check, 200, version, directory), (0, {**published, "publish": "false"})
         )
         self.assertEqual(run_step(check, 503, version, directory)[0], 1)
-        # An alias left at another version is not published, and not a failure.
-        self.assertEqual(
-            run_step(check, 404, "99.0.0", directory), (0, {"publish": "false", "accept": "false"})
-        )
+        # An alias at another version, or pinning another SDK, publishes nothing.
+        self.assertEqual(run_step(check, 404, "99.0.0", directory), (1, {}))
         with tempfile.TemporaryDirectory() as temporary:
             stale = {**manifest, "dependencies": {"@hue-run/sdk": "0.0.1"}}
             (Path(temporary) / "package.json").write_text(json.dumps(stale))
-            self.assertEqual(run_step(check, 404, version, temporary)[0], 1)
+            self.assertEqual(run_step(check, 404, version, temporary), (1, {}))
+
+    def test_the_package_check_refuses_an_alias_that_does_not_match_the_sdk(self):
+        # verify-package.mjs, which prepare and accept-npm run before the alias job, refuses a
+        # release whose alias differs, so the alias job never sees one.
+        verify = (ROOT / "packages/sdk-typescript/scripts/verify-package.mjs").read_text()
+        self.assertIn(
+            "if (aliasPkg.version !== pkg.version || aliasPkg.dependencies?.[pkg.name] !== pkg.version)\n"
+            '  throw new Error("The hue-run alias version and dependency must match @hue-run/sdk");',
+            verify,
+        )
+        jobs = workflow_jobs()
+        self.assertIn("verify-package.mjs --artifacts-dir", jobs["prepare"])
+        self.assertIn("needs: accept-npm", jobs["publish-npm-alias"])
 
 
 ROOT = Path(__file__).parents[1]

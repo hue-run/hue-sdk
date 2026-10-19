@@ -300,15 +300,11 @@ jobs:
         id: alias
         working-directory: packages/aliases/npm-hue-run
         run: |
+          # verify-package.mjs already refused a release whose alias differs and tested the packed
+          # alias against the archive; this rechecks the files this job packs.
           version="$(node -p 'require("./package.json").version')"
           pinned="$(node -p 'require("./package.json").dependencies["@hue-run/sdk"]')"
-          if [ "$version" != "$RELEASE_VERSION" ]; then
-            echo "::warning::hue-run is ${version}, not ${RELEASE_VERSION}: bump it with each release (RELEASING.md) to publish it"
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "accept=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$pinned" != "$RELEASE_VERSION" ]; then
+          if [ "$version" != "$RELEASE_VERSION" ] || [ "$pinned" != "$RELEASE_VERSION" ]; then
             echo "::error::hue-run ${version} pins @hue-run/sdk ${pinned}, not ${RELEASE_VERSION}"
             exit 1
           fi
