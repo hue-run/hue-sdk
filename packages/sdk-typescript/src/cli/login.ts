@@ -252,11 +252,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 type KeyCheck = { ok: true; detail: string } | { ok: false; rejected: boolean; detail: string };
 
-/**
- * Mirrors `checkConnection()` with `GET /api/v1/projects/current`, then confirms evaluation access
- * with `GET /api/v1/datasets`. No redirects are followed.
- */
-async function checkEvaluationsKey(
+/** Mirrors `checkConnection()` with `GET /api/v1/projects/current`; `detail` is the project name. */
+async function checkProject(
   fetchImpl: typeof fetch,
   origin: string,
   apiKey: string,
@@ -288,14 +285,23 @@ async function checkEvaluationsKey(
       detail: `Hue answered HTTP ${response.status} while checking the evaluations key.`,
     };
   }
-  let projectName: string;
   try {
     const project: unknown = JSON.parse(await readBoundedText(response));
     if (!isRecord(project) || typeof project.name !== "string") throw new Error("Invalid project");
-    projectName = project.name;
+    return { ok: true, detail: project.name };
   } catch {
     return { ok: false, rejected: false, detail: "Hue returned an unexpected project response." };
   }
+}
+
+/** {@link checkProject}, then confirms evaluation access with `GET /api/v1/datasets`. */
+async function checkEvaluationsKey(
+  fetchImpl: typeof fetch,
+  origin: string,
+  apiKey: string,
+): Promise<KeyCheck> {
+  const project = await checkProject(fetchImpl, origin, apiKey);
+  if (!project.ok) return project;
   // Every valid key reaches the project check; only a key with write access can list eval sets,
   // so a Read or Tracing only key is refused here instead of failing later in `hue eval`.
   let evaluations: Response;
@@ -322,7 +328,7 @@ async function checkEvaluationsKey(
       rejected: false,
       detail: `Hue answered HTTP ${evaluations.status} while checking evaluation access.`,
     };
-  return { ok: true, detail: projectName };
+  return project;
 }
 
 /** Reads JSON-RPC messages from a JSON body or a `text/event-stream` body. */
@@ -735,6 +741,24 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
           ? `Evaluations access accepted for project "${check.detail}".`
           : `Coding-agent access accepted; the Hue MCP server lists ${check.detail} tools.`,
       );
+      // Loaders such as `uv run --env-file` and dotenv keep an exported variable over the file,
+      // so a stale shell key silently sends traces to another project. Name projects, never keys.
+      if (kind === "evaluations" && env.HUE_API_KEY && env.HUE_API_KEY !== value) {
+        // The shell key only goes to the server it was exported for.
+        const shellOrigin = env.HUE_BASE_URL ?? DEFAULT_ORIGIN;
+        const shell =
+          shellOrigin === origin ? await checkProject(fetchImpl, origin, env.HUE_API_KEY) : null;
+        const owner = !shell
+          ? ` for ${shellOrigin}`
+          : shell.ok
+            ? ` for project "${shell.detail}"`
+            : shell.rejected
+              ? " that Hue does not accept"
+              : " whose project could not be checked";
+        stderr.write(
+          `Warning: this shell already exports a different HUE_API_KEY${owner}. It takes precedence over ${envDisplay} (project "${check.detail}") in tools that load env files without overriding them; unset it before running the application.\n`,
+        );
+      }
     }
     if (!failure) {
       const text = mergeEnvText(envFile.text, updates);
@@ -787,16 +811,72 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
   }
   if (failure) return fail(failure.message, failure.code);
 
-  out("Next steps:");
+  const steps: string[] = [];
   if (stored.includes("coding-agent"))
     // `hue mcp install` defaults to production; a non-default origin needs its own endpoint.
     // Without --auth it configures sign-in unless HUE_MCP_KEY is exported, so name the key stored.
-    out(
-      `  hue mcp install --client claude-code --auth key${mcpUrl === mcpUrlForOrigin(DEFAULT_ORIGIN) ? "" : ` --url ${mcpUrl}`}`,
+    steps.push(
+      `hue mcp install --client ${(await detectMcpClient(cwd)) ?? "<claude-code|codex|conductor|cursor|vscode|windsurf|gemini>"} --auth key${mcpUrl === mcpUrlForOrigin(DEFAULT_ORIGIN) ? "" : ` --url ${mcpUrl}`}`,
     );
-  if (stored.includes("evaluations"))
-    out(
-      `  hue eval --case "<name>" ./hue-agent.ts${envDisplay === DEFAULT_ENV_FILE ? "" : ` --env-file ${envDisplay}`}`,
-    );
+  if (stored.includes("evaluations")) {
+    const agent = await detectEvalAgent(cwd);
+    if (agent)
+      steps.push(
+        `hue eval --case "<name>" ${agent}${envDisplay === DEFAULT_ENV_FILE ? "" : ` --env-file ${envDisplay}`}`,
+      );
+  }
+  if (steps.length > 0) {
+    out("Next steps:");
+    for (const step of steps) out(`  ${step}`);
+  }
   return 0;
+}
+
+/** Client configuration present in the repository root; `hue mcp install` writes the first three. */
+const MCP_CLIENT_MARKERS: ReadonlyArray<readonly [client: string, marker: string]> = [
+  ["claude-code", ".mcp.json"],
+  ["cursor", ".cursor"],
+  ["vscode", ".vscode"],
+  ["claude-code", ".claude"],
+  ["codex", ".codex"],
+  ["gemini", ".gemini"],
+  ["windsurf", ".windsurf"],
+];
+
+/** The one client whose configuration the repository holds; undefined when none or several do. */
+async function detectMcpClient(cwd: string): Promise<string | undefined> {
+  const found = new Set<string>();
+  for (const [client, marker] of MCP_CLIENT_MARKERS)
+    if (
+      await access(join(cwd, marker)).then(
+        () => true,
+        () => false,
+      )
+    )
+      found.add(client);
+  return found.size === 1 ? [...found][0] : undefined;
+}
+
+/** Manifests in the repository root that name its language; the CLI stays outside `hue setup`. */
+const LANGUAGE_MARKERS: ReadonlyArray<readonly [agent: string, marker: string]> = [
+  ["./hue-agent.ts", "tsconfig.json"],
+  ['--command "<agent start command>"', "pyproject.toml"],
+  ['--command "<agent start command>"', "requirements.txt"],
+  ['--command "<agent start command>"', "uv.lock"],
+  ['--command "<agent start command>"', "poetry.lock"],
+  // Last: a Python repository often carries a package.json for its tooling.
+  ["./hue-agent.ts", "package.json"],
+];
+
+/** The `hue eval` agent argument for the repository's language; undefined when it is unknown. */
+async function detectEvalAgent(cwd: string): Promise<string | undefined> {
+  for (const [agent, marker] of LANGUAGE_MARKERS)
+    if (
+      await access(join(cwd, marker)).then(
+        () => true,
+        () => false,
+      )
+    )
+      return agent;
+  return undefined;
 }
