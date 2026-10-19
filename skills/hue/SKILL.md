@@ -3,7 +3,7 @@ name: hue
 description: "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction."
 metadata:
   author: hue-run
-  version: "0.8.8"
+  version: "0.8.9"
 ---
 
 # Hue
@@ -139,6 +139,7 @@ These pages own their procedures. Read the page with curl, adding `.md` to its U
 | Investigate production: what needs attention, failed or is slow | [Recipes](https://docs.hue.run/agents/mcp-tools#recipes); the MCP's `load_hue_guide` with `production` returns the same guide |
 | Understand findings, intents, request answers or trace checks | [Classifiers](https://docs.hue.run/classifiers/overview) |
 | Turn a trace into a case or eval set | [Create a case](https://docs.hue.run/evaluations/case-from-trace) |
+| Import existing traces from OTLP JSON, Langfuse or ATIF exports | [Bulk import existing traces](https://docs.hue.run/guides/import-traces); the MCP's `load_hue_guide` with `import` returns the same guide |
 | Run or regression-test the agent against cases with `hue eval` | [Run your agent](https://docs.hue.run/evaluations/run-your-agent) |
 | Point the agent's own app clients at a World during evaluations | [Connect your agent](https://docs.hue.run/evaluations/eval-ready-agent), with [Worlds](https://docs.hue.run/worlds/overview) and [Simulations](https://docs.hue.run/evaluations/simulations) |
 | Evaluate a function in-process or in CI | [Local evaluations](https://docs.hue.run/evaluations/first-evaluation) |
