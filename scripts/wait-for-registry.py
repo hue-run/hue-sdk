@@ -2,8 +2,9 @@
 
 npm and PyPI answer from caches that lag a publish by seconds to minutes, so an acceptance job
 that reads them at once can see the previous state. This polls, from the job's own runner, the
-same documents those tools request: npm's full version document and the abbreviated package
-document `npm install` reads (with the dist-tag), and PyPI's simple index with pip's headers and
+same documents those tools request: npm's full version document, the abbreviated package
+document `npm install` reads (with the dist-tag) and the full package document `npm view` reads,
+each cached apart, and PyPI's simple index with pip's headers and
 the version document the release check reads. It never writes to a registry.
 """
 
@@ -72,6 +73,12 @@ def npm_missing(
         missing.append("the version in the install document")
     elif abbreviated.get("dist-tags", {}).get(dist_tag) != version:
         missing.append(f"the {dist_tag} dist-tag")
+    packument = fetch(
+        f"https://registry.npmjs.org/{name}",
+        {"Accept": "application/json", "Cache-Control": "no-cache"},
+    )
+    if not packument or version not in packument.get("versions", {}):
+        missing.append("the version in the document npm view reads")
     return missing
 
 
