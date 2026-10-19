@@ -2527,12 +2527,13 @@ class OtlpHttpTransport implements IExporterTransport {
     try {
       if (this.aborted) throw new Error("Hue export deadline exceeded");
       const url = new URL(this.url);
-      const protocol = url.protocol;
       // Loaded on first use, as OpenTelemetry's exporter does, so importing Hue never loads http
-      // before the application's http instrumentation can patch it. A request measured before it
-      // was sent is not compressed again.
+      // before the application's http instrumentation can patch it. Each specifier is a literal:
+      // bundlers (Next.js Turbopack, webpack) cannot resolve a computed one and replace the import
+      // with a throw, so every export would fail. A request measured before it was sent is not
+      // compressed again.
       const [{ Agent: ConnectionAgent, request }, body] = await Promise.all([
-        import(protocol === "https:" ? "node:https" : "node:http"),
+        url.protocol === "https:" ? import("node:https") : import("node:http"),
         this.body && data === this.body.data ? this.body.compressed : compress(data),
       ]);
       if (this.aborted) throw new Error("Hue export deadline exceeded");
