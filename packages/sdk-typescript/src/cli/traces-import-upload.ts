@@ -9,7 +9,7 @@ import {
   type TraceImportManifest,
   type TraceImportTotals,
 } from "./traces-import-convert.js";
-import { MANIFEST_FILE, PROGRESS_FILE } from "./traces-import-prepare.js";
+import { MANIFEST_FILE, manifestTooLarge, PROGRESS_FILE } from "./traces-import-prepare.js";
 
 /**
  * `hue traces import upload`: delivers a prepared bundle to Hue's import routes with the
@@ -321,6 +321,9 @@ export async function uploadTraceBundle(
   }
   const invalid = validateManifest(manifest);
   if (invalid) throw new UploadStop(`${MANIFEST_FILE} is not valid: ${invalid}`, "bundle_invalid");
+  // A manifest registration would refuse (413) is refused here, before anything is sent.
+  const tooLarge = manifestTooLarge(manifestBytes);
+  if (tooLarge) throw new UploadStop(tooLarge, "bundle_invalid");
   const manifestDigest = sha256Hex(manifestBytes);
   const totals = manifestTotals(manifest);
   // Every declared file must be present before the first request: a bundle missing a batch

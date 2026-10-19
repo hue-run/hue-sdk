@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
+import { gzipSync } from "node:zlib";
 import { sdkVersion } from "../version.js";
 import {
   batchEntries,
@@ -244,6 +245,19 @@ async function prepareOutputDirectory(directory: string): Promise<void> {
   }
 }
 
+/** Why a manifest cannot be registered, or undefined: Hue reads at most 32 MiB decoded and takes
+ * at most 4 MiB on the wire, gzip as the upload sends it. Checked here, before any upload. */
+export function manifestTooLarge(bytes: Uint8Array): string | undefined {
+  // No division by a name: the published package's import-boundary check reads one as a regex.
+  const mebibytes = (value: number) => `${Math.ceil(value * 2 ** -20)} MiB`;
+  if (bytes.byteLength > traceImportLimits.manifestBytes)
+    return `The manifest is ${mebibytes(bytes.byteLength)}, over the ${mebibytes(traceImportLimits.manifestBytes)} Hue reads; prepare the input in smaller parts`;
+  const wire = gzipSync(bytes, { level: 6 }).byteLength;
+  if (wire > traceImportLimits.manifestWireBytes)
+    return `The manifest is ${mebibytes(wire)} compressed, over the ${mebibytes(traceImportLimits.manifestWireBytes)} a registration takes; prepare the input in smaller parts`;
+  return undefined;
+}
+
 async function writePrivate(path: string, bytes: Uint8Array | string): Promise<void> {
   const temporary = `${path}.tmp`;
   await writeFile(temporary, bytes, { mode: 0o600, flag: "w" });
@@ -479,8 +493,8 @@ export async function prepareTraceBundle(
   const invalid = validateManifest(manifest);
   if (invalid) throw new PrepareError(`The prepared manifest is not valid: ${invalid}`);
   const bytes = Buffer.from(JSON.stringify(manifest), "utf8");
-  if (bytes.byteLength > traceImportLimits.manifestBytes)
-    throw new PrepareError("The manifest exceeds 8 MiB; prepare the input in smaller parts");
+  const tooLarge = manifestTooLarge(bytes);
+  if (tooLarge) throw new PrepareError(tooLarge);
   await writePrivate(join(outputDirectory, MANIFEST_FILE), bytes);
   return {
     manifest_digest: createHash("sha256").update(bytes).digest("hex"),

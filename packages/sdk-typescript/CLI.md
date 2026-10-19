@@ -536,8 +536,9 @@ instrumentation scope `hue.import.atif`, and the run's agent span is named `invo
 <agent.name>` from the export's own agent. ATIF records instants, not durations, so model and tool
 spans are points in time, and a tool's result is kept as text with no error status of the
 importer's making. The same trace in two files is one trace when the copies agree and a refusal
-when they differ; a trace with more than 100,000 spans, 64 batches or 1,000 values is refused and
-named. Nothing about where a file sat or what it was called reaches a span: a renamed, reordered
+when they differ; a trace with more than 100,000 spans, 512 batches or 10,000 values is refused and
+named, and an input of more than 25,000 traces, or whose manifest would exceed 32 MiB (4 MiB
+compressed), is refused whole. Nothing about where a file sat or what it was called reaches a span: a renamed, reordered
 or re-zipped copy of the bundle prepares to byte-identical batches and the same manifest digest.
 
 The report (`--json` prints it as one object) names `manifest_digest`, `totals` (traces, batches,
@@ -553,7 +554,7 @@ no upload has started in it.
 
 **Authorize.** Call `prepare_trace_import` over the Hue MCP with the report's `manifest_digest`,
 `totals` and `source`. It answers the import id, `upload_url` and an `authorization` (`hue_it_` and
-43 characters) valid for an hour. Save its answer, or the authorization alone, in a private file
+43 characters) valid for a day. Save its answer, or the authorization alone, in a private file
 (mode 0600; never in a transcript, a message or a shell history). The same digest in the same
 project is the same import: calling again renews the authorization for an interrupted upload and
 revokes the earlier one.

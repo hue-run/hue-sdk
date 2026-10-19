@@ -24,6 +24,18 @@ refuses to publish a version without a matching entry below.
   Switching to `--no-judges` or `--no-output` with a pending dispatch stops before another
   agent run and requires recovery with the original flags.
 
+### [0.20.7] - 2026-10-18
+
+#### Changed
+
+- `hue traces import prepare` matches the import limits current servers accept: one import takes
+  up to 25,000 traces (was 10,000), a trace up to 512 batches (was 64) and 10,000 large values
+  (was 1,000), and the manifest up to 32 MiB decoded (was 8 MiB). A manifest over 4 MiB
+  compressed, the most a registration takes, is refused by `prepare` and by `upload` before
+  anything is sent. The import authorization `prepare_trace_import` returns now lasts a day (was an
+  hour); renewal, spans per trace, batch size, two requests at a time and the import's week are
+  unchanged.
+
 ### [0.20.6] - 2026-10-18
 
 #### Added
@@ -2293,6 +2305,8 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.9 (2026-10-19): the TypeScript installation command pins `@hue-run/sdk@0.21.0`.
+- 0.8.8 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.7`.
 - 0.8.7 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.6`.
 - 0.8.6 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.5`.
 - 0.8.5 (2026-10-18): the rule for other workflows no longer asks before every write to a Hue project, matching the Hue MCP server, which dropped its blanket write confirmation; its other rules are unchanged. The TypeScript installation command pins `@hue-run/sdk@0.20.4`.
