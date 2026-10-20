@@ -968,7 +968,7 @@ const installedPackageTests = [
   "media.test.ts",
   "case-files.test.ts",
 ];
-for (const patch of [99, 100]) {
+for (const patch of [99, 100, 137]) {
   const consumer = join(destination, `consumer-${patch}`);
   const chatbot = join(destination, `chatbot-${patch}`);
   await mkdir(consumer);

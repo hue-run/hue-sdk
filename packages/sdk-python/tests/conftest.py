@@ -11,6 +11,7 @@ from threading import Lock, Thread
 import pytest
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+from requests.structures import CaseInsensitiveDict
 
 
 @dataclass
@@ -24,7 +25,7 @@ class Receiver:
     legacy: bool = False
     # Headers every default OTLP acknowledgement carries, such as advertised limits.
     advertise: dict[str, str] = field(default_factory=dict)
-    requests: list[tuple[str, dict[str, str], bytes]] = field(default_factory=list)
+    requests: list[tuple[str, CaseInsensitiveDict[str], bytes]] = field(default_factory=list)
     # Requests to the upload route, which this receiver lacks.
     blob_requests: int = 0
     replies: deque[tuple[int, bytes, dict[str, str]]] = field(default_factory=deque)
@@ -97,12 +98,12 @@ def receiver():
                 return
             # Store decoded bytes so content assertions inspect what the wire carried, and the
             # raw wire length so cap assertions check what was actually sent.
-            headers = dict(self.headers)
-            headers["X-Wire-Bytes"] = str(len(body))
+            request_headers = CaseInsensitiveDict(self.headers)
+            request_headers["X-Wire-Bytes"] = str(len(body))
             if self.headers.get("Content-Encoding") == "gzip":
                 body = gzip.decompress(body)
             with state.lock:
-                state.requests.append((self.path, headers, body))
+                state.requests.append((self.path, request_headers, body))
                 if state.replies:
                     status, result, headers = state.replies.popleft()
                 elif self.path == "/api/v1/projects/current":

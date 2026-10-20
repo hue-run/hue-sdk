@@ -886,7 +886,7 @@ test("an agent command's key skips its interpreter, a Windows executable name in
 
 describe("hue eval", () => {
   test(
-    "simulation mode requests pinned model judges only with --judges",
+    "simulation mode requests pinned model judges by default",
     async () => {
       const f = hueStandIn();
       const cwd = await workspace();
@@ -915,7 +915,6 @@ describe("hue eval", () => {
             `${process.execPath} agent-command.mjs`,
             "--origin",
             f.baseUrl,
-            "--judges",
             "--wait",
             "0",
             "--json",

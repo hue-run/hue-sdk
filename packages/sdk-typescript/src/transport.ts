@@ -87,7 +87,7 @@ import {
   withTruncatedKeys,
   type ResourceCache,
 } from "./privacy.js";
-import { sdkVersion } from "./version.js";
+import { otlpExporterVersion, sdkVersion } from "./version.js";
 import type { ExportIssue, ExportReport, HueOptions, Signal } from "./types.js";
 
 type Response = {
@@ -2396,7 +2396,7 @@ class ReportingExporter<T extends RecordValue> {
   }
 }
 
-// OpenTelemetry's OTLP/HTTP transport rules (otlp-exporter-base 0.222), restated because that
+// OpenTelemetry's OTLP/HTTP transport rules, restated because that
 // transport discards response headers, which Hue uses to announce features.
 const MAX_RETRIES = 5;
 const INITIAL_BACKOFF_MILLIS = 1000;
@@ -2417,7 +2417,7 @@ const RETRYABLE_NETWORK_ERRORS = new Set([
   "EHOSTUNREACH",
 ]);
 /** OpenTelemetry's exporter token, which follows Hue's in the User-Agent as it always has. */
-const OTEL_USER_AGENT = "OTel-OTLP-Exporter-JavaScript/0.222.0";
+const OTEL_USER_AGENT = `OTel-OTLP-Exporter-JavaScript/${otlpExporterVersion}`;
 
 function retryAfterMillis(value: string | undefined): number | undefined {
   if (value == null) return undefined;

@@ -8,10 +8,25 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### [Unreleased]
+### [0.21.0] - 2026-10-20
+
+#### Breaking
+
+- `hue eval` runs up to four cases concurrently by default in one-shot and worker modes,
+  rather than one. Migration: pass `--concurrency 1` for serial execution. Explicit values
+  from 1 to 100 still take precedence. Case files and environments stay isolated. Existing
+  agent registrations and checkpoints remain compatible with earlier serial runs.
+- `hue eval` requests its run's pinned `llm_judge` evaluators by default after outputs upload.
+  Migration: pass `--no-judges` to keep the previous default. `--judges` remains accepted.
+  `--no-output` skips automatic judge requests, and explicitly combining it with `--judges`
+  remains an error. Preflight, runs without a pinned model judge, and judge creation alone
+  start no model jobs. Interrupted dispatch retains its existing idempotency and recovery.
+  Switching to `--no-judges` or `--no-output` with a pending dispatch stops before another
+  agent run and requires recovery with the original flags.
 
 #### Added
 
+- **Wire** HTTP tool spans accept endpoint evidence from the request, resolved client configuration, or receipt. URLs exclude credentials and fragments, redact query values by default, and follow the content-capture and redaction policies. An explicit allowlist can retain permitted routing query values. Instrumentation records the existing execution without another lookup or tool call.
 - **Wire** `hue.subagent(name, callback, options)` runs a sub-agent inside an `invoke_agent {name}`
   span carrying `gen_ai.operation.name` `invoke_agent`, `gen_ai.agent.name` and the new
   `hue.agent.role` `subagent`. The span nests under the active span, normally the `tool()` span
@@ -21,6 +36,10 @@ refuses to publish a version without a matching entry below.
   callback's result follow `captureContent` as `input.value` / `output.value`; errors are recorded
   as in `withSpan`. The calling agent's role stays explicit: set `hue.agent.role` `orchestrator`
   on its own span to label it.
+
+#### Changed
+
+- Update the certified OpenTelemetry dependencies to `0.223.0` / `2.12.0` and the AI SDK adapter pair to `7.0.137` / `1.0.137`. The exporter User-Agent version follows the locked exporter dependency. Babel stays on 7 to preserve Node 22.12 support.
 
 ### [0.20.8] - 2026-10-19
 
@@ -1667,10 +1686,11 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### [Unreleased]
+### [0.13.4] - 2026-10-20
 
 #### Added
 
+- **Wire** HTTP tool spans accept endpoint evidence from the request, resolved client configuration, or receipt. URLs exclude credentials and fragments, redact query values by default, and follow the content-capture and redaction policies. An explicit allowlist can retain permitted routing query values. Instrumentation records the existing execution without another lookup or tool call.
 - **Wire** `hue.subagent(name, input=..., parent_context=...)`, a context manager and a decorator
   for functions and coroutine functions, opens an `invoke_agent {name}` span carrying
   `gen_ai.operation.name` `invoke_agent`, `gen_ai.agent.name` and the new `hue.agent.role`
@@ -1678,6 +1698,10 @@ No registry release is claimed until publication and registry acceptance complet
   span of the call that started the sub-agent, or under `parent_context`, for example
   `Hue.extract(headers)` in another process. `input` and a decorated function's result follow
   `capture_content` as `input.value` / `output.value`; errors are recorded as in `span()`.
+
+#### Changed
+
+- Update the certified OpenTelemetry dependencies to `1.45.1` / `0.66b1`, OpenInference OpenAI to `0.1.65`, instrumentation to `0.1.71`, and semantic conventions to `0.1.41`. Update development type tooling and the pinned release Actions.
 
 ### [0.13.3] - 2026-10-20
 
@@ -2338,6 +2362,8 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.17 (2026-10-20): pin Python `0.13.4`, document released HTTP endpoint evidence, and include Node 26.
+- 0.8.16 (2026-10-20): the TypeScript installation command pins `@hue-run/sdk@0.21.0`.
 - 0.8.14 (2026-10-20): the Python installation commands pin `hue-run==0.13.3`.
 - 0.8.13 (2026-10-19): the integration table routes an application whose framework owns the agent loop or the root span (LangChain, LangGraph) to the LangChain and LangGraph integration page and the OpenTelemetry root-span section.
 - 0.8.12 (2026-10-19): the file is formatted with Prettier's defaults (table cell alignment), so `prettier --check` passes in repositories that vendor it. No wording changes.

@@ -204,7 +204,8 @@ def evaluation_receiver():
                 ):
                     return 500, {}
                 for span in spans:
-                    state.held.setdefault(span.trace_id.hex(), set()).add(span.span_id.hex())
+                    if span.end_time_unix_nano:
+                        state.held.setdefault(span.trace_id.hex(), set()).add(span.span_id.hex())
             return 200, b""
         download = re.fullmatch(r"/api/v1/artifacts/([0-9a-f-]+)/download", path)
         if download is not None:

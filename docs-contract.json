@@ -9,7 +9,7 @@
       {
         "boundary": "Install both adapter peers; preserve an existing global integration.",
         "path": "Vercel AI SDK adapter",
-        "verifiedSupport": "AI SDK / OTel pairs `7.0.99 / 1.0.99` and `7.0.100 / 1.0.100`"
+        "verifiedSupport": "AI SDK / OTel pairs `7.0.99 / 1.0.99`, `7.0.100 / 1.0.100` and `7.0.137 / 1.0.137`"
       },
       {
         "boundary": "Core-only installation supports AI SDK 6; the Hue AI SDK adapter requires version 7.",
@@ -19,12 +19,12 @@
       {
         "boundary": "`opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` are accepted as `>=1.40,<2`; other releases inside the range are accepted by the resolver but not individually certified; new 1.x releases are adopted through a `uv.lock` bump once the frozen CI jobs pass. Local evaluation checkpoints require POSIX filesystem behavior.",
         "path": "Python tracing and evaluations",
-        "verifiedSupport": "Python 3.10 and 3.14 with OpenTelemetry 1.44.0, the certified combination recorded in `uv.lock`; Python 3.10 and 3.12 with OpenTelemetry 1.40.0, the declared floor"
+        "verifiedSupport": "Python 3.10 and 3.14 with OpenTelemetry 1.45.1, the certified combination recorded in `uv.lock`; Python 3.10 and 3.12 with OpenTelemetry 1.40.0, the declared floor"
       },
       {
         "boundary": "Configure the instrumentor's own content controls. This does not certify every provider API.",
         "path": "Python OpenAI instrumentation",
-        "verifiedSupport": "OpenAI 3.14.0 and OpenInference OpenAI 0.1.60, using a synthetic HTTP streaming provider and a synthetic Responses call with a hosted MCP tool"
+        "verifiedSupport": "OpenAI 3.29.0 and OpenInference OpenAI 0.1.65, using a synthetic HTTP streaming provider and a synthetic Responses call with a hosted MCP tool"
       },
       {
         "boundary": "No Hue package or model wrapper required; metrics and OTLP gRPC ingestion are not supported.",
@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:be755dd63352883429422620db2989c9389e9b243a65048c9b9a20e01223b89a",
+    "sha256": "sha256:02e199f52b51822d362d8ef6bfab4d7a8e2d8f720fecffb84f1d480c91f29724",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -221,7 +221,7 @@
         }
       },
       "name": "hue-run",
-      "version": "0.13.3"
+      "version": "0.13.4"
     },
     "typescript": {
       "bins": {
@@ -743,7 +743,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.20.8"
+      "version": "0.21.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -752,10 +752,10 @@
     "description": "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.8.15"
+      "version": "0.8.17"
     },
     "name": "hue",
-    "sha256": "sha256:a279fea10934ade1bbdb6ba46ab40416928b6095482e1739544b7469ea5f4ab8",
+    "sha256": "sha256:f6d8d8bbc2f066a814dee997d8de112c765c1ef49bbc6156f367ff69026a3216",
     "source": "skills/hue/SKILL.md"
   }
 }

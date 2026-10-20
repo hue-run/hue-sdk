@@ -102,7 +102,7 @@ even if listed. Every allowed occurrence, including duplicate and empty values, 
 Metadata-only mode omits all endpoint evidence. Invalid evidence is omitted and counted without
 changing execution, results or exceptions. Do not supply secret-bearing paths or bypass existing
 masking. The helper never observes requests or infers identities automatically; see the
-[setup skill](../../skills/hue/SKILL.md#http-tool-endpoint-evidence-unreleased-sdk-checkout) for source checkout and dispatcher integration.
+[setup skill](../../skills/hue/SKILL.md#http-tool-endpoint-evidence) for source checkout and dispatcher integration.
 
 Tool/model metadata accepts plain strings; invalid values use stable fallback labels and increment instrumentation failures without invoking custom conversion hooks. Disabled tracing skips metadata validation.
 

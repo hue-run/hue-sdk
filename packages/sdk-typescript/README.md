@@ -215,7 +215,7 @@ are rejected even if allowlisted. Duplicate and empty allowed query values remai
 Metadata-only mode omits endpoint evidence. Invalid evidence is omitted and counted without
 changing the tool's result or exception. This helper does not observe HTTP automatically or infer
 account identifiers. Do not supply secret-bearing URL paths, and preserve existing masking of
-account identifiers. See the [setup skill](../../skills/hue/SKILL.md#http-tool-endpoint-evidence-unreleased-sdk-checkout)
+account identifiers. See the [setup skill](../../skills/hue/SKILL.md#http-tool-endpoint-evidence)
 for dispatcher integration and source checkout requirements.
 
 ## Images, documents and audio
@@ -552,8 +552,8 @@ the Langfuse project's own keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, a
 `HUE_API_KEY`:
 
 ```sh
-npx -y @hue-run/sdk@0.20.8 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.20.8 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.21.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.21.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 - It reads Langfuse Cloud and self-hosted v4 through the Observations API v2, and self-hosted v3

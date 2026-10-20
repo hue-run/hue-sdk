@@ -800,6 +800,7 @@ function documentStandIn(
         execution.state = body.state as Execution["state"];
         calls.completions.push({
           ...body,
+          caseKey: frozenCase.externalKey,
           executionId: execution.id,
           filenames: ids.map((id) => artifacts.get(id)!.filename),
         });
@@ -1132,9 +1133,207 @@ const inheritedWorld = {
   HUE_MCP_KEY: key,
 };
 
-describe("hue eval hosted judge opt-in", () => {
+describe("hue eval CLI concurrency", () => {
+  for (const worker of [false, true])
+    for (const concurrency of [undefined, 1, 2])
+      test(
+        `${worker ? "worker" : "one-shot"} runs ${concurrency ?? "default four"} isolated cases at a time`,
+        async () => {
+          const adoptRegisteredWorker = worker && concurrency === undefined;
+          const standIn = documentStandIn({
+            workerKinds: Array(6).fill("direct"),
+            workerRuns: adoptRegisteredWorker ? 2 : 1,
+          });
+          const cwd = await workerWorkspace();
+          const eventsPath = join(cwd, "events.jsonl");
+          await writeFile(
+            join(cwd, "worker-agent.mjs"),
+            `import { appendFileSync, readFileSync } from "node:fs";
+const descriptor = JSON.parse(readFileSync(process.env.HUE_CASE_DIR + "/case.json", "utf8"));
+if ("metadata" in descriptor || process.env.HUE_API_KEY || process.env.HUE_WORLD_TOKEN)
+  throw new Error("Case isolation failed");
+const event = { key: process.env.HUE_CASE_KEY, directory: process.env.HUE_CASE_DIR,
+  output: process.env.HUE_CASE_OUTPUT_DIR, pid: process.pid };
+appendFileSync(process.env.CASE_EVENTS, JSON.stringify({ ...event, type: "start" }) + "\\n");
+await new Promise(resolve => setTimeout(resolve, 500));
+appendFileSync(process.env.CASE_EVENTS, JSON.stringify({ ...event, type: "end" }) + "\\n");
+process.stdout.write(JSON.stringify({ answer: event.key }));
+`,
+          );
+          try {
+            const args = worker
+              ? workerArgs(cwd)
+              : [
+                  "--set",
+                  standIn.dataset.id,
+                  "--set-version",
+                  "1",
+                  "--scorer-version",
+                  standIn.scorerVersions[0]!.id,
+                  "--command",
+                  `node ${join(cwd, "worker-agent.mjs")}`,
+                  "--revision",
+                  "dual-cases-v1",
+                  "--checkpoint-dir",
+                  join(cwd, "checkpoints"),
+                  "--wait",
+                  "0",
+                ];
+            const options = {
+              cwd,
+              installed: true,
+              env: { HUE_BASE_URL: standIn.baseUrl, CASE_EVENTS: eventsPath },
+            };
+            if (adoptRegisteredWorker) {
+              const serial = await hue([...args, "--concurrency", "1"], options);
+              if (serial.status !== 0) throw new Error(serial.stderr + serial.stdout);
+              await writeFile(eventsPath, "");
+            }
+            const result = await hue(
+              [...args, ...(concurrency === undefined ? [] : ["--concurrency", `${concurrency}`])],
+              options,
+            );
+            if (result.status !== 0) throw new Error(result.stderr + result.stdout);
+            const events = (await readFile(eventsPath, "utf8"))
+              .trim()
+              .split("\n")
+              .map(
+                (line) =>
+                  JSON.parse(line) as {
+                    type: "start" | "end";
+                    key: string;
+                    directory: string;
+                    output: string;
+                    pid: number;
+                  },
+              );
+            let active = 0;
+            let peak = 0;
+            for (const event of events) {
+              active += event.type === "start" ? 1 : -1;
+              peak = Math.max(peak, active);
+            }
+            const starts = events.filter((event) => event.type === "start");
+            expect(peak).toBe(concurrency ?? 4);
+            expect(active).toBe(0);
+            expect(starts).toHaveLength(6);
+            for (const field of ["key", "directory", "output", "pid"] as const)
+              expect(new Set(starts.map((event) => event[field])).size).toBe(6);
+            expect(standIn.calls.starts).toBe(adoptRegisteredWorker ? 12 : 6);
+            expect(standIn.calls.completions).toHaveLength(adoptRegisteredWorker ? 12 : 6);
+            expect(standIn.calls.judgeJobs).toEqual([]);
+            if (adoptRegisteredWorker) {
+              expect(standIn.calls.register).toHaveLength(2);
+              expect(standIn.calls.register[1]).toEqual(standIn.calls.register[0]);
+              expect(standIn.calls.experiments).toHaveLength(2);
+            }
+            for (const completion of standIn.calls.completions)
+              expect(
+                starts.some(
+                  (event) => event.key === (completion.output as { answer: string }).answer,
+                ),
+              ).toBe(true);
+          } finally {
+            standIn.stop();
+            await rm(cwd, { recursive: true, force: true });
+          }
+        },
+        SPAWN_TIMEOUT,
+      );
+});
+
+describe("hue eval hosted judges", () => {
+  test.each([{ noOutput: false }, { noOutput: true }])(
+    "default dispatch skips an unpinned judge or omitted outputs: %j",
+    async ({ noOutput }) => {
+      const standIn = documentStandIn({ hostedJudge: {} });
+      const cwd = await mkdtemp(join(tmpdir(), "hue-eval-no-judge-jobs-"));
+      await writeFile(join(cwd, "agent.mjs"), agentSource);
+      try {
+        const result = await hue(
+          [
+            "--set",
+            standIn.dataset.id,
+            "--scorer-version",
+            standIn.scorerVersions[noOutput ? 0 : 1]!.id,
+            "--command",
+            `node ${join(cwd, "agent.mjs")}`,
+            "--wait",
+            "0",
+            ...(noOutput ? ["--no-output"] : []),
+          ],
+          { cwd, installed: true, env: { HUE_BASE_URL: standIn.baseUrl } },
+        );
+        expect(result.status).toBe(noOutput ? 1 : 0);
+        expect(standIn.calls.completions).toHaveLength(1);
+        expect(Object.hasOwn(standIn.calls.completions[0]!, "output")).toBe(!noOutput);
+        expect(standIn.calls.judgeJobs).toEqual([]);
+        expect(standIn.calls.requests.includes("GET /judge-budget")).toBe(false);
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([{ flags: [] }, { flags: ["--no-judges"] }])(
+    "--check requests no pinned judge jobs with flags %j",
+    async ({ flags }) => {
+      const standIn = documentStandIn({ hostedJudge: {} });
+      const cwd = await workerWorkspace();
+      try {
+        const result = await hue(
+          [
+            "--set",
+            standIn.dataset.id,
+            "--scorer-version",
+            standIn.scorerVersions[0]!.id,
+            "--command",
+            "node ./worker-agent.mjs",
+            "--check",
+            "--json",
+            ...flags,
+          ],
+          { cwd, installed: true, env: { HUE_BASE_URL: standIn.baseUrl } },
+        );
+        expect(result.status).toBe(0);
+        expect(JSON.parse(result.stdout).check.agent.concurrency).toBe("4");
+        expect(standIn.calls.experiments).toEqual([]);
+        expect(standIn.calls.judgeJobs).toEqual([]);
+        expect(standIn.calls.starts).toBe(0);
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("conflicting judge flags fail before any request", async () => {
+    const standIn = documentStandIn({ hostedJudge: {} });
+    const cwd = await workerWorkspace();
+    try {
+      const result = await hue(
+        [
+          "--set",
+          standIn.dataset.id,
+          "--command",
+          "node ./worker-agent.mjs",
+          "--judges",
+          "--no-judges",
+        ],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+      );
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("Choose either --judges or --no-judges");
+      expect(standIn.calls.requests).toEqual([]);
+    } finally {
+      standIn.stop();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   test(
-    "an unknown synthetic hosted-code variant is left to Hue without opting into model judges",
+    "an unknown synthetic hosted-code variant is left to Hue without requesting model judges",
     async () => {
       const standIn = documentStandIn({ syntheticHostedCode: true });
       const cwd = await mkdtemp(join(tmpdir(), "hue-hosted-verifier-"));
@@ -1209,7 +1408,7 @@ describe("hue eval hosted judge opt-in", () => {
               "--wait",
               "0",
               "--json",
-              ...(enabled ? ["--judges"] : []),
+              ...(enabled ? [] : ["--no-judges"]),
             ],
             { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
           );
@@ -1243,7 +1442,7 @@ describe("hue eval hosted judge opt-in", () => {
       const standIn = documentStandIn({ workerKinds: ["direct", "world"], hostedJudge: {} });
       const cwd = await workerWorkspace();
       try {
-        const result = await hue([...workerArgs(cwd), "--judges", "--wait", "0"], {
+        const result = await hue([...workerArgs(cwd), "--wait", "0"], {
           cwd,
           env: { HUE_BASE_URL: standIn.baseUrl, WORKER_INVOCATIONS: join(cwd, "calls.txt") },
         });
@@ -1267,7 +1466,7 @@ describe("hue eval hosted judge opt-in", () => {
 
   for (const worker of [false, true])
     test(
-      `lost judge acknowledgement resumes uploaded ${worker ? "worker" : "direct"} outputs after the budget is disabled`,
+      `lost judge acknowledgement refuses opt-out and resumes uploaded ${worker ? "worker" : "direct"} outputs after the budget is disabled`,
       async () => {
         const standIn = documentStandIn({
           hostedJudge: {},
@@ -1278,7 +1477,7 @@ describe("hue eval hosted judge opt-in", () => {
         await writeFile(join(cwd, "agent.mjs"), agentSource);
         try {
           const args = worker
-            ? [...workerArgs(cwd), "--judges", "--wait", "0"]
+            ? [...workerArgs(cwd), "--wait", "0"]
             : [
                 "--set",
                 standIn.dataset.id,
@@ -1286,7 +1485,6 @@ describe("hue eval hosted judge opt-in", () => {
                 standIn.scorerVersions[0]!.id,
                 "--command",
                 `node ${join(cwd, "agent.mjs")}`,
-                "--judges",
                 "--wait",
                 "0",
                 "--checkpoint-dir",
@@ -1301,6 +1499,14 @@ describe("hue eval hosted judge opt-in", () => {
           expect(standIn.calls.judgeJobs).toHaveLength(4);
           expect(standIn.acceptedJudgeJobs()).toBe(1);
           standIn.disableJudgeBudget();
+          const optedOut = await hue([...args, "--no-judges"], options);
+          expect(optedOut.status).toBe(1);
+          expect(optedOut.stderr).toContain(
+            "Recover the pending hosted checks with the original flags",
+          );
+          expect(standIn.calls.starts).toBe(1);
+          expect(standIn.calls.experiments).toHaveLength(1);
+          expect(standIn.calls.judgeJobs).toHaveLength(4);
           const repeated = await hue(args, options);
           expect(repeated.status).toBe(0);
           expect(repeated.stdout).toContain("Resuming hosted checks:");
@@ -1692,7 +1898,10 @@ describe("hue eval command workers", () => {
           expect(standIn.calls.starts).toBe(kinds.length);
           expect(standIn.calls.completions).toHaveLength(kinds.length);
           expect(standIn.worlds.size).toBe(kinds.filter((kind) => kind === "world").length);
-          for (const [index, completion] of standIn.calls.completions.entries()) {
+          const expectedKinds = new Map(kinds.map((kind, index) => [`${kind}-${index}`, kind]));
+          for (const completion of standIn.calls.completions) {
+            const kind = expectedKinds.get(String(completion.caseKey));
+            expect(kind).toBeDefined();
             const answer = completion.output as Record<string, unknown>;
             expect(completion.state).toBe("succeeded");
             expect(answer).toMatchObject({
@@ -1700,9 +1909,9 @@ describe("hue eval command workers", () => {
               config: { configured: true },
               cwd,
               relativeDependency: "application settings",
-              hasWorld: kinds[index] === "world",
-              hasMcp: kinds[index] === "world",
-              hasMirror: kinds[index] === "world",
+              hasWorld: kind === "world",
+              hasMcp: kind === "world",
+              hasMirror: kind === "world",
               staleMirror: null,
               hueKey: null,
               mcpKey: null,
@@ -1715,8 +1924,8 @@ describe("hue eval command workers", () => {
                 "outputDirectory",
               ],
             });
-            if (kinds[index] === "direct") expect(answer.environmentRunId).toBeNull();
-            expect(existsSync(String(answer.caseDirectory))).toBe(kinds[index] === "direct");
+            if (kind === "direct") expect(answer.environmentRunId).toBeNull();
+            expect(existsSync(String(answer.caseDirectory))).toBe(kind === "direct");
           }
           expect([...standIn.worlds.values()].every((world) => world.status === "completed")).toBe(
             true,
@@ -2494,7 +2703,7 @@ process.stdout.write(key);
     expect(forged.report.totals).toMatchObject({ skipped: 1, notApplicable: 0, error: 0 });
   }, 120_000);
 
-  test("an interrupted run resumes the saved experiment without invoking the agent again", async () => {
+  test("an interrupted serial run adopts the defaults without invoking the agent again", async () => {
     // Every attempt of the completion fails (the client sends a keyed completion four times before
     // it is the caller's error), so the first run stops with the outcome saved and the resume
     // completes it.
@@ -2515,7 +2724,10 @@ process.stdout.write(key);
       "30",
     ];
     try {
-      const interrupted = await hue(args, { cwd, env: { HUE_BASE_URL: standIn.baseUrl } });
+      const interrupted = await hue([...args, "--concurrency", "1", "--no-judges"], {
+        cwd,
+        env: { HUE_BASE_URL: standIn.baseUrl },
+      });
       expect(interrupted.status).toBe(1);
       expect(standIn.calls.completions).toHaveLength(0);
       const uploadsBefore = standIn.calls.uploads;
