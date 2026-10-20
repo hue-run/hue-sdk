@@ -9,7 +9,7 @@
       {
         "boundary": "Install both adapter peers; preserve an existing global integration.",
         "path": "Vercel AI SDK adapter",
-        "verifiedSupport": "AI SDK / OTel pairs `7.0.99 / 1.0.99` and `7.0.100 / 1.0.100`"
+        "verifiedSupport": "AI SDK / OTel pairs `7.0.99 / 1.0.99`, `7.0.100 / 1.0.100` and `7.0.137 / 1.0.137`"
       },
       {
         "boundary": "Core-only installation supports AI SDK 6; the Hue AI SDK adapter requires version 7.",
@@ -19,12 +19,12 @@
       {
         "boundary": "`opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` are accepted as `>=1.40,<2`; other releases inside the range are accepted by the resolver but not individually certified; new 1.x releases are adopted through a `uv.lock` bump once the frozen CI jobs pass. Local evaluation checkpoints require POSIX filesystem behavior.",
         "path": "Python tracing and evaluations",
-        "verifiedSupport": "Python 3.10 and 3.14 with OpenTelemetry 1.44.0, the certified combination recorded in `uv.lock`; Python 3.10 and 3.12 with OpenTelemetry 1.40.0, the declared floor"
+        "verifiedSupport": "Python 3.10 and 3.14 with OpenTelemetry 1.45.1, the certified combination recorded in `uv.lock`; Python 3.10 and 3.12 with OpenTelemetry 1.40.0, the declared floor"
       },
       {
         "boundary": "Configure the instrumentor's own content controls. This does not certify every provider API.",
         "path": "Python OpenAI instrumentation",
-        "verifiedSupport": "OpenAI 3.14.0 and OpenInference OpenAI 0.1.60, using a synthetic HTTP streaming provider and a synthetic Responses call with a hosted MCP tool"
+        "verifiedSupport": "OpenAI 3.29.0 and OpenInference OpenAI 0.1.65, using a synthetic HTTP streaming provider and a synthetic Responses call with a hosted MCP tool"
       },
       {
         "boundary": "No Hue package or model wrapper required; metrics and OTLP gRPC ingestion are not supported.",
@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:be755dd63352883429422620db2989c9389e9b243a65048c9b9a20e01223b89a",
+    "sha256": "sha256:ab1baae35af43793031384cdfc8fac038f0936fe7b6999f8ea67e05490509df6",
     "source": "COMPATIBILITY.md"
   },
   "packages": {

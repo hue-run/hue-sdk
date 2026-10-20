@@ -151,7 +151,7 @@ Use Node 24, Bun 1.4.2 and uv 0.12.5. No Hue account or API key is needed; every
 node packages/sdk-typescript/scripts/verify-package.mjs
 ```
 
-This builds a tarball, installs it into independent consumers, runs the exporter/evaluation tests with AI SDK / OTel pairs `7.0.99 / 1.0.99` and `7.0.100 / 1.0.100`, then builds and exercises the reference chatbot under Node. It prints the tested archive and consumer locations.
+This builds a tarball, installs it into independent consumers, runs the exporter/evaluation tests with AI SDK / OTel pairs `7.0.99 / 1.0.99`, `7.0.100 / 1.0.100` and `7.0.137 / 1.0.137`, then builds and exercises the reference chatbot under Node. It prints the tested archive and consumer locations.
 
 ```bash
 cd packages/sdk-python
@@ -188,7 +188,7 @@ See [VERSIONING.md](./VERSIONING.md) for what may change between releases.
 
 ## Compatibility and limits
 
-TypeScript uses compatible-major peers for AI SDK 7 and its OTel integration. The two patch pairs above are tested; other combinations are not individually certified. Core-only installation can coexist with AI SDK 6; the `hueTelemetry` adapter remains AI SDK 7 only. Existing OTel applications can use a standard OTLP exporter directly without this package. See [compatibility](./COMPATIBILITY.md) before changing application dependencies.
+TypeScript uses compatible-major peers for AI SDK 7 and its OTel integration. The three patch pairs above are tested; other combinations are not individually certified. Core-only installation can coexist with AI SDK 6; the `hueTelemetry` adapter remains AI SDK 7 only. Existing OTel applications can use a standard OTLP exporter directly without this package. See [compatibility](./COMPATIBILITY.md) before changing application dependencies.
 
 Python's optional OpenInference/OpenAI pair is pinned in its lockfile and tested separately. Python helper capture controls and TypeScript export filtering have different scopes; the package guides describe them explicitly.
 
