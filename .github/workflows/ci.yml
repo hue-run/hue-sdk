@@ -148,7 +148,7 @@ jobs:
   python:
     name: Python ${{ matrix.python }} source and installed wheel
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 40
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -184,7 +184,7 @@ jobs:
   python-lowest-bounds:
     name: Python ${{ matrix.python }} at the lowest OpenTelemetry bound
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

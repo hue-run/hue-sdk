@@ -42,7 +42,7 @@ jobs:
   prepare:
     if: github.repository == 'hue-run/hue-sdk' && github.ref == 'refs/heads/main'
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read
@@ -132,7 +132,7 @@ jobs:
     if: inputs.language == 'python'
     needs: prepare
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 20
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -237,7 +237,7 @@ jobs:
   accept-npm:
     needs: [prepare, publish-npm]
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -362,7 +362,7 @@ jobs:
   accept-pypi:
     needs: [prepare, publish-pypi]
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 20
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

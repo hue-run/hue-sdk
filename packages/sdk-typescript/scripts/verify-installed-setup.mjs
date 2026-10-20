@@ -170,6 +170,18 @@ function terminalSummary(results) {
       terminal: result.stdout.split("\n").flatMap((line) => {
         try {
           const event = JSON.parse(line);
+          if (
+            ["step.started", "step.completed"].includes(event.event) &&
+            [
+              "detect-project",
+              "install-runtime",
+              "configure-telemetry",
+              "verify-application-receipt",
+              "claim-project",
+            ].includes(event.step)
+          ) {
+            return [{ event: event.event, step: event.step }];
+          }
           return event.event === "run.failed"
             ? [{ event: event.event, code: event.code }]
             : event.event === "action.required"
