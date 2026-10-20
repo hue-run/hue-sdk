@@ -29,6 +29,7 @@ import {
   providerErrorDescription,
 } from "./provider-tools.js";
 import { toolCatalogSummary } from "./tool-definitions.js";
+import { toolEndpointAttributes } from "./tool-endpoint.js";
 import {
   contentLimitsOf,
   encodeBoundedContent,
@@ -525,6 +526,14 @@ export class HueClient {
     stamp("mcp.server.version", options.mcp?.version);
     stamp("hue.mcp.provider", options.mcp?.provider);
     stamp("hue.mcp.surface", options.mcp?.surface);
+    if (this.enabled && !this.closed && this.captureContent) {
+      try {
+        if (options.endpoint !== undefined)
+          Object.assign(attributes, toolEndpointAttributes(options.endpoint));
+      } catch {
+        this.instrumentationFailed();
+      }
+    }
     return this.withSpan(
       `execute_tool ${name}`,
       async ({ span }) => {

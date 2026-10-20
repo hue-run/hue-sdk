@@ -3,7 +3,7 @@ name: hue
 description: "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction."
 metadata:
   author: hue-run
-  version: "0.8.14"
+  version: "0.8.15"
 ---
 
 # Hue
@@ -93,6 +93,47 @@ Follow [Traces and spans](https://docs.hue.run/guides/traces). Instrument every 
 - **Model spans:** `model()` around each direct provider call, recording the messages sent and received and provider-reported usage. Leave unknown token counts and costs absent. For tools the provider runs itself, such as hosted MCP or web search, call `recordProviderToolCalls` / `record_provider_tool_calls` inside the model span.
 - **Tool spans:** `tool()` around each tool call, with the arguments and the result the agent actually read. When wrapping MCP tools, pass `mcp: client.getServerVersion()` in TypeScript or `mcp=` in Python so the span names the server; do not infer the server from a generic tool name.
 - **Context:** preserve propagated parent context, use `inject` / `extract` across processes, and keep spans from existing instrumentation under the request span.
+
+### HTTP tool endpoint evidence (unreleased SDK checkout)
+
+The `tool()` endpoint option below is available in this source checkout; it is not part of the pinned registry releases above. Use it only when the user has selected a source commit containing `ToolOptions.endpoint` / Python `ToolEndpoint`. Build and install that commit locally, retain its full SHA and this skill's hash, and keep other dependencies unchanged. Do not publish a package or claim a registry version supports it. Without this option, report missing endpoint evidence rather than inventing span attributes or routing identifiers.
+
+For HTTP tools, record the URL from the same request, resolved client config, or receipt that the application uses. Record the source as `request`, `client_config`, or `receipt`. Include the actual HTTP method only when known. Do not derive a URL, server ID, or account/user selector from a tool name, MCP server label, root user ID, or the number of connected accounts.
+
+Inspect every dispatcher branch, including `mcp_read` as well as `mcp_call` and write/action branches. Reuse the already selected client configuration at the execution boundary. If that configuration is only available inside the dispatcher, carry its observed endpoint to the instrumentation there; do not add a second lookup, resolve a different server, initialize another session, unwrap or replace the result, retry the call, or add another tool execution. Keep the original arguments and full result (including a `{kind: "sync", result: ...}` wrapper) on the existing tool span. Preserve the parent trace and original call ID.
+
+With content capture enabled, pass the real URL and explicitly allow only routing query names that the application's data policy permits:
+
+```ts
+await hue.tool(toolName, input, execute, {
+  callId,
+  mcp: serverInfo,
+  endpoint: {
+    url: resolvedClientUrl,
+    source: "client_config",
+    method: requestMethod,
+    captureQueryParameters: ["user_id"],
+  },
+});
+```
+
+```python
+with hue.tool(tool_name, call_id=call_id, mcp=server_info, endpoint={
+    "url": resolved_client_url,
+    "source": "client_config",
+    "method": request_method,
+    "capture_query_parameters": ["user_id"],
+}) as span:
+    span.set_input(arguments)
+    result = execute()
+    span.set_output(result)
+```
+
+The examples assume those variables already exist in the application. Omit unknown options. For Composio's existing per-toolkit MCP endpoint, retain the actual `/v3/mcp/<serverId>/mcp` path and every `user_id` occurrence from that URL. Missing or duplicate values stay missing or duplicate. Direct execute and Tool Router have different URL shapes: record the shape actually used, and keep actual selectors in the original input or receipt; never convert them into a per-toolkit MCP URL. Endpoint capture alone does not establish replay support for every transport.
+
+The SDK removes URL userinfo, fragments and query parameters outside the allowlist, rejects credential query names even if allowlisted, and sends `url.full`, optional `http.request.method` and `hue.tool.endpoint.source` through existing redaction. It emits none of them in metadata-only mode. The URL path and allowed query values may identify an account: preserve existing masking, never exempt selectors from it, and do not pass secret-bearing paths. Redaction can intentionally make an endpoint unusable for replay.
+
+Verify with the application's normal synthetic transport and a loopback collector before live work: inspect the exported `url.full` path/query and source, check missing/duplicate/redacted values stay unavailable or ambiguous, and prove one execution with the exact original result or exception. Do not print real endpoint values or headers. A successful local export proves capture behavior; only an authorized stored capture and rebuild establish server acceptance and replay.
 
 These helpers do not proxy or automatically observe uninstrumented model calls. Keep spans open until streamed work completes or aborts: a returned streaming `Response` is not generation completion. With AI SDK 6, await `result.consumeStream()` inside the request span, not `result.text`, which resolves before the AI SDK ends its own span ([AI SDK recipe](https://docs.hue.run/sdks/typescript#vercel-ai-sdk)). A Python generator that holds the request span across `yield` should `return` on `GeneratorExit`, so a caller that stops reading ends the span without an error ([Traces and spans](https://docs.hue.run/guides/traces#streaming-and-long-work)). Otherwise use the framework's completion or background-lifetime hooks, as in the [Next.js streaming recipe](https://docs.hue.run/integrations/opentelemetry#flush-streamed-responses-in-next-js), and flush with a bounded deadline after the response. Preserve application errors and cancellations while recording their span status. Add short comments where initialization, capture or delivery behavior needs explanation.
 

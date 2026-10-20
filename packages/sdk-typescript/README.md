@@ -202,6 +202,22 @@ helpers (`setInput`, `setOutput`, `tool` arguments and results, `recordMessages`
 that is not JSON, such as a `Date` or a class instance, is omitted with an instrumentation failure
 while the callback result is returned unchanged.
 
+### Tool endpoint evidence (unreleased)
+
+This checkout adds optional `ToolOptions.endpoint`: `{ url, source, method?, captureQueryParameters? }`.
+Use the actual HTTP(S) request URL, client config URL or receipt URL; set `source` to `request`,
+`client_config` or `receipt`. Supply `method` only when known. With content capture enabled,
+Hue records `url.full`, `hue.tool.endpoint.source` and optional `http.request.method` through the
+existing redactor (`attributes.url.full` for the URL). URL userinfo and fragments are removed;
+query values are omitted unless their names appear in `captureQueryParameters`. Credential names
+are rejected even if allowlisted. Duplicate and empty allowed query values remain intact.
+
+Metadata-only mode omits endpoint evidence. Invalid evidence is omitted and counted without
+changing the tool's result or exception. This helper does not observe HTTP automatically or infer
+account identifiers. Do not supply secret-bearing URL paths, and preserve existing masking of
+account identifiers. See the [setup skill](../../skills/hue/SKILL.md#http-tool-endpoint-evidence-unreleased-sdk-checkout)
+for dispatcher integration and source checkout requirements.
+
 ## Images, documents and audio
 
 Hue stores the bytes of images, documents and audio apart from the spans and log records that
