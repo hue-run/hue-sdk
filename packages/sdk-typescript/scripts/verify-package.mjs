@@ -929,6 +929,7 @@ run(
 );
 const installedPackageTests = [
   "sdk.test.ts",
+  "tool-endpoint.test.ts",
   "live-spans.test.ts",
   "evals.test.ts",
   "scorer-publication.test.ts",
