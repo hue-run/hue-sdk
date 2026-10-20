@@ -169,15 +169,16 @@ Output and limits:
   --check                         One-shot: check the key, selection and agent, print what the
                                   run would do and exit without creating a run or a world
   --checkpoint-dir <path>         Private checkpoint directory (default: .hue/eval/<agent-key>)
-  --concurrency <n>               Cases in flight, 1-100 (default: 1)
+  --concurrency <n>               Cases in flight, 1-100 (default: 4)
   --trace-not-accepted <policy>   A case whose telemetry Hue did not accept in time: fail_case
                                   (default) completes it as failed with the evidence omitted;
                                   pending completes it in its true state with the trace still to
                                   arrive, which Hue attaches once its export is complete
   --timeout <seconds>             Per-case --command timeout (default: 600)
   --wait <seconds>                Verdict wait after the run finishes (default: 300)
-  --judges                        Request pinned hosted model judges after outputs upload
-                                  (off by default; uses the project's judge budget)
+  --no-judges                     Skip pinned hosted model judges (requested by default
+                                  after outputs upload; uses the project's judge budget)
+  --judges                        Request pinned judges (compatibility flag)
   -h, --help                      Show this help
 
 HUE_API_KEY must be a "Read and write" project key; it is never printed.
@@ -238,7 +239,8 @@ function parse(argv: string[]) {
         content: { type: "boolean" },
         "no-content": { type: "boolean", default: false },
         "no-output": { type: "boolean", default: false },
-        judges: { type: "boolean", default: false },
+        judges: { type: "boolean" },
+        "no-judges": { type: "boolean", default: false },
         "trace-not-accepted": { type: "string" },
         "save-version": { type: "boolean", default: false },
         check: { type: "boolean", default: false },
@@ -1360,6 +1362,29 @@ interface JudgeCheckpoint {
   };
 }
 
+/** Keep the judge lock through execution so an opt-out cannot race a pending dispatch. */
+async function acquireJudgeCheckpoint(
+  directory: string,
+  projectId: string,
+  baseUrl: string,
+  enabled: boolean,
+): Promise<CheckpointStore> {
+  const store = await CheckpointStore.acquire(
+    checkpointPath(directory, ["judge-dispatch", "judge checkpoint"]),
+    { kind: "cli-judge-dispatch", projectId, baseUrl },
+  );
+  try {
+    if (!enabled && (await store.read<PendingJudgeDispatch>("pending")))
+      throw new Error(
+        "Recover the pending hosted checks with the original flags before using --no-judges or --no-output",
+      );
+    return store;
+  } catch (error) {
+    await store.release();
+    throw error;
+  }
+}
+
 /** Durable handoff before the original attempt marker or queue acknowledgement. */
 async function checkpointJudges(
   judging: JudgeCheckpoint,
@@ -1525,7 +1550,7 @@ async function runOnce(
   signal: AbortSignal,
 ): Promise<number> {
   const client = new EvaluationClient(connection);
-  const concurrency = integer("concurrency", values.concurrency, 1, 1, 100);
+  const concurrency = integer("concurrency", values.concurrency, 4, 1, 100);
   const baselineId = parseBaseline(values.baseline);
   const mode = parseMode(values.mode);
   integer("wait", values.wait, 300, 0, 86_400);
@@ -1556,12 +1581,15 @@ async function runOnce(
     project.id,
     selection.kind,
   );
+  const judgeStore = await acquireJudgeCheckpoint(
+    checkpointDirectory,
+    project.id,
+    connection.baseUrl,
+    values.judges === true,
+  );
   const judging: JudgeCheckpoint | undefined = values.judges
     ? {
-        store: await CheckpointStore.acquire(
-          checkpointPath(checkpointDirectory, ["judge-dispatch", "judge checkpoint"]),
-          { kind: "cli-judge-dispatch", projectId: project.id, baseUrl: connection.baseUrl },
-        ),
+        store: judgeStore,
         selectionDigest: digest({
           datasetVersionId: pins.datasetVersionId,
           scorerVersionIds: [...pins.scorerVersionIds].sort(),
@@ -1685,7 +1713,7 @@ async function runOnce(
       judging,
     );
   } finally {
-    await judging?.store.release();
+    await judgeStore.release();
   }
 }
 
@@ -1736,7 +1764,7 @@ async function checkRun(
     mode: kind,
     worldCases: kind === "direct" ? 0 : worldCases,
     directCases: kind === "direct" ? cases : cases - worldCases,
-    agent: { key: agent.key, revision: agent.revision, concurrency: values.concurrency ?? "1" },
+    agent: { key: agent.key, revision: agent.revision, concurrency: values.concurrency ?? "4" },
   };
   if (values.json) process.stdout.write(`${JSON.stringify({ check })}\n`);
   else {
@@ -1977,7 +2005,7 @@ async function runWorker(
   const client = new ObservedClient(connection);
   const environmentClient = createEnvironmentClient(connection);
   const wait = integer("wait", values.wait, 300, 0, 86_400);
-  const concurrency = integer("concurrency", values.concurrency, 1, 1, 100);
+  const concurrency = integer("concurrency", values.concurrency, 4, 1, 100);
   let maxRuns =
     values["max-runs"] === undefined
       ? undefined
@@ -1990,16 +2018,15 @@ async function runWorker(
     "worker",
     slug(agent.revision) || "dev",
   );
+  const judgeStore = await acquireJudgeCheckpoint(
+    checkpointDirectory,
+    project.id,
+    connection.baseUrl,
+    values.judges === true,
+  );
   const judging: JudgeCheckpoint | undefined = values.judges
     ? {
-        store: await CheckpointStore.acquire(
-          checkpointPath(checkpointDirectory, ["judge-dispatch", "judge checkpoint"]),
-          {
-            kind: "cli-judge-dispatch",
-            projectId: project.id,
-            baseUrl: connection.baseUrl,
-          },
-        ),
+        store: judgeStore,
         selectionDigest: digest(agent),
         source: {
           directory: checkpointDirectory,
@@ -2183,7 +2210,7 @@ async function runWorker(
     }
     return 0;
   } finally {
-    await judging?.store.release();
+    await judgeStore.release();
   }
 }
 
@@ -2226,8 +2253,11 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     worker = values.worker;
     if (values.content && values["no-content"])
       throw new UsageError("Choose either --content or --no-content");
+    if (values.judges && values["no-judges"])
+      throw new UsageError("Choose either --judges or --no-judges");
     if (values.judges && values["no-output"])
       throw new UsageError("--judges requires stored case outputs; remove --no-output");
+    values.judges = !values["no-judges"] && !values["no-output"];
     // A usage error before anything is prepared or created: no run is left to recover from it.
     traceNotAcceptedPolicy(values["trace-not-accepted"]);
     json = values.json;

@@ -3,7 +3,7 @@ name: hue
 description: "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction."
 metadata:
   author: hue-run
-  version: "0.8.15"
+  version: "0.8.17"
 ---
 
 # Hue
@@ -16,7 +16,7 @@ Read the application's repository instructions and inspect its runtime, dependen
 
 | Application                                                             | Path                                                                                                                                                                                                                                              |
 | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Node.js 22 or 24, or Bun 1.4 (server-side), without existing OTel setup | [TypeScript SDK](https://docs.hue.run/sdks/typescript)                                                                                                                                                                                            |
+| Node.js 22, 24 or 26, or Bun 1.4 (server-side), without existing OTel setup | [TypeScript SDK](https://docs.hue.run/sdks/typescript)                                                                                                                                                                                            |
 | Python 3.10+                                                            | [Python SDK](https://docs.hue.run/sdks/python)                                                                                                                                                                                                    |
 | Existing OTel provider, Langfuse, or framework instrumentation          | [OpenTelemetry integration](https://docs.hue.run/integrations/opentelemetry); keep the provider and its other exporters                                                                                                                           |
 | A framework owns the agent loop or the root span                        | [LangChain and LangGraph](https://docs.hue.run/integrations/langchain) for LangChain agents; otherwise [mark the framework's root span](https://docs.hue.run/integrations/opentelemetry#mark-the-root-span) through the OpenTelemetry integration |
@@ -57,15 +57,15 @@ Install the exact version below, which [Install the SDK](https://docs.hue.run/qu
 
 ```sh
 # TypeScript: run in the application directory.
-npm install --save-exact @hue-run/sdk@0.20.8
+npm install --save-exact @hue-run/sdk@0.21.0
 ```
 
 ```sh
 # Python: use the application's existing Python environment.
-python -m pip install hue-run==0.13.3
+python -m pip install hue-run==0.13.4
 ```
 
-Adapt the command to the app's package manager, for example `uv add hue-run==0.13.3`. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If a package is unavailable or a credential is missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or release.
+Adapt the command to the app's package manager, for example `uv add hue-run==0.13.4`. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If a package is unavailable or a credential is missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or release.
 
 The development key is a **Read and write** project key in `HUE_API_KEY`, configured through the application's existing secret workflow. Keep it on development machines: before the application runs on a production server, tell the user to create a separate **Tracing only** key for that server's `HUE_API_KEY`, which the code reads unchanged. Read the key from the environment; never put it in browser code, fixtures, committed files or logs.
 
@@ -94,9 +94,9 @@ Follow [Traces and spans](https://docs.hue.run/guides/traces). Instrument every 
 - **Tool spans:** `tool()` around each tool call, with the arguments and the result the agent actually read. When wrapping MCP tools, pass `mcp: client.getServerVersion()` in TypeScript or `mcp=` in Python so the span names the server; do not infer the server from a generic tool name.
 - **Context:** preserve propagated parent context, use `inject` / `extract` across processes, and keep spans from existing instrumentation under the request span.
 
-### HTTP tool endpoint evidence (unreleased SDK checkout)
+### HTTP tool endpoint evidence
 
-The `tool()` endpoint option below is available in this source checkout; it is not part of the pinned registry releases above. Use it only when the user has selected a source commit containing `ToolOptions.endpoint` / Python `ToolEndpoint`. Build and install that commit locally, retain its full SHA and this skill's hash, and keep other dependencies unchanged. Do not publish a package or claim a registry version supports it. Without this option, report missing endpoint evidence rather than inventing span attributes or routing identifiers.
+TypeScript `0.21.0` and Python `0.13.4` support the `tool()` endpoint option below. Confirm the installed package exposes `ToolOptions.endpoint` or Python `ToolEndpoint` before using it. With an older package, report missing endpoint evidence rather than inventing span attributes or routing identifiers.
 
 For HTTP tools, record the URL from the same request, resolved client config, or receipt that the application uses. Record the source as `request`, `client_config`, or `receipt`. Include the actual HTTP method only when known. Do not derive a URL, server ID, or account/user selector from a tool name, MCP server label, root user ID, or the number of connected accounts.
 
