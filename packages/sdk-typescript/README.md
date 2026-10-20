@@ -741,8 +741,8 @@ in `finally`. Shut down a shared server client only when the application stops.
 
 The integration creates real Vercel provider, streaming and tool spans and passes
 `recordInputs` and `recordOutputs` explicitly. The installed-package verification
-tests the matching 7.0.99/1.0.99, 7.0.100/1.0.100, 7.0.137/1.0.137 and
-7.0.138/1.0.138 pairs. Compatible-major ranges do not mean every later release
+tests the matching 7.0.99/1.0.99, 7.0.100/1.0.100, 7.0.137/1.0.137,
+7.0.138/1.0.138 and 7.0.139/1.0.139 pairs. Compatible-major ranges do not mean every later release
 has been verified. Other OTel
 instrumentations can use `hue.tracer` directly or explicitly attach the processors
 below. Instrumentations that only use a global provider need your application's
