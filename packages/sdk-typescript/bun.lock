@@ -16,7 +16,7 @@
         "zod": "^3.25.76 || ^4.6.5",
       },
       "devDependencies": {
-        "@ai-sdk/otel": "1.0.138",
+        "@ai-sdk/otel": "1.0.139",
         "@opentelemetry/api": "1.9.1",
         "@opentelemetry/context-async-hooks": "2.12.0",
         "@types/bun": "1.4.2",
@@ -42,7 +42,7 @@
   "packages": {
     "@ai-sdk/gateway": ["@ai-sdk/gateway@4.0.111", "", { "dependencies": { "@ai-sdk/provider": "4.0.27", "@ai-sdk/provider-utils": "5.0.59", "@vercel/oidc": "3.2.0" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-+Uq8GgAsEkq3rv1AoYyqpCeHSOXG5ZP7KnsquM8yyIXkn1oBeZbFZvTtNE6gC9Eg1VK34KwImv8NrtB6tfm2wA=="],
 
-    "@ai-sdk/otel": ["@ai-sdk/otel@1.0.138", "", { "dependencies": { "@ai-sdk/provider": "4.0.27", "@opentelemetry/api": "1.9.1", "ai": "7.0.138" } }, "sha512-3i46LvgjfGtQrrrSARyzpEMjVr/XdnmTf1MC/vAsHk4NbWEZXpg+wKM3equ1/hxKCKZfefxBCLFc61CLeItcIQ=="],
+    "@ai-sdk/otel": ["@ai-sdk/otel@1.0.139", "", { "dependencies": { "@ai-sdk/provider": "4.0.27", "@opentelemetry/api": "1.9.1", "ai": "7.0.139" } }, "sha512-NvYBGWfzQC7sAkXQ9h5pdct0K9cROOiVe/HfM4Pk/fIIv9mHSBf9K7Zrkh5rxLVMMn2onfZz7noblxHfEnErtA=="],
 
     "@ai-sdk/provider": ["@ai-sdk/provider@4.0.27", "", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-TtWwm6SxFiPomlMIbTQa+yhJte+w4/oCsW+wJrJzMC3MqHpAY9e5dJF1Y4HxyKt3W2Csac0KiI76Ckio11TFYw=="],
 
@@ -158,7 +158,11 @@
 
     "zod": ["zod@4.6.5", "", {}, "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q=="],
 
+    "@ai-sdk/otel/ai": ["ai@7.0.139", "", { "dependencies": { "@ai-sdk/gateway": "4.0.112", "@ai-sdk/provider": "4.0.27", "@ai-sdk/provider-utils": "5.0.59" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-IpLx5f0yjQVWfiIzwVMwTBQ/SQH9aNnmY7QLd2USw57LrXd9jpwYDXXLpzYomM2wB3LMtjGmWRR8Jpd/GCE0zQ=="],
+
     "bun-types/@types/node": ["@types/node@24.10.1", "", { "dependencies": { "undici-types": "~7.16.0" } }, "sha512-GNWcUTRBgIRJD5zj+Tq0fKOJ5XZajIiBroOF0yvj2bSU1WvNdYS/dn9UxwsujGW4JX06dnHyjV2y9rRaybH0iQ=="],
+
+    "@ai-sdk/otel/ai/@ai-sdk/gateway": ["@ai-sdk/gateway@4.0.112", "", { "dependencies": { "@ai-sdk/provider": "4.0.27", "@ai-sdk/provider-utils": "5.0.59", "@vercel/oidc": "3.2.0" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-P7lmhAADfPRezkf+j//oq5RcScoRDR2sVPXEIVkPxPu7/bgAcQSLkJrQnwmWKnBecbplGxk8/ij7zaHFvDsDgg=="],
 
     "bun-types/@types/node/undici-types": ["undici-types@7.16.0", "", {}, "sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw=="],
   }
