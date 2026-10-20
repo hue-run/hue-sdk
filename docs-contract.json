@@ -9,7 +9,7 @@
       {
         "boundary": "Install both adapter peers; preserve an existing global integration.",
         "path": "Vercel AI SDK adapter",
-        "verifiedSupport": "AI SDK / OTel pairs `7.0.99 / 1.0.99`, `7.0.100 / 1.0.100` and `7.0.137 / 1.0.137`"
+        "verifiedSupport": "AI SDK / OTel pairs `7.0.99 / 1.0.99`, `7.0.100 / 1.0.100`, `7.0.137 / 1.0.137` and `7.0.138 / 1.0.138`"
       },
       {
         "boundary": "Core-only installation supports AI SDK 6; the Hue AI SDK adapter requires version 7.",
@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:02e199f52b51822d362d8ef6bfab4d7a8e2d8f720fecffb84f1d480c91f29724",
+    "sha256": "sha256:d84ad7d2fcdfa770a82c19ec8cec539c0470c8e6fdef5074df2960bc636905a7",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
