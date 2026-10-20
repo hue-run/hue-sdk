@@ -215,7 +215,7 @@ are rejected even if allowlisted. Duplicate and empty allowed query values remai
 Metadata-only mode omits endpoint evidence. Invalid evidence is omitted and counted without
 changing the tool's result or exception. This helper does not observe HTTP automatically or infer
 account identifiers. Do not supply secret-bearing URL paths, and preserve existing masking of
-account identifiers. See the [setup skill](../../skills/hue/SKILL.md#http-tool-endpoint-evidence-unreleased-sdk-checkout)
+account identifiers. See the [setup skill](../../skills/hue/SKILL.md#http-tool-endpoint-evidence)
 for dispatcher integration and source checkout requirements.
 
 ## Images, documents and audio
