@@ -12,8 +12,12 @@ import pytest
 from hue_sdk._inline_files import (
     INLINE_FILE_LIMIT,
     _file_bytes,
+    dumps_message,
     hash_inline_files,
-    is_text_media_type,
+    inline_file,
+    loads_message,
+    pcm_media_type,
+    read_media_text,
 )
 
 # The TypeScript suite reads the same file; each digest is of the bytes the case was built from.
@@ -53,20 +57,8 @@ def test_inline_file_digest_matches_the_shared_fixture(case: dict[str, Any]) -> 
     message = {"role": "user", "content": [part]} if file else {"role": "user", "parts": [part]}
     value = json.dumps([message])
     result = hash_inline_files("ai.prompt.messages" if file else "gen_ai.input.messages", value)
-    mime = part.get("mime_type", part.get("mediaType", ""))
-    if is_text_media_type(mime) and not part[case["key"]].startswith("data:"):
-        text = part[case["key"]]
-        data = text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace").encode()
-        if len(data) <= INLINE_FILE_LIMIT:
-            assert result is value
-        else:
-            [exported] = json.loads(result)
-            assert (exported["content"] if file else exported["parts"])[0] == {
-                **case["part"],
-                "sha256": hashlib.sha256(data).hexdigest(),
-                "size": len(data),
-            }
-        return
+    # Content that reads as base64 is the file's base64 whatever the part's media type, as Hue's
+    # reader reads it: a text file's bytes, not the base64 text.
     if case["expected"] is None:
         if part[case["key"]].startswith("data:application/octet-stream"):
             [exported] = json.loads(result)
@@ -119,3 +111,109 @@ def test_lone_surrogates_are_replaced_once_for_a_whole_part() -> None:
         return best
 
     assert seconds("a%41\ud800") < 3 * seconds("a%41\u00e9")
+
+
+def test_placed_json_numbers_are_written_as_javascript_writes_them():
+    # Pinned against Node's JSON.stringify(JSON.parse(text)).
+    text = (
+        '{"threshold":1e-5,"id":9007199254740993,"big":1e21,"tiny":1e-7,"scale":1.5e20,'
+        '"ratio":-0.25,"zero":-0,"exact":2.0,"huge":123456789012345678901234567890,'
+        '"small":1.23e-18,"max":1.7976931348623157e308,"over":1e400}'
+    )
+    assert dumps_message(loads_message(text)) == (
+        '{"threshold":0.00001,"id":9007199254740992,"big":1e+21,"tiny":1e-7,'
+        '"scale":150000000000000000000,"ratio":-0.25,"zero":0,"exact":2,'
+        '"huge":1.2345678901234568e+29,"small":1.23e-18,"max":1.7976931348623157e+308,'
+        '"over":null}'
+    )
+    # Values a caller supplies are written the same way.
+    assert dumps_message({"x": 2.0, "y": 1e17, "z": 0.5, "w": 1e-6}) == (
+        '{"x":2,"y":100000000000000000,"z":0.5,"w":0.000001}'
+    )
+
+
+def test_json_edits_to_many_members_render_in_time_linear_in_them():
+    import time
+
+    from hue_sdk._json_edits import JsonEdit, apply_json_edits
+
+    count = 20_000
+    text = json.dumps(
+        [{"type": "blob", "content": f"c{index}", "keep": 1} for index in range(count)],
+        separators=(",", ":"),
+    )
+    edits = [
+        JsonEdit(f"/{index}", remove="content", set=(("size", str(index)),))
+        for index in range(count)
+    ]
+    started = time.perf_counter()
+    placed = apply_json_edits(text, edits)
+    # 20,000 edited parts render in about a second; visiting every piece for every member took
+    # tens of seconds.
+    assert time.perf_counter() - started < 5
+    assert json.loads(placed) == [
+        {"type": "blob", "keep": 1, "size": index} for index in range(count)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("declared", "canonical"),
+    [
+        ("audio/pcm;rate=24000", "audio/pcm;rate=24000;channels=1"),
+        ("audio/L16;rate=16000", "audio/L16;rate=16000;channels=1"),
+        ("audio/x-pcm;rate=8000;channels=2", "audio/pcm;rate=8000;channels=2"),
+        ('Audio/PCM ; Rate="192000" ;channels=1;', "audio/pcm;rate=192000;channels=1"),
+        ("audio/l16;channels=2;rate=44100", "audio/L16;rate=44100;channels=2"),
+        ("audio/pcm", None),
+        ("audio/pcm;channels=1", None),
+        ("audio/pcm;rate=24000;bits=16", None),
+        ("audio/pcm;rate=24000;rate=24000", None),
+        ("audio/pcm;rate=7999", None),
+        ("audio/pcm;rate=192001", None),
+        ("audio/pcm;rate=24000;channels=3", None),
+        ("audio/pcm;rate=24000.0", None),
+        ("audio/pcm;rate=24000 x", None),
+        ("audio/wav;rate=24000", None),
+        # Empty parameters are allowed, within 255 characters.
+        ("audio/pcm;rate=24000" + ";" * 235, "audio/pcm;rate=24000;channels=1"),
+        ("audio/pcm;rate=24000" + ";" * 236, None),
+    ],
+)
+def test_raw_pcm_types_name_the_format_hue_plays_in_canonical_form(declared, canonical) -> None:
+    # Hue's reader plays raw PCM only in a format its type declares (rate 8000 to 192000,
+    # channels 1 or 2, no other parameter), and names it canonically.
+    assert pcm_media_type(declared) == canonical
+
+
+@pytest.mark.parametrize(
+    ("header", "listed"),
+    [
+        ("audio/pcm;rate=24000;base64", "audio/pcm;rate=24000;channels=1"),
+        ("audio/L16;rate=16000;base64", "audio/L16;rate=16000;channels=1"),
+        ("audio/x-pcm;rate=8000;channels=2;base64", "audio/pcm;rate=8000;channels=2"),
+        ("audio/pcm;rate=24000;bits=16;base64", "audio/pcm"),
+        ("audio/pcm;base64", "audio/pcm"),
+        ("audio/wav;rate=24000;base64", "audio/wav"),
+    ],
+)
+def test_a_data_urls_raw_pcm_keeps_its_declared_format(header, listed) -> None:
+    assert inline_file(f"data:{header},AAECAw==").url_media_type == listed
+
+
+@pytest.mark.parametrize(
+    "key", ["langfuse.observation.output", "langfuse.trace.input", "input.value", "tool_response"]
+)
+def test_text_read_by_json_convention_that_is_no_json_is_read_as_the_text_itself(key) -> None:
+    # A Langfuse SDK records a string input or output as it is; Hue's reader keeps text that is
+    # no JSON as the text itself, so a whole data: URL is a file and other text holds none.
+    media = read_media_text(key, "data:audio/pcm;rate=24000;base64,AAECAw==")
+    assert media is not None
+    (file,) = media.files
+    assert (file.whole, file.pointer, file.content_type) == (
+        True,
+        "",
+        "audio/pcm;rate=24000;channels=1",
+    )
+    for text in ("plain words about data:", '{"unterminated": "data:image/png;base64,AAAA'):
+        media = read_media_text(key, text)
+        assert media is not None and media.files == []

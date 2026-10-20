@@ -61,34 +61,7 @@ When capture is disabled Hue also strips recognized GenAI, OpenInference, OpenLL
 Hosted tools carry credentials in their definitions, such as the `authorization` and `headers` of an OpenAI hosted MCP tool. When content is captured, Hue's export path replaces credential-like fields including `authorization`, `authorization_token`, `headers`, `api_key`, `access_token`, `x-api-key`, and keys ending in `token`, `secret`, `password`, `apikey` or `credential` (case-insensitively, ignoring `-` and `_`) with `"[redacted]"` in recorded tool definitions (`gen_ai.tool.definitions`, `ai.prompt.tools`, `llm.tools.*.tool.json_schema`) and in the top-level `tools` and `mcp_servers` entries of any JSON object recorded as `input.value`, `output.value` or `llm.invocation_parameters` (as OpenInference records a raw provider request), whether or not it is a provider request; nothing else in that object changes. Parameters named in a JSON Schema `properties` object keep their schemas, so a tool that takes a `headers` argument is still described. A definition nested more than 256 levels deep drops its record. Sensitive defaults, constants, examples and enum values under credential-named schema parameters are redacted too. A `url` or `server_url` field (named like the credential fields, so `serverUrl` too) that has userinfo, a query or a fragment loses its userinfo and fragment, and each query value becomes `[redacted]` under its original name; a URL with none of them is exported as recorded. A scrubbed `http`, `https`, `ws`, `wss` or `ftp` URL is serialized as WHATWG `URL` does (lowercase scheme and host, IDN hosts in Punycode, default ports dropped, dot segments resolved), so for ordinary hosts its text and the tool-catalog digest match the TypeScript SDK's. Internationalized hosts can still differ at the edges: Python refuses an IDN host longer than 1,024 characters and a zero-width joiner or non-joiner anywhere but after a virama, and checks right-to-left labels as the Node.js parser does, which accepts a few that Bun refuses. Other schemes, such as `mcp:` or `file:`, keep their earlier handling and can differ from the TypeScript SDK. A value that is not an absolute URL becomes `"[redacted]"`.
 
 With `capture_content=False`, export removes tool definitions but keeps a summary of them on the same record: `hue.tool.names` lists each definition's `name` (Chat Completions `function.name`, or the `type` of an unnamed built-in tool such as `mcp`) in order, and `hue.tool.definitions.sha256` is the lowercase hex SHA-256 of the [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785) canonical JSON of the credential-scrubbed definition list, identical to the TypeScript SDK's and unchanged when a credential rotates. Only definitions an instrumentor recorded can be summarized, for example OpenInference without `hide_inputs`.
-Recorded messages can contain images, documents and audio. Hue inspects
-`gen_ai.input.messages`, `gen_ai.output.messages` and `ai.prompt.messages`, including `parts`
-and OpenAI `content` arrays. Supported byte shapes include GenAI `blob`, AI SDK `file` and
-`image`, OpenAI Chat and Responses image, file and audio parts, Anthropic base64 sources, Gemini
-`inlineData` and `inline_data`, Vertex `media`, and Bedrock image and document sources.
-Remote URLs, provider file IDs and S3 references stay unchanged. Hue never fetches them.
-
-Nonempty binary media in a span's own message attributes is eligible for upload at every size
-within the inspection limits. Empty byte fields stay recorded and do not upload. The byte field is
-removed and the part carries `sha256` and `size`; the span's `hue.blobs` entry points to the part,
-for example `gen_ai.input.messages#/0/parts/1`. Text media over 64 KiB of decoded bytes uploads
-with a UTF-8-safe 16 KiB prefix in its content field. Its entry points to that field, for example
-`gen_ai.input.messages#/0/parts/1/content`. Smaller text stays inline. Hue reads both these forms
-and earlier binary prefixes. If upload fails, the part keeps its digest with no blob entry.
-In resources, events, links and log records, inline media up to 64 KiB stays verbatim; larger
-inline media is replaced by its digest, preserving the 0.9 behavior. These nested values never
-upload. Ordinary hold, cut or drop rules still apply to the resulting record.
-
-Entries use the recorded media type and, when valid, the filename, name or title. A valid name
-is nonblank after trimming, at most 256 UTF-16 code units and well-formed Unicode, with no C0
-characters (U+0000–U+001F) or DEL (U+007F). Invalid names are omitted
-from the entry without rewriting the original field. Data URLs and fields explicitly encoded as
-base64 by the provider contract are decoded before hashing. Other non-data strings with a valid
-declared textual media type remain raw UTF-8: `YWJj` hashes as those four characters. The digest
-matches `span.record_file`'s digest for the same bytes. Inspection is bounded to 8 Mi UTF-16
-code units of text per message attribute and 16 Mi per record. Longer attributes use the ordinary value limit.
-With `capture_content=False`, messages are removed without inspection or uploads. See
-[Values over the inline limit](#values-over-the-inline-limit).
+Recorded content can carry images, documents and audio: see [Images, documents and audio](#images-documents-and-audio) for what the SDK uploads and how.
 
 Use `redactor=lambda field, value: ...` to transform content in supported helpers. It runs synchronously before serialization and export. Return a redacted JSON value; failures omit the field and increment `export_status.instrumentation_failures` without changing application behavior. It does not inspect arbitrary OTel attributes or logs:
 
@@ -113,11 +86,102 @@ Before redaction, helpers copy supported content into detached built-in containe
 | `span.set_usage(...)`                          | Nonnegative reported `gen_ai.usage.input_tokens` / `output_tokens`; `None` leaves a field absent                                               |
 | `span.record_provider_tool_calls(response, request=..., servers=...)` | On a `model()` span: one `execute_tool {name}` child span per tool the provider ran itself (OpenAI Responses `mcp_call`, `web_search_call`, `file_search_call`, `code_interpreter_call`; Anthropic `mcp_tool_use` / `server_tool_use` with their results) with `gen_ai.tool.type=extension`, `gen_ai.tool.call.id`, `hue.tool.call.position` (the 0-based position of its item in the response, in both capture modes), `mcp.server.name`, `server.address` from the request's server URL (a host name keeps its underscores, as in the TypeScript SDK), content-gated arguments and result, and `error.type` plus ERROR status on failure; with `capture_content=True` a failed OpenAI MCP call's status description is the provider's error text, credentials scrubbed and cut to 1,024 characters and a `…` as in the TypeScript SDK, then passed to your redactor as `status.message`; an `mcp_list_tools` item becomes a `tools/list` span carrying that server's `gen_ai.tool.definitions`, or only `hue.tool.names` and `hue.tool.definitions.sha256` with `capture_content=False` |
 | `span.log_inference(input=..., output=..., system_instructions=...)` | Correlated `gen_ai.client.inference.operation.details` log linked to that span: structured body plus request metadata and session attributes |
-| `span.record_file(role=..., media_type=..., data=... or sha256=..., name=..., upload=False)` | `hue.file` event keyed by `hue.file.sha256`, with role, media type and size in both capture modes. Up to 25 MiB of `data` is hashed locally. `upload=True` also stores supplied bytes during export and adds a same-span blob entry keyed `event:hue.file:<sha256>` when content capture and ordinary project credentials permit it. `hue.file.name` requires content capture |
+| `span.record_file(role=..., media_type=..., data=... or path=... or sha256=..., name=..., upload=False)` | `hue.file` event keyed by `hue.file.sha256`, with role, media type and size in both capture modes. Up to 25 MiB of `data`, or a file at `path` up to 1 GB, is hashed locally. `upload=True` also lists the file in the span's `hue.blobs`, keyed `event:hue.file:<sha256>`, when the span is exported, and uploads supplied bytes in the background, when content capture and ordinary project credentials permit it. `hue.file.name` requires content capture |
 | `span.record_error(error)`                     | Exception type event and ERROR status; context managers also record escaping errors/cancellation                                               |
 | `Hue.inject(headers)` / `Hue.extract(headers)` | W3C trace context propagation; pass extracted context to `span(parent_context=...)` or `subagent(parent_context=...)`, from trusted internal callers only |
 
-To upload a file your work reads or produces:
+To store a file your work reads or produces, see [Record a file](#record-a-file).
+
+This checkout adds an **unreleased** `endpoint=` option to `tool()`, typed as `ToolEndpoint`:
+`{"url": actual_url, "source": "client_config", "method": actual_method, "capture_query_parameters": ["user_id"]}`.
+Use a URL from the actual `request`, `client_config` or `receipt`, and name that `source`. Omit
+unknown methods. With content capture enabled it emits `url.full`, `hue.tool.endpoint.source`
+and optional `http.request.method`, through the existing `redactor` (field `url.full` for the URL).
+Userinfo, fragments and unlisted query parameters are removed; credential query names are rejected
+even if listed. Every allowed occurrence, including duplicate and empty values, is retained.
+Metadata-only mode omits all endpoint evidence. Invalid evidence is omitted and counted without
+changing execution, results or exceptions. Do not supply secret-bearing paths or bypass existing
+masking. The helper never observes requests or infers identities automatically; see the
+[setup skill](../../skills/hue/SKILL.md#http-tool-endpoint-evidence-unreleased-sdk-checkout) for source checkout and dispatcher integration.
+
+Tool/model metadata accepts plain strings; invalid values use stable fallback labels and increment instrumentation failures without invoking custom conversion hooks. Disabled tracing skips metadata validation.
+
+Hue helpers implement the model/tool metadata and inference-message subset of the Development GenAI conventions. They accept caller-supplied JSON without full schema validation. For model helpers, pass the message representation produced by your integration. When authoring your own messages, prefer the shape defined by the GenAI semantic conventions' [input messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-input-messages.json) and [output messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-output-messages.json) JSON schemas. Use either span content or correlated logs for a given input/output, avoiding duplicate copies. Call `log_inference` inside `model(..., provider=...)`, or pass `operation=` and `provider=` explicitly, to include the required inference metadata. `log_inference` sends a structured body (an explicit `None` field keeps its key with an empty value, distinct from an absent field) and copies `gen_ai.operation.name`, `gen_ai.provider.name` and `gen_ai.request.model` from the enclosing `model()` block, or from its `operation=`, `provider=` and `model=` keywords, plus `gen_ai.conversation.id` from `context()`, onto the record's attributes when known. A blank or over-long keyword is omitted and counted as an instrumentation failure.
+
+## Images, documents and audio
+
+Hue stores the bytes of images, documents and audio apart from the spans and log records that mention them, under the record's trace and named by SHA-256. The record keeps the file's digest in its place and lists the upload in its `hue.blobs` attribute. Files reach Hue in four ways:
+
+| You have | Use | The record carries | `hue.blobs` key |
+| --- | --- | --- | --- |
+| Files inline in the messages and values your code or instrumentation already records | Nothing: [automatic capture](#automatically-captured-media) | The part, in digest form | `<attribute>#<JSON pointer>` |
+| A file to place at a position in a value you record | [`Attachment`](#attach-a-file-anywhere) | A GenAI `blob` part, in digest form | `<attribute>#<JSON pointer>`, or `body#<JSON pointer>` in a `log_inference()` log record |
+| A file the work read, received or produced, outside any recorded value | [`span.record_file`](#record-a-file) | A `hue.file` event | `event:hue.file:<sha256>` |
+| Files a case's agent and scorers receive in an evaluation | [`add_case(files=...)`](#files-in-evaluation-cases) | An input file pinned on the case | None: case files are artifacts |
+
+[`client.media`](#read-recorded-media-back) reads a recorded file back. Every upload needs `capture_content=True` and a project key (never a setup key, `hue_setup_…`) and follows the redactor: nothing it removes is uploaded, a value it rewrites uploads as rewritten, and an attachment part it rewrites uploads nothing. A record is sent without waiting for its uploads; they run on four background threads within the 128 MiB held for values awaiting upload, and an upload refused before export falls back without failing the export; a file used more than once in a trace is stored once. See [Values over the inline limit](#values-over-the-inline-limit) for the upload protocol, budgets and fallbacks.
+
+### Automatically captured media
+
+With `capture_content=True` and a project key, the SDK finds the files inline in the attributes Hue reads files from, uploads each file's bytes under the record's trace and leaves the file's digest in its place. On a span's own attributes:
+
+- Messages and values: `gen_ai.input.messages`, `gen_ai.output.messages`, `ai.prompt.messages`, the AI SDK's `ai.prompt`, `input.value` and `output.value` (what `span()` and OpenInference record), `traceloop.entity.input` and `traceloop.entity.output`, and Langfuse's `langfuse.observation.input`, `langfuse.observation.output`, `langfuse.trace.input` and `langfuse.trace.output`.
+- Tool arguments and results: `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `ai.toolCall.args`, `ai.toolCall.result`, `tool.parameters`, `tool_arguments` and `tool_response`.
+- Metadata: `metadata`, `langfuse.observation.metadata` and `langfuse.trace.metadata` (whole, or one `.<key>` per attribute) and `ai.telemetry.metadata.<key>`. A metadata value is read as JSON when it is an object or array; otherwise it is a file only when the whole value is a `data:` URL.
+- Indexed messages: OpenLLMetry's `gen_ai.prompt.<n>.content` and `gen_ai.completion.<n>.content` when the value is the JSON of a parts list (any other content stays text), and OpenInference's flattened `llm.input_messages.<n>.message.contents.<m>.message_content.image.image.url` (and `llm.output_messages.…`), whose value is the image's URL.
+
+Inside those values a file is found by its shape: GenAI `blob`, AI SDK `file` and `image`, OpenAI Chat image, file and audio parts and an assistant message's `audio`, Responses `input_image`, `input_file` and `computer_screenshot`, Anthropic base64 sources, Gemini `inlineData` and `inline_data`, Vertex `media`, Bedrock image and document sources, and any whole string that is a `data:` URL declaring a media type. A tool call's `arguments` and a tool result (a `tool` message's `content`, `tool_result`, `function_call_output`, `tool_call_response`) are JSON in a string by convention, so the files inside them are uploaded too; a message's own text is never parsed as JSON. Hue's reader looks for files no deeper than ten levels below a value's root (an encoded string's JSON counting as a level), and the SDK inspects no deeper. Hue keeps attribute JSON nested past 32 levels, or holding an integer past 2^53, as text, and an OpenInference `input.value` or `output.value` whose record declares `input.mime_type` or `output.mime_type` as `text/plain` is literal text: the SDK leaves such values as recorded. Remote URLs, provider file IDs, S3 references and Langfuse media tokens stay unchanged, and Hue never fetches them. To copy a Langfuse project's traces and the files its media tokens point to into Hue, run the TypeScript SDK's `hue import langfuse` command (with `npx`, for an application in any language); the Python SDK has no counterpart.
+
+Each uploaded file is listed in the record's `hue.blobs`, keyed `<attribute>#<JSON pointer>`:
+
+- A provider part loses its byte field and carries `sha256` and `size`; the key names the part, for example `gen_ai.input.messages#/0/parts/1`.
+- An OpenAI assistant message's `audio` loses `audio.data` and the message carries `sha256` and `size` (`gen_ai.output.messages#/0`). Its media type comes from `audio.format`, else from the bytes' WAV, MP3, AAC, FLAC or Ogg signature, else `application/octet-stream`.
+- Raw 16-bit PCM keeps the format its type declares: `audio/pcm`, `audio/x-pcm` or `audio/L16` with a `rate` from 8000 to 192000 and 1 or 2 `channels` is listed as `audio/pcm;rate=24000;channels=1` (`audio/L16;…` for big-endian samples), and OpenAI `pcm16` audio as `audio/pcm;rate=24000;channels=1`, so Hue plays the stored file. Other types are listed without their parameters.
+- A whole `data:` URL string becomes a GenAI `blob` part, `{"type":"blob","mime_type":"image/png","modality":"image","sha256":"…","size":68}`, keyed at the string (`input.value#/image`). A value that is entirely one, such as a metadata attribute or a string input or output recorded as it is, becomes that part's JSON text, keyed `<attribute>#`: an attribute read as JSON whose text is not JSON is read as that text, as Hue reads it.
+- A file inside a JSON-encoded tool string takes the digest form inside the string. Its key goes on through the string, which no JSON pointer can address, so Hue matches it by its digest.
+- Text media over 64 KiB of decoded bytes in a provider part keeps a UTF-8-safe 16 KiB prefix in its content field instead, and its key names that field (`gen_ai.input.messages#/0/parts/1/content`). Smaller text and empty fields stay inline. A text file a GenAI `blob`, Vertex `media` or AI SDK part holds as bare base64 takes the digest form.
+
+Only the file's own value, or the members of the part that held it, change: every other byte of the recorded text, its key order, number spellings, escapes and spacing included, is kept, in an encoded string as in the attribute itself, so both SDKs write the same bytes. A record has 64 `hue.blobs` places: the media inline in its values take them first, in reading order, then its attachments and the files recorded with `upload`.
+
+Entries use the recorded media type and, when valid, the filename, name or title. A valid name is nonblank after trimming, at most 256 UTF-16 code units and well-formed Unicode, with no C0 characters (U+0000–U+001F) or DEL (U+007F). Invalid names are omitted from the entry without rewriting the original field. Data URLs and fields explicitly encoded as base64 by the provider contract are decoded before hashing. Other content is read as Hue's reader reads it, whatever its media type: content that reads as base64 (a length divisible by four, base64 characters only, as the GenAI conventions and `client.media.resolve` write a `blob` or `media` part's content) is the file's base64 and is decoded, so `YWJj` hashes as `abc`; anything else is the file's own UTF-8 text. The digest matches `span.record_file`'s digest for the same bytes.
+
+A file whose upload is refused before its record is exported (the receiver is known to lack the upload route, or a budget ran out) keeps its digest without an entry in the recorded messages (`gen_ai.input.messages`, `gen_ai.output.messages`, `ai.prompt.messages`); in every other attribute it keeps its bytes inline under the ordinary value limit. A file whose upload fails after its record was exported keeps the digest form and the entry the record was exported with, which Hue reads as missing.
+
+Log records upload their media the same way when they are correlated with a span: `log_inference`'s `gen_ai.client.inference.operation.details` record and any `gen_ai.*` event with a structured body. The bytes upload under the log record's own trace and the log record lists them in its own `hue.blobs`, keyed `body#<JSON pointer>` into the body (`body#/gen_ai.input.messages/0/parts/1`, or `body#/content/1` for a deprecated `gen_ai.user.message` event) or `<attribute>#<JSON pointer>` for the attributes above. One step places a log record's files, the attachments in its body included. A body recorded as JSON text stays as it is, and no log value is uploaded whole. A log file whose upload is refused before export is placed as log records were before they uploaded: a file over 64 KiB in a recorded message attribute becomes its digest and any other file keeps its bytes; text still over the value limit is cut inline and listed under `hue.truncated`. One whose upload fails after export keeps its digest and entry, as on a span. While uploads are available, `log_inference` records a field over the value limit when it fits the limit with its files as their digest.
+
+Inspection is bounded to 8 Mi UTF-16 code units of text per attribute and 16 Mi per record, a log body's file contents included. Within those bounds, inspection parses the value and decodes each file while the record is queued and again when it is exported. A span's own attribute past either bound that is held whole for upload (it is over the value limit) has its media read in place when it is exported, as a voice agent's audio usually needs: each string in it longer than 16 Ki code units and written without escapes as strict base64 or a base64 `data:` URL is decoded, hashed and uploaded a 1 MiB window at a time from the recorded text, never parsed or copied out of it, and a file may be up to Hue's 1 GB upload limit. The scan that finds those strings also reads the value a window at a time, so no step of it holds the interpreter for long; a percent-escaped `data:` URL is parsed with the JSON around it. A long string no file replaces is written back without a second copy of it. The value is placed exactly as one within the bounds: the same digest form, entries and fallbacks. The JSON around those strings, a file written with escapes or inside a JSON-encoded string included, is parsed within the 8 Mi bound; a value past it uses the ordinary value limit (it uploads whole). Each such value is read within that bound on its own, apart from the record's 16 Mi allowance, while it stays held within the 128 MiB for values awaiting upload. Log records keep the bounds. Resources, links and span events never upload inline media: in their recorded messages, media up to 64 KiB stays verbatim and larger media is replaced by its digest, as in 0.9, and log records that cannot upload (not correlated with a span, or while uploads are unavailable) keep the same rule. With `capture_content=False`, nothing is inspected or uploaded.
+
+### Attach a file anywhere
+
+Wrap a file in an `Attachment` and put it anywhere in a value Hue records: a `span()` input or output, `model()` messages, a tool's arguments or result, `log_inference()` messages, or a span attribute passed to `span(attributes=...)` or `set_attribute`.
+
+```python
+from pathlib import Path
+
+from hue_sdk import Attachment
+
+png = Path("scan.png").read_bytes()
+with hue.span(
+    "review contract",
+    attributes={"metadata": {"scan": Attachment(png, content_type="image/png")}},
+) as span:
+    span.set_input(
+        {
+            "question": "Which clauses changed?",
+            "contract": Attachment(path="contract.pdf", content_type="application/pdf"),
+        }
+    )
+```
+
+Give exactly one of `data` (bytes, or a base64 string or `data:` URL) and `path` (a file on the file system), a `content_type` and optionally a `name`. `data` is read and hashed when the attachment is created and is limited to 25 MiB, the `record_file` limit: it is held in memory from then until it is uploaded, within the 128 MiB budget that queued spans share for values awaiting upload. A `path` names a regular file: anything else, such as a named pipe, is refused without waiting on it. A `path` up to 25 MiB is read the same way. A larger regular file, up to Hue's 1 GB upload limit, is not held: it is hashed a 1 MiB slice at a time when the attachment is created and read again from disk when it is uploaded, each slice hashed as it is sent and the last sent only once the file ended at the size and SHA-256 it was recorded with. Keep such a file in place and unchanged until the client flushes: one that changed, is gone or is no longer a regular file is not uploaded (the request ends before its body is complete, and Hue's upload URL signs the size and SHA-256, so the store refuses other bytes), and it counts in `export_status.upload_fallbacks`, its part keeping the digest and entry it was recorded with; another reference in the trace to the same bytes held in memory is uploaded instead.
+
+At its position the attachment is recorded as a GenAI `blob` part that names the file by digest, `{"type":"blob","mime_type":"application/pdf","modality":"document","sha256":"<64 hex>","size":48213,"name":"contract.pdf"}`, with `modality` read from the content type (`image`, `audio`, `video`, `document` or `file`). The record lists the file under its `hue.blobs` when it is exported, and the bytes upload in the background, keyed `<attribute>#<JSON pointer to the part>`: `input.value#/contract` above, `metadata#/scan` for the attribute, and `body#/gen_ai.input.messages/0/parts/1` for a part in a `log_inference()` log record, which uploads with the other media in the body. An attribute value that is an attachment, a dict or a list OpenTelemetry cannot hold (not of one primitive type), with or without attachments, is recorded as JSON text, as in the TypeScript SDK; put files under `metadata` for Hue to list them as the span's metadata files.
+
+With `capture_content=False` or a setup key no bytes leave the process: a metadata attribute still records the part, without its name, and content values are not recorded at all. A part the redactor removes or rewrites is not uploaded. A part that cannot be uploaded keeps its digest (and its entry, when the upload failed after export) and is counted in `export_status.upload_fallbacks`, as is one nested more than 10 levels deep in its value, where Hue does not read parts, or one in a value cut to the value limit. An attachment in a value that is still over the value limit with its files as digest parts is uploaded and listed as usual, and `client.media.fetch(trace_id=..., sha256=...)` and Hue's span read reach it by digest; the value itself uploads whole and keeps only its first 16 KiB inline, so readers do not place the file at its position in the value. Creating an attachment never raises: one without exactly one of `data` and `path`, with unreadable or larger data or an invalid content type is recorded as `None` and counted as an instrumentation issue; an invalid name alone is omitted and counted.
+
+### Record a file
+
+Record a file your work read, received or produced with `span.record_file`. It adds a `hue.file` event keyed by `hue.file.sha256` to the span; pass `upload=True` to store its bytes in Hue as well:
 
 ```python
 from pathlib import Path
@@ -129,16 +193,52 @@ with hue.span("review contract") as span:
     )
 ```
 
-`upload` defaults to `False`. Supplied `data` must be at most 25 MiB. Names must be nonblank
-after trimming, contain at most 256 UTF-16 code units, be well-formed Unicode and contain no C0
-characters (U+0000–U+001F) or DEL (U+007F). Tabs, newlines, DEL and lone surrogates make a name
-invalid. An invalid name is omitted and counted as an instrumentation failure; the otherwise
-valid event remains. Larger data and invalid records are omitted and counted as instrumentation
-failures. Pass `sha256` and `byte_size` when you already have the file's identity.
+`upload` defaults to `False`. Supplied `data` must be at most 25 MiB, as it is held in memory until it is uploaded. Give `path` instead of `data` for a file on disk: up to 25 MiB it is read as `data` is, and a larger regular file, up to Hue's 1 GB upload limit, is hashed a slice at a time now and, with `upload=True`, read again from disk when it is uploaded, as an [`Attachment`](#attach-a-file-anywhere) given by path is: it uploads only if it still has the size and SHA-256 it was recorded with. A file over 1 GB, a path that is no regular file, or `data` and `path` together, is omitted and counted. Upload requires supplied bytes or a path, content capture and an ordinary project key; the file is listed in the same span's `hue.blobs`, keyed `event:hue.file:<sha256>`, when the span is exported, while preserving the event, and uploaded in the background. An export fits every span's events and entries before it lists any of these files, and the background uploads them, four at a time; a file whose event was redacted or shed is not uploaded. Names must be nonblank after trimming, contain at most 256 UTF-16 code units, be well-formed Unicode and contain no C0 characters (U+0000–U+001F) or DEL (U+007F). Tabs, newlines, DEL and lone surrogates make a name invalid. An invalid name is omitted and counted as an instrumentation failure; the otherwise valid event remains. Larger data and invalid records are omitted and counted as instrumentation failures. Pass `sha256` and `byte_size` when you already have the file's identity.
 
-Tool/model metadata accepts plain strings; invalid values use stable fallback labels and increment instrumentation failures without invoking custom conversion hooks. Disabled tracing skips metadata validation.
+### Read recorded media back
 
-Hue helpers implement the model/tool metadata and inference-message subset of the Development GenAI conventions. They accept caller-supplied JSON without full schema validation. For model helpers, pass the message representation produced by your integration. When authoring your own messages, prefer the shape defined by the GenAI semantic conventions' [input messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-input-messages.json) and [output messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-output-messages.json) JSON schemas. Use either span content or correlated logs for a given input/output, avoiding duplicate copies. Call `log_inference` inside `model(..., provider=...)`, or pass `operation=` and `provider=` explicitly, to include the required inference metadata. `log_inference` sends a structured body (an explicit `None` field keeps its key with an empty value, distinct from an absent field) and copies `gen_ai.operation.name`, `gen_ai.provider.name` and `gen_ai.request.model` from the enclosing `model()` block, or from its `operation=`, `provider=` and `model=` keywords, plus `gen_ai.conversation.id` from `context()`, onto the record's attributes when known. A blank or over-long keyword is omitted and counted as an instrumentation failure.
+`EvaluationClient.media` reads a recorded file back by its digest, with a key that may read recorded content (**Read** or **Read and write**; a trace snapshot's copy needs **Read and write**):
+
+```python
+import json
+import os
+from hue_sdk.evals import EvaluationClient
+
+client = EvaluationClient(api_key=os.environ["HUE_API_KEY"])
+
+# One file by digest; pass the span that recorded it when you know it.
+file = client.media.fetch(trace_id=trace_id, span_id=span_id, sha256=sha256)
+print(file.content_type, file.file_name, file.size, len(file.data))
+
+# Every digest part of a recorded value, written back in its own field.
+recorded = json.loads(attributes["gen_ai.input.messages"])
+resolved = client.media.resolve(recorded, trace_id=trace_id, span_id=span_id)
+messages, failures = resolved.value, resolved.failures
+```
+
+`fetch` asks Hue for a five-minute download link (`GET /api/v1/traces/{traceId}/blobs/{sha256}`), downloads it without the project key and refuses bytes whose SHA-256 is not the digest. It raises `MediaFetchError`, whose `reason` is `not_found` (Hue holds no such file for the trace), `missing` (the trace lists it, but it was never uploaded or has been erased), `unavailable` (still unavailable after one retry that waits out a `Retry-After` of up to 10 seconds), `forbidden` (the key cannot read recorded content, or reads a snapshot without **Read and write**), `too_large` (over `max_bytes`, 64 MiB by default, checked before downloading), `digest_mismatch` or `failed` (a connection failure, a timeout, a redirect or another unexpected answer). Hue is asked for the link once more after a connection failure or a timeout, never after an unexpected answer; a download ends once no byte has arrived for the client's timeout, at least two minutes, and is not retried. `snapshot_id=` instead of `trace_id=` reads a trace snapshot's pinned copy (`GET /api/v1/trace-snapshots/{snapshotId}/blobs/{sha256}`), which carries no media type or name.
+
+`resolve` downloads each distinct digest once, four at a time (`concurrency`, up to 16), and returns a `ResolvedMedia` with a new `value`; the input is not changed. With `as_="data_url"` (the default) each part receives a `data:` URL where its field takes one (OpenAI `image_url` and `file_data`, Responses `input_image`, `input_file` and `computer_screenshot`, AI SDK `image` and `file`) and bare base64 where its convention requires it (GenAI `blob`, OpenAI `input_audio` and assistant `audio`, Anthropic `source.data`, Gemini `inlineData`, Vertex `media`, Bedrock `source.bytes`), so the messages can be sent to the provider again. A GenAI `blob` or Vertex `media` part receives base64 whatever its media type, as the GenAI conventions define its content and as Hue reads content that reads as base64; `as_="bytes"` writes `bytes`. A resolved part no longer carries `sha256` and `size`. A part whose file cannot be read stays as it is and is listed in `failures` with its JSON pointer and reason. Parts inside JSON-encoded strings, such as tool-call arguments, and Langfuse media tokens, which name files Langfuse holds, are left as they are; `fetch` reads the former by the digest the part carries.
+
+A snapshot's copies carry no media type, so a part that declares none would get a `data:` URL of `application/octet-stream`. Pass the record's `hue.blobs` entries in any form Hue reads (the JSON strings the attribute holds, dicts, or one string holding the JSON array), and such a part takes the type of the entry with its SHA-256. Text over 64 KiB that a record keeps as its first 16 KiB is never written back: a part whose content field an entry names, holding only that prefix, stays as it is and is listed in `failures` as `prefix_only` with the entry's SHA-256, and `fetch(trace_id=..., sha256=...)` returns the whole file. An entry names a pointer, not a value, so the entries of another attribute with a file at the same pointer are listed too; pass only the entries of the value's own attribute to list its own file.
+
+```python
+resolved = client.media.resolve(recorded, snapshot_id=snapshot_id, blobs=attributes["hue.blobs"])
+```
+
+### Files in evaluation cases
+
+`add_case` and `add_eval_set_case` pin up to 32 input files on a case with `files=`: artifacts the project already holds, or data and paths the client checks and uploads first. `run_experiment` downloads a case's pinned files before its execution starts and hands the agent-visible ones to the target as `context.files`, and `rehydrate_media(inputs, files)` writes them back into the digest parts of recorded messages copied into the case, so the target can send the recorded model call again with the real image, document or audio. See [Case files](EVALUATIONS.md#case-files).
+
+### Coming from Langfuse or Braintrust
+
+| Langfuse | Braintrust | Hue |
+| --- | --- | --- |
+| Base64 data URIs in an observation's input, output or metadata | | [Automatic capture](#automatically-captured-media), for the attributes and shapes listed there |
+| `LangfuseMedia` | `Attachment` | [`Attachment`](#attach-a-file-anywhere), at the same position |
+| `resolve_media_references(obj=..., resolve_with="base64_data_uri")` | | `client.media.resolve(obj, trace_id=...)` |
+| `GET /api/public/media/{mediaId}` | `ReadonlyAttachment.data` | `client.media.fetch(trace_id=..., sha256=...)` |
+| Media tokens (`@@@langfuseMedia:…@@@`) | `ExternalAttachment` | Left as recorded: Hue never fetches a remote URL or a file another service holds |
 
 ## Sub-agents
 
@@ -214,30 +314,30 @@ Hue speaks standard OTLP, so any local collector works. Point `base_url` at a lo
 - Traces go to `/api/v1/otlp/v1/traces`; correlated logs go to `/api/v1/otlp/v1/logs`. Both use the official OTLP HTTP/protobuf exporter with gzip-compressed request bodies and a `hue-sdk-python/<version>` User-Agent ahead of the exporter's own token. The official exporter handles retryable network/service failures; Hue additionally honors 429 and Retry-After within its transport budget. A 429 whose Retry-After outlasts that budget keeps its records queued, within the queue's bounds, and sends them again once the wait has passed; an export holds its records this way for at most 60 seconds in all, and a longer wait loses them, recorded as a failed export issue. A flush or shutdown budget shorter than the hold returns `False` while the held export continues. There is no proprietary provider transport.
 - Exporter work and its HTTP worker run with OpenTelemetry instrumentation suppressed. Hue ignores records emitted within that suppressed scope, preventing HTTP instrumentation and exporter diagnostics from feeding back into its own queues. Application instrumentation resumes outside that scope. If an OpenTelemetry release ever stops exposing its suppression key, Hue warns once at import and keeps exporting: its own queues still ignore its export work, but OTel HTTP instrumentors could then record Hue's export requests on other exporters.
 - Requests are measured as Hue's receiver measures them: after gzip against its request limit and after decoding against its decoded limit. Until a response advertises its own limits (`Hue-Max-Request-Bytes`, `Hue-Max-Decoded-Bytes` and `Hue-Max-Value-Bytes`, on every acknowledgement and refusal) these are **1 MiB** on the wire, **4 MiB** decoded and **1 MiB** per value; advertised limits are adopted, clamped to 1–64 MiB, 1–64 MiB and 256 KiB–16 MiB, and never exceeded: a request that limits lowered while it was retried or held no longer fit is split and shed again before it is sent. Batches contain at most 64 records, are packed to **4 MiB** before gzip (or the decoded limit, when lower) and are split at record boundaries when they compress worse than the wire limit allows.
-- A value over the value cap that is not uploaded (see [values over the inline limit](#values-over-the-inline-limit)), in any record (helper content, a third-party instrumentation's attribute, a log body), is cut to a UTF-8 prefix before enqueue, bytes are replaced by the receiver's marker (`{"hue.truncated": true, "hue.truncated_bytes": <size>}`), and its key is listed under `hue.truncated`, never omitted for its size; an inference log's body over the cap is still omitted and counted, since its prefix is no JSON. Tool definitions and recorded requests have their credentials removed from the whole value before that cut. A record still over the receiver's limits sheds its content values, largest first, each replaced by the marker and listed, until it fits; only a record too large without any content value is lost, recorded as a dropped export issue. Records a trace lost (dropped from a queue, too large without their content, or refused for their rate past the hold) are counted on its root span as `hue.sdk.dropped_records` when the root is exported, so Hue reads the trace as incomplete by that many records.
+- A value over the value cap that is not uploaded (see [values over the inline limit](#values-over-the-inline-limit)), in any record (helper content, a third-party instrumentation's attribute, a log body), is cut to a UTF-8 prefix before enqueue, bytes are replaced by the receiver's marker (`{"hue.truncated": true, "hue.truncated_bytes": <size>}`), and its key is listed under `hue.truncated`, never omitted for its size; an inference log's body field over the cap is still omitted and counted, since its prefix is no JSON, unless uploads are available and the field fits the cap with its files as their digest. Tool definitions and recorded requests have their credentials removed from the whole value before that cut. A record still over the receiver's limits sheds its content values, largest first, each replaced by the marker and listed, until it fits; only a record too large without any content value is lost, recorded as a dropped export issue. Records a trace lost (dropped from a queue, too large without their content, or refused for their rate past the hold) are counted on its root span as `hue.sdk.dropped_records` when the root is exported, so Hue reads the trace as incomplete by that many records.
 - A tracer provider Hue creates keeps **2,000** attributes, events and links per span and attributes per event and link (OpenTelemetry's default is 128), unless the environment sets OpenTelemetry's own limit (`OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT`, `OTEL_ATTRIBUTE_COUNT_LIMIT`, `OTEL_SPAN_EVENT_COUNT_LIMIT`, `OTEL_SPAN_LINK_COUNT_LIMIT`, `OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT`, `OTEL_LINK_ATTRIBUTE_COUNT_LIMIT`), which wins. Log records and externally configured providers keep OpenTelemetry's limits. A span whose events or links do not all fit the queue's byte budget keeps its newest ones and counts the rest in its dropped event and link counts, rather than being dropped whole.
 - Hue accepts at most **2,000 distinct spans per trace**. This is enforced by the receiver across distributed producers; the client cannot guarantee a global count.
 - HTTP errors, malformed/non-200 success responses and OTLP `partial_success` rejected counts cause a failed export status. Partial rejection is not retried wholesale. Receiver error text is not echoed. A warning-only partial-success response with zero rejected records remains successful. A request carrying only [live-span placeholders](#live-spans) never fails the status.
-- `force_flush(timeout_millis=30000)` drains both processors and returns `False` for a timeout, failed export, dropped record or instrumentation omission since this client was created. Hue's processors honor the shared deadline and serialize drains in a bounded background worker. Pending exports continue after timeout. `export_status` exposes cumulative failure counters. `shutdown()` stops new helpers, drains and closes owned exporters within the caller's wait budget; repeated calls wait for the same shutdown. After a timeout, keep the process alive and call shutdown again to confirm completion. Context-manager exit calls `shutdown_safe(timeout_millis=1000)`; check flush explicitly when an exit code must reflect delivery failure.
+- `force_flush(timeout_millis=30000)` drains both processors and returns `False` for a timeout, failed export, dropped record or instrumentation omission since this client was created. Hue's processors honor the shared deadline and serialize drains of records in a bounded background worker; the caller then waits for pending uploads within the same deadline, outside that worker, so a concurrent flush never waits behind another's uploads to send its own records. Pending exports continue after timeout. `export_status` exposes cumulative failure counters. `shutdown()` stops new helpers, drains and closes owned exporters within the caller's wait budget; repeated calls wait for the same shutdown. After a timeout, keep the process alive and call shutdown again to confirm completion. Context-manager exit calls `shutdown_safe(timeout_millis=1000)`; check flush explicitly when an exit code must reflect delivery failure.
 - Hue processors use the public OTel interfaces and bound each signal to 2,048 records and 8 MiB of encoded telemetry by default, including in-flight records (`max_queue_size`, `max_queue_bytes`). Dropped records and instrumentation omissions make cumulative `export_status.ok` false. Queue overflow, process termination and sampling can lose telemetry. Flush success reports observed exporter outcomes, not durable local delivery or proof that every application operation was instrumented. The exporter timeout controls individual export/retry operations. A caller timeout does not cancel an HTTP request already in flight; background workers continue until the operation completes.
 - A timed-out HTTP worker can retain one encoded request, up to the receiver's request limit, per signal outside the queue counters. Later records remain queued within the configured limits until that worker finishes; shutdown counts any queued records it must discard. Queue bytes are not total process memory.
 - A flush timeout releases drain coordination so later flushes can make progress. Both signals share the caller's remaining wait budget, including time spent waiting for another flush. Shutdown's exporter cleanup can continue after the caller returns without holding that coordination lock. Repeated shutdown calls report current failures and drops as well as cleanup completion.
 
 ## Values over the inline limit
 
-Hue keeps a value inline up to its value limit (1 MiB unless the receiver advertises another in `Hue-Max-Value-Bytes`). A span's own string attribute larger than that (helper content such as `input.value`, `output.value` and tool results, or another instrumentation's attribute), and eligible media in a span's own recorded messages, are uploaded to Hue apart from the span, up to Hue's upload limit of 1,000,000,000 bytes:
+Hue keeps a value inline up to its value limit (1 MiB unless the receiver advertises another in `Hue-Max-Value-Bytes`). A span's own string attribute larger than that (helper content such as `input.value`, `output.value` and tool results, or another instrumentation's attribute), and the files described in [Images, documents and audio](#images-documents-and-audio), are uploaded to Hue apart from their record, up to Hue's upload limit of 1,000,000,000 bytes:
 
-1. Export computes the SHA-256 of the value's bytes (a string as UTF-8, a file as its own bytes) and reserves it with `POST /api/v1/otlp/blobs`, authenticated with the project key. Hue answers that it already stores the value under the trace, and nothing is uploaded, or with a presigned URL.
+1. Export computes the SHA-256 of the value's bytes (a string as UTF-8, a file as its own bytes) and lists the value; a background thread reserves it with `POST /api/v1/otlp/blobs`, authenticated with the project key. Hue answers that it already stores the value under the trace, and nothing is uploaded, or with a presigned URL.
 2. The bytes go straight to the project's evidence store in one `PUT` to that URL, streamed with exactly the headers Hue signed and never the project key (over HTTPS, or plain HTTP to a loopback store), and the upload is confirmed with `POST /api/v1/otlp/blobs/complete`. A PUT the store answers with 412 (the same value uploaded at the same time by another span) counts as stored.
-3. Whole string values and large text media keep a UTF-8-safe 16 KiB prefix. Binary media keeps its digest on the part. The span lists stored values in `hue.blobs`, at most 64 compact JSON strings with fields ordered `key`, `sha256`, `size`, `content_type` and optional `name`: `{"key":"output.value","sha256":"<64 hex>","size":5242880,"content_type":"application/json"}`. A whole value is listed under `hue.truncated` as well, since its inline text is a prefix.
+3. Whole string values and large text media keep a UTF-8-safe 16 KiB prefix. Binary media keeps its digest on the part. The record lists the values whose upload export accepted in `hue.blobs`, at most 64 compact JSON strings with fields ordered `key`, `sha256`, `size`, `content_type` and optional `name`: `{"key":"output.value","sha256":"<64 hex>","size":5242880,"content_type":"application/json"}`. A whole value is listed under `hue.truncated` as well, since its inline text is a prefix.
 
-Hue stores the value under the trace, so the trace's retention, deletion and erasure cover it. Uploads run on the export worker, never on the application's thread: at most four at a time on daemon threads, each request within `export_timeout_seconds`, and all of one export's uploads within six of them; a transient failure is retried once, and a rate-limited reservation (429) waits out its `Retry-After` within the export's 60-second hold. A value not uploaded in time falls back; its upload, if still running, stops sending at the same deadline and its answer goes unused.
+Hue stores the value under the trace, so the trace's retention, deletion and erasure cover it. Uploads run apart from export on at most four daemon threads per client, never on the application's thread or the export worker: a record is sent without waiting for its uploads, which never hold, pause or drop it, and an upload may finish before or after its record reaches Hue. Each reservation, PUT and confirmation is tried up to three times on no answer, 408, 429 or 5xx, waiting the answer's `Retry-After` (at most 60 seconds) or else a jittered 0–1 s, then 0–2 s; other refusals are final. An upload is counted, and lets go of its bytes and its share of the held-value budget, once its bytes are stored; a flush waits for its confirmation's first attempt only, and a retried confirmation holds no upload thread while it waits. Each request has `export_timeout_seconds`, and each PUT attempt six of them or one second per MiB, whichever is longer; a PUT that runs out of its own time is not tried again. At most 1,024 uploads are pending at once. `force_flush()`, and a tracer provider's `force_flush()`, sends the records it drains first and then waits, within its deadline, for the uploads accepted so far, and returns `False` at once when none of them can be stored before that deadline (each waits out a `Retry-After` past it), so a provider's processors after Hue's keep the rest of its budget; a flush called while another waits for uploads still sends its own records at once; `shutdown()` gives pending uploads up to 30 seconds more once its processors stop, then abandons the rest, counted as not uploaded. A processor's own shutdown, as a borrowed provider's `shutdown()` runs it, sends Hue's records without waiting for uploads, so the provider's other processors are never held behind them: call `hue.shutdown()` after it to give pending uploads that grace.
 
-A value that cannot be uploaded (Hue or the store refused it or failed, the network or a deadline did, the receiver has no upload route, or the value is over 1 GB) falls back according to its form: whole attributes keep a prefix up to the cap and are listed under `hue.truncated`; media parts keep their digest without a blob entry; failed opt-in `record_file` uploads preserve the file event. The explicit helper limit is 25 MiB; whole attributes retain their 1 GB limit. Each export records such values in a `warning` export issue per cause, whose `count` is the values and `trace_ids` their traces, and counts them in `export_status.upload_fallbacks`; successful uploads are counted in `export_status.uploaded_values`. Both counters include whole attributes, eligible binary or large text media, and opt-in `record_file` uploads. A warning is not a failure: it does not affect `export_status.ok`, `force_flush()` or `export_failure_sequence()`. After a transient failure, or a refusal that is not about the value alone, uploads pause for 30 seconds, and a receiver without the upload route (a 404 that is not Hue's, a 405 or 501, or a 200 that is no reservation) is not asked again for 10 minutes, so an unavailable store or another OTLP receiver meets no retry storm. An upload still sending when its export's upload budget ends stops there.
+A value whose upload is refused before its record is exported (the receiver is known to lack the upload route, the value is over 1 GB, no `hue.blobs` place is left, or the held-value budget or the 1,024 pending uploads are full) falls back according to its form: whole attributes keep a prefix up to the cap and are listed under `hue.truncated`; media parts keep their digest without a blob entry; refused opt-in `record_file` uploads preserve the file event. An upload that fails after its record was exported (Hue or the store refused or failed it, or the network or a deadline did, after its attempts) leaves the record as it was exported: the 16 KiB prefix or digest and its entry, which Hue reads as missing; a later reference to the same bytes in the trace uploads them again, which resolves the earlier entry too. Bytes given in memory to `record_file` or an `Attachment` are limited to 25 MiB; a file given by path, a file read in place from a value and a whole attribute to 1 GB. Each cause is recorded in a `warning` export issue, whose `count` is the values and `trace_ids` their traces, and counted in `export_status.upload_fallbacks`; an upload is counted in `export_status.uploaded_values` once it is stored. Both counters include whole attributes, eligible binary or large text media, attachments, and opt-in `record_file` uploads. A warning is not a failure: it does not affect `export_status.ok`, `force_flush()` or `export_failure_sequence()`. A receiver without the upload route (a 404 that is not Hue's, a 405 or 501, or a 200 that is no reservation) is not asked again for the life of the client, so another OTLP receiver meets no retry storm: values queued after it answers keep their fallback form, and only records exported before it answers list values it never stores.
 
-To upload a value whole, the queued copy of its span holds it until export apart from `max_queue_bytes`, within a 128 MiB budget of held values (each charged as the interpreter holds it); a recorded message holding eligible media is held the same way, while the queue is charged its copy with the files as their digest. A value the budget cannot hold, or one queued while the receiver is known to lack the upload route, is cut (its files digested) when it is queued, as before, and reported as not uploaded, once per file; a single value larger than the whole budget is held while nothing else is. The queued copy lets go of its held values once export has placed them.
+To upload a value whole, the queued copy of its span holds it apart from `max_queue_bytes`, within a 128 MiB budget of held values (each charged as the interpreter holds it); a recorded message holding eligible media is held the same way, while the queue is charged its copy with the files as their digest. A value the budget cannot hold, or one queued while the receiver is known to lack the upload route, is cut (its files digested) when it is queued, as before, and reported as not uploaded, once per file; a single value larger than the whole budget is held while nothing else is. A value that would be cut into its record's queue, and an `Attachment` or `record_file(upload=True)` file the budget would refuse, first takes the place of the oldest accepted uploads no worker has started, which are counted as not uploaded (their records already list them, so Hue reads them as missing): uploads queued behind a stalled receiver never push a later record's values back into `max_queue_bytes` nor refuse its files; only the records of the four running uploads keep their charge until those end. A file in a log record's body that its queued copy did not hold whole is charged its bytes when export accepts its upload, and keeps its bytes inline when the budget cannot hold them. Nothing waits for room in the budget. A record's held values stay charged until its uploads finish.
 
-Nothing is uploaded with `capture_content=False` or a setup key (`hue_setup_…`), nor from log records (Hue does not read a log record's uploaded values yet), links, resources or in-progress placeholders. Span events upload only through explicit `record_file(upload=True, ...)`; other event values are cut as before. The redactor runs on helper content before it is queued, and the credential scrub of tool definitions and recorded requests runs on the whole value before it is hashed, so a value they rewrite is uploaded as rewritten.
+Nothing is uploaded with `capture_content=False` or a setup key (`hue_setup_…`), nor from links, resources, log records not correlated with a span or in-progress placeholders; a log record uploads only its files and the attachments in its body (see [Automatically captured media](#automatically-captured-media)). Span events upload only through explicit `record_file(upload=True, ...)`; other event values are cut as before. The redactor runs on helper content before it is queued, and the credential scrub of tool definitions and recorded requests runs on the whole value before it is hashed, so a value they rewrite is uploaded as rewritten.
 
 ## Live spans
 
@@ -289,8 +389,9 @@ confirmation = hue.verify_trace(
 if confirmation.verified:
     print(confirmation.receipt.trace_url)
 else:
-    # The latest partial receipt, or None if this trace has not appeared yet.
-    print(confirmation.receipt)
+    # The latest partial receipt, or None if this trace has not appeared yet; then `project`
+    # names the project the key searched, so a key for another project is told apart.
+    print(confirmation.receipt, confirmation.project)
 ```
 
 Only require fields your instrumentation emits and your capture policy permits. For metadata-only
@@ -316,6 +417,65 @@ Python 3.10+ is supported. CI tests Python 3.10 and 3.14, source imports and an 
 See the [documentation](https://docs.hue.run/sdks/python) for integration guidance and [troubleshooting](https://docs.hue.run/guides/troubleshooting) for export failures.
 
 ## Simulated worlds
+
+`hue_sdk.world.WorldClient` provides `create_instance`, `get_instance` and
+`finish_instance`. It requires a Hue deployment serving the canonical instance routes.
+The published client below remains supported. The handoff's legacy `worldId` field continues
+to identify the runtime instance.
+
+`WorldModelClient` reconstructs a user's starting World from retained evidence:
+
+```python
+from hue_sdk.world import WorldModelClient
+
+models = WorldModelClient(api_key=os.environ["HUE_API_KEY"])
+model = models.create_model(entity={"namespace": "user", "id": "user-123"})["worldModel"]
+started = models.start_instance(
+    model["id"],
+    idempotency_key="review-user-123-at-t2",
+    at="2026-10-17T12:00:00Z",
+    ttl_seconds=600,
+)
+```
+
+A new start uses the latest completed reconstruction of the requested time, including later
+observations that establish earlier facts. Reuse the idempotency key only to retry that same
+start. `reproduce_instance(instance_id, idempotency_key=...)` creates a fresh isolated instance
+from an earlier instance's original starting World. Retained starting data is required.
+
+Materialization, instance creation and reproduction wait up to two minutes when Hue explicitly
+reports that the World is preparing. Retries preserve the same request bytes and identity.
+Other failures keep `max_attempts`. These methods accept an optional `cancel_event` containing
+a `threading.Event`; setting it ends the wait and closes active HTTP reads.
+
+Automatic capture requires a compatible service. Set the complete user ID
+on the root request through `hue.context(user_id=...)`, then attach explicit account metadata to
+each tool span. Configure faithful production provenance on the application's OpenTelemetry
+resource (`deployment.environment.name=production`); eval and simulation traffic stay excluded.
+
+```python
+with hue.context(user_id="user-123"):
+    with hue.span("assistant request"):
+        with hue.tool(
+            "search_threads",
+            mcp={"name": "gmail", "provider": "google.gmail", "surface": "mcp"},
+        ) as span:
+            span.otel_span.set_attributes({
+                "hue.connection.provider_id": "google.gmail",
+                "hue.connection.account_id": "connection-work",
+                "hue.connection.generation": 1,
+                "hue.connection.principal": "owner@example.test",
+            })
+            span.set_input({"query": "project update"})
+            span.set_output(search_threads(query="project update"))
+```
+
+`search_threads` is your existing tool implementation. Use a stable account/connection ID and a
+positive connection generation; increment the generation when replacing that connection.
+`hue.connection.scope` optionally identifies an app partition, and the app determines whether
+its acting `principal` is required. The [capture contract](../sdk-typescript/WORLDS.md#capture-user-and-account-identity)
+also covers explicit entity namespaces and framework tool-span hooks. Missing bindings remain
+unresolved; Hue does not infer them from tool arguments or attach provider credentials.
 
 `hue_sdk.environment.EnvironmentClient` drives Hue's World API: create a world after the case's
 execution starts, hand the agent the provider mirror URLs and the world token (never the project
@@ -359,7 +519,7 @@ evidence = client.get_evidence(run["id"], section="ledger")
 
 `agent_environment` removes `HUE_API_KEY`, `HUE_MCP_KEY` and any value carrying a Hue control-plane
 credential (`hue_sk_`, `hue_setup_`, `hue_attempt_`, `hue_mcp_`, `hue_inv_`, `hue_install_`,
-`hue_at_`, `hue_rt_`, `hue_oauth_`) anywhere in it, including wrapped, percent-encoded or
+`hue_at_`, `hue_rt_`, `hue_it_`, `hue_oauth_`) anywhere in it, including wrapped, percent-encoded or
 JSON-Unicode-escaped values, unless
 `include_hue_credentials=True`; world tokens and `hue_sim_` capabilities pass. For one compatibility
 release it also sets `HUE_MCP_URL`, `HUE_MCP_TOKEN` and `HUE_MCP_EXPIRES_AT` from the first MCP

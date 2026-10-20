@@ -89,6 +89,7 @@ if (!values.archive && !values["registry-version"]) {
     "sendsPlaceholders",
     "rejectPlaceholders",
     "withDroppedRecords",
+    "omitDroppedRecords",
     "consumeDroppedRecords",
     "countUndelivered",
     "holdForRateLimit",
@@ -99,10 +100,29 @@ if (!values.archive && !values["registry-version"]) {
     "holdsValues",
     "offloadSpan",
     "reportOffload",
+    "awaitUploads",
+    "flushRecords",
   ]) {
     if (new RegExp(`^\\s+${member}\\(`, "m").test(transportTypes))
       throw new Error(`dist/transport.d.ts exposes internal member ${member}()`);
   }
+  // Serving frameworks bundle the SDK (Next.js Turbopack and webpack): a dynamic import whose
+  // specifier is an expression is replaced with a throw there, so every export would fail.
+  const bundled = new Set();
+  const pendingModules = ["dist/index.js", "dist/ai-sdk.js"];
+  while (pendingModules.length) {
+    const file = pendingModules.pop();
+    if (bundled.has(file)) continue;
+    bundled.add(file);
+    const code = readFileSync(join(staging, file), "utf8");
+    for (const match of code.matchAll(/\bimport\s*\(\s*([^)]*)\)/gu)) {
+      if (!/^["'][^"']+["']$/u.test(match[1].trim()))
+        throw new Error(`${file} imports a computed specifier: import(${match[1]})`);
+    }
+    for (const match of code.matchAll(/(?:from|import)\s*\(?\s*["'](\.\.?\/[^"']+)["']/gu))
+      pendingModules.push(join(file, "..", match[1]));
+  }
+  console.log(`bundle safety: ${bundled.size} runtime modules import literal specifiers only`);
   run("npm", ["pack", "--ignore-scripts", "--pack-destination", destination], staging);
   // Bun's packer must agree with npm's file inventory; the release artifact stays npm pack.
   const bunPack = spawnSync("bun", ["--no-env-file", "pm", "pack", "--dry-run"], {
@@ -909,11 +929,14 @@ run(
 );
 const installedPackageTests = [
   "sdk.test.ts",
+  "tool-endpoint.test.ts",
   "live-spans.test.ts",
   "evals.test.ts",
   "scorer-publication.test.ts",
   "attempt.test.ts",
   "environment.test.ts",
+  "world-client.test.ts",
+  "world-preparation.test.ts",
   "simulation.test.ts",
   "local-worker.test.ts",
   "coverage-gap.test.ts",
@@ -926,16 +949,24 @@ const installedPackageTests = [
   "environment-files.test.ts",
   "cli-output-safety.test.ts",
   "cli-eval-direct.test.ts",
+  "cli-eval-judges.test.ts",
   // `hue listen` against a stand-in for the listen routes, through the installed binary and dist.
   "cli-listen.test.ts",
+  // `hue import langfuse` against stand-ins for Langfuse's API and Hue's receiver and upload routes.
+  "cli-import-langfuse.test.ts",
   // Output bounds, provider tool spans and their error-text scrubbing, and inline file digests,
   // against the packed dist.
   "evals-json.test.ts",
   "provider-tools.test.ts",
   "provider-tool-spans.test.ts",
   "inline-files.test.ts",
-  // Values over the inline limit uploaded to a loopback Hue implementing the upload routes.
+  // Values over the inline limit uploaded to a loopback Hue implementing the upload routes, and
+  // media past the inspection bounds read in place exactly as parsed media are placed.
   "blobs.test.ts",
+  "large-media.test.ts",
+  // Recorded media read back by digest and files pinned on case writes, against loopback routes.
+  "media.test.ts",
+  "case-files.test.ts",
 ];
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);
@@ -1013,6 +1044,7 @@ void [transition, event, options, backend];
         .replaceAll('"../src/ai-sdk.js"', '"@hue-run/sdk/ai-sdk"')
         .replaceAll('"../src/evals.js"', '"@hue-run/sdk/evals"')
         .replaceAll('"../src/environment.js"', '"@hue-run/sdk/environment"')
+        .replaceAll('"../src/world.js"', '"@hue-run/sdk/world"')
         .replaceAll('"../src/client.js"', '"@hue-run/sdk"')
         .replaceAll('"../src/managed.js"', '"@hue-run/sdk/managed"')
         .replaceAll(
@@ -1028,6 +1060,7 @@ void [transition, event, options, backend];
           '"../node_modules/@hue-run/sdk/dist/evals/environment-target.js"',
         )
         .replaceAll('"../src/evals/files.js"', '"../node_modules/@hue-run/sdk/dist/evals/files.js"')
+        .replaceAll('"../src/evals/media.js"', '"../node_modules/@hue-run/sdk/dist/evals/media.js"')
         .replaceAll('"../src/evals/json.js"', '"../node_modules/@hue-run/sdk/dist/evals/json.js"')
         .replaceAll(
           '"../src/provider-tools.js"',
@@ -1042,6 +1075,9 @@ void [transition, event, options, backend];
           '"../node_modules/@hue-run/sdk/dist/inline-files.js"',
         )
         .replaceAll('"../src/blobs.js"', '"../node_modules/@hue-run/sdk/dist/blobs.js"')
+        .replaceAll('"../src/large-media.js"', '"../node_modules/@hue-run/sdk/dist/large-media.js"')
+        .replaceAll('"../src/attachment.js"', '"../node_modules/@hue-run/sdk/dist/attachment.js"')
+        .replaceAll('"../src/json-edits.js"', '"../node_modules/@hue-run/sdk/dist/json-edits.js"')
         .replaceAll('"../src/snapshot.js"', '"../node_modules/@hue-run/sdk/dist/snapshot.js"')
         .replaceAll(
           '"../src/evals/exit-cleanup.js"',
@@ -1053,6 +1089,11 @@ void [transition, event, options, backend];
         )
         .replaceAll('"../src/cli/eval.js"', '"../node_modules/@hue-run/sdk/dist/cli/eval.js"')
         .replaceAll('"../src/cli/listen.js"', '"../node_modules/@hue-run/sdk/dist/cli/listen.js"')
+        .replaceAll('"../src/cli/import.js"', '"../node_modules/@hue-run/sdk/dist/cli/import.js"')
+        .replaceAll(
+          '"../src/cli/langfuse.js"',
+          '"../node_modules/@hue-run/sdk/dist/cli/langfuse.js"',
+        )
         // The CLI is the installed binary, and an adapter imports the installed evals entry.
         .replaceAll('"../src/setup/cli.ts"', '"../node_modules/@hue-run/sdk/dist/setup/cli.js"')
         .replaceAll('"../src/evals.ts"', '"../node_modules/@hue-run/sdk/dist/evals.js"'),

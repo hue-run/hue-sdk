@@ -1,0 +1,43 @@
+name: Verification
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+concurrency:
+  group: verification-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  evidence:
+    name: Verification evidence
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .agents/skills
+      - name: Require a verify skill and its output in the PR description
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, sys
+          if os.environ["AUTHOR_TYPE"] == "Bot":
+              print("Bot pull request; no verification evidence required.")
+              sys.exit(0)
+          body = os.environ.get("BODY", "").replace("\r\n", "\n")
+          body = re.sub(r"<!--\s*codesmith:footer\s*-->.*?<!--\s*/codesmith:footer\s*-->", "", body, flags=re.S | re.I)
+          body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+          skills = sorted(p.parent.name for p in pathlib.Path(".agents/skills").glob("verify-*/SKILL.md"))
+          named = [s for s in skills if re.search(rf"(?<![\w-]){re.escape(s)}(?![\w-])", body)]
+          output = any(m.group(2).strip() for m in re.finditer(r"(?ms)^ {0,3}(`{3,}|~{3,})[^\n]*\n(.*?)^ {0,3}\1", body))
+          screenshot = re.search(r"!\[[^\]]*\]\(\s*[^)\s]|<img\s[^>]*\bsrc\s*=", body, re.I)
+          if named and (output or screenshot):
+              print("Verified with " + ", ".join(named))
+              sys.exit(0)
+          print(f"::error::Name the verify skill you ran ({', '.join(skills)}) in the PR description and paste its output in a code block, or one screenshot for a visible UI change. See AGENTS.md, Before opening a PR.")
+          sys.exit(1)
+          PY

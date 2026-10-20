@@ -37,6 +37,7 @@ HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES: tuple[str, ...] = (
     "hue_install_",
     "hue_at_",
     "hue_rt_",
+    "hue_it_",
     "hue_oauth_",
 )
 _HUE_CREDENTIAL_PREFIX_PATTERN = "|".join(
@@ -108,7 +109,7 @@ def world_handoff(run: EnvironmentRun) -> WorldHandoff | None:
 # would send this world's token to a mirror this world does not have, or date an agent by an
 # earlier world's clock. The whole ``HUE_WORLD_`` prefix is the world's.
 _WORLD_SCOPED = re.compile(
-    r"^(?:HUE_WORLD_[A-Z0-9_]+|HUE_MCP_(?:CONFIG|URL|TOKEN|EXPIRES_AT)|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS))$"
+    r"^(?:HUE_WORLD_[A-Z0-9_]+|HUE_MCP_(?:CONFIG|URL|TOKEN|EXPIRES_AT)|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS|TOKEN))$"
 )
 
 
@@ -162,7 +163,15 @@ def legacy_mcp_capability(world: WorldHandoff) -> LegacyMcpCapability | None:
     servers = list(world["mcpConfig"]["mcpServers"].values())
     if not servers:
         return None
-    return {"url": servers[0]["url"], "token": world["token"], "expiresAt": world["expiresAt"]}
+    authorization = servers[0].get("headers", {}).get("Authorization")
+    scoped = re.fullmatch(r"Bearer ([^\s]+)", authorization) if authorization is not None else None
+    if authorization is not None and scoped is None:
+        return None
+    return {
+        "url": servers[0]["url"],
+        "token": scoped.group(1) if scoped is not None else world["token"],
+        "expiresAt": world["expiresAt"],
+    }
 
 
 def agent_environment(

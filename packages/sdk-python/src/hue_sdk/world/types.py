@@ -85,7 +85,11 @@ WorldFlag = Literal["no_calls", "fingerprint_differs"]
 WorldEvidenceSection = Literal["all", "start", "end", "diff", "ledger"]
 
 
-class WorldSurface(TypedDict):
+class _WorldSurfaceOptional(TypedDict, total=False):
+    token: str
+
+
+class WorldSurface(_WorldSurfaceOptional):
     """One pinned provider surface of one provider instance, as a mirror URL."""
 
     provider: str

@@ -14,7 +14,7 @@ OpenTelemetry tracing and local evaluation workflows for AI applications.
 
 [Documentation](https://docs.hue.run) · [Sign in](https://app.hue.run) · [Examples](./examples) · [Compatibility](./COMPATIBILITY.md) · [Changelog](./CHANGELOG.md) · [Versioning](./VERSIONING.md) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
 
-Don't have a Hue account yet? The Hue team sets up accounts: email [founders@hue.run](mailto:founders@hue.run) or book a time at [https://calendar.notion.so/meet/akethini/hue](https://calendar.notion.so/meet/akethini/hue). Tracing works without an account against any OTLP receiver; only the Hue-specific connection check, trace receipts and hosted evaluations need a project. See "Local development without a Hue account" in the [TypeScript](./packages/sdk-typescript/README.md#local-development-without-a-hue-account) and [Python](./packages/sdk-python/README.md#local-development-without-a-hue-account) guides.
+A Hue account is required to send traces to Hue. Tracing works without an account against any OTLP receiver; only the Hue-specific connection check, trace receipts and hosted evaluations need a project. See "Local development without a Hue account" in the [TypeScript](./packages/sdk-typescript/README.md#local-development-without-a-hue-account) and [Python](./packages/sdk-python/README.md#local-development-without-a-hue-account) guides.
 
 </div>
 
@@ -30,7 +30,7 @@ Don't have a Hue account yet? The Hue team sets up accounts: email [founders@hue
 
 | Language | Package / imports | Runtime | Guide |
 | --- | --- | --- | --- |
-| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/environment`, `@hue-run/sdk/managed`, `@hue-run/sdk/setup` | Node.js 22 or 24 (26 in CI); Bun 1.4.2 | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) · [Simulated environments](./packages/sdk-typescript/ENVIRONMENTS.md) |
+| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/environment`, `@hue-run/sdk/managed`, `@hue-run/sdk/setup` | Node.js 22 or 24 (26 in CI); Bun 1.4.2 | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) · [Simulated worlds](./packages/sdk-typescript/ENVIRONMENTS.md) |
 | Python | `hue-run`; `hue_sdk`, `hue_sdk.evals`, `hue_sdk.managed` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
 | Any other language | The official OpenTelemetry SDK with an OTLP/HTTP exporter | Go, Java, .NET, Rust, Ruby and others | [Existing OpenTelemetry](https://docs.hue.run/integrations/opentelemetry) |
 
@@ -58,11 +58,13 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 
 - Record requests, model calls, tools, errors and sessions using standard OTLP.
 - Record full traces with content capture, or choose metadata only, and inspect export failures.
+- Store the images, documents and audio a trace records (found automatically, placed with `Attachment` or recorded as files), read them back by digest and pin them to evaluation cases.
 - Preserve an existing OpenTelemetry provider and its other exporters.
 - Confirm stored traces, known child spans, and required field presence after export.
 - Run local evaluation targets and scorers against frozen datasets.
 - Resume result uploads and rescore stored outputs without rerunning the target.
 - Run an existing local agent callback against a fresh hosted simulated world.
+- Copy a Langfuse project's traces and media into Hue with [`hue import langfuse`](./packages/sdk-typescript/README.md#import-from-langfuse), from your machine with your own Langfuse keys.
 
 The TypeScript package is published on [npm](https://www.npmjs.com/package/@hue-run/sdk), with
 command workers that run answer-only and world cases from the same application directory,
@@ -109,7 +111,7 @@ try {
 
 The default destination is `https://app.hue.run`. The trace records the input and output text above; with `captureContent: false` it keeps span names, timing and metadata without that text. The [tracing guide](./packages/sdk-typescript/README.md) covers capture, redaction, borrowed providers, streaming and shutdown.
 
-Don't have a Hue account yet? The Hue team sets up accounts: email [founders@hue.run](mailto:founders@hue.run) or book a time at [https://calendar.notion.so/meet/akethini/hue](https://calendar.notion.so/meet/akethini/hue). Without an account, run the same script against a local OpenTelemetry Collector by setting `baseUrl` as described in [Local development without a Hue account](./packages/sdk-typescript/README.md#local-development-without-a-hue-account); `checkConnection()` is a Hue-only diagnostic, so remove that call when the receiver is a generic collector.
+A Hue account is required for Hue Cloud. Without one, run the same script against a local OpenTelemetry Collector by setting `baseUrl` as described in [Local development without a Hue account](./packages/sdk-typescript/README.md#local-development-without-a-hue-account); `checkConnection()` is a Hue-only diagnostic, so remove that call when the receiver is a generic collector.
 
 For Python, use the installation instructions above and follow the [complete Python example](./packages/sdk-python/README.md).
 
@@ -177,7 +179,7 @@ Hue's SDKs are deliberately small. The following are design choices, not missing
 
 - No bundled provider auto-instrumentation and no per-framework adapters beyond the AI SDK 7 helper. Use the provider's or framework's own OpenTelemetry export (OpenInference, OpenLLMetry, native OTel) and configure its content controls; Hue recognizes those conventions.
 - No native SDKs beyond TypeScript and Python. Other languages use the official OpenTelemetry SDK pointed at Hue's OTLP endpoints.
-- No proprietary event protocol, live token streaming, attachments or feature-flag API. Spans are exported when they complete, and a Hue or AI span that is still running is announced with a standard OTLP placeholder span so Hue can show it live; use standard attributes and span events.
+- No proprietary event protocol, live token streaming or feature-flag API. Spans are exported when they complete, and a Hue or AI span that is still running is announced with a standard OTLP placeholder span so Hue can show it live; use standard attributes and span events.
 - No browser or edge builds: the project service key is a server-side credential. There is no separate CommonJS build; Node.js 22.12 or later loads the ESM build from `require()`.
 - Constructors never read Hue settings (key, endpoint, capture policy, budgets) from environment variables, and the TypeScript SDK does not read `OTEL_RESOURCE_ATTRIBUTES` either. No token-cost estimation, no prompt management, no built-in PII pattern presets and no local trace viewer. Redaction is a hook you supply; an OpenTelemetry Collector covers organization-wide redaction, buffering and local viewing.
 - Project service keys are preset-scoped. Use **Read and write** for development and evaluation: it sends telemetry, reads delivery receipts, authorizes the evaluation, artifact and simulation APIs used by the optional clients and connects the [Hue MCP server](https://docs.hue.run/agents/mcp-server). **Tracing only** sends telemetry and reads delivery receipts, nothing more; use it as a production server's `HUE_API_KEY` and keep **Read and write** off production servers. **Read** reads the project through the MCP server and cannot send telemetry. The SDK clients do not browse stored traces; use the Hue app or the MCP server. These SDKs do not attach feedback or scores to stored traces. TypeScript's explicit `runSimulation()` helper orchestrates versioned simulation resources; it does not grant general read access or hide provider execution.

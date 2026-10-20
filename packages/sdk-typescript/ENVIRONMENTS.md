@@ -1,6 +1,6 @@
-# Simulated environments
+# Simulated worlds: compatible client
 
-The provider-aware environment APIs shipped in TypeScript `0.3.0` and are publicly available:
+The provider-aware APIs shipped in TypeScript `0.3.0` and are publicly available:
 
 ```bash
 npm install @hue-run/sdk zod
@@ -9,6 +9,9 @@ npm install @hue-run/sdk zod
 Your agent runs in your process while a disposable simulated world runs in Hue. The world is
 authoritative and records an ordered journal; Hue does not execute your agent code or provider
 credentials.
+
+The `environment` module and its exported names remain supported for existing integrations.
+The canonical client names for the next release are documented in [Worlds](WORLDS.md).
 
 ## Run a definition like a test
 
@@ -329,7 +332,7 @@ A refusal such as 409 `simulation_gateway_required` exposes its validated server
 
 `agentEnvironment` removes Hue control-plane credentials from the child by default: `HUE_API_KEY`,
 `HUE_MCP_KEY`, and any value carrying a Hue control-plane credential (`hue_sk_`, `hue_setup_`,
-`hue_attempt_`, `hue_mcp_`, `hue_inv_`, `hue_install_`, `hue_at_`, `hue_rt_`, `hue_oauth_`)
+`hue_attempt_`, `hue_mcp_`, `hue_inv_`, `hue_install_`, `hue_at_`, `hue_rt_`, `hue_it_`, `hue_oauth_`)
 anywhere in it, including wrapped, percent-encoded or JSON-Unicode-escaped values. World tokens and
 `hue_sim_` capabilities pass. Pass `includeHueCredentials: true` only for an agent that must call
 Hue's own API.

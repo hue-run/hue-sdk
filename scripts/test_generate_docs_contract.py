@@ -75,6 +75,21 @@ class DocumentationContractTests(unittest.TestCase):
                     "publicExports"
                 ],
             )
+        for name in ("WorldClient", "createWorldClient", "CreateInstanceInput", "WorldInstance"):
+            self.assertIn(
+                name,
+                contract["packages"]["typescript"]["entrypoints"]["@hue-run/sdk/world"][
+                    "publicExports"
+                ],
+            )
+        self.assertIn(
+            "WorldClient",
+            contract["packages"]["python"]["modules"]["hue_sdk.world"]["publicExports"],
+        )
+        self.assertIn(
+            "EnvironmentClient",
+            contract["packages"]["python"]["modules"]["hue_sdk.environment"]["publicExports"],
+        )
         self.assertNotIn("generatedAt", contract)
 
     def test_typescript_export_parser_handles_aliases_star_types_and_declarations(self):

@@ -7,15 +7,15 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { randomUUID } from "node:crypto";
 import { createHue, type HueClient } from "../client.js";
-import { createEnvironmentClient } from "../environment/client.js";
-import type { EnvironmentTool } from "../environment/tools.js";
+import { createEnvironmentClient } from "../world/client.js";
+import type { EnvironmentTool } from "../world/tools.js";
 import {
   agentEnvironment,
   isHueControlPlaneCredential,
   stripHueControlPlaneCredentials,
   withoutWorldVariables,
   writeMcpConfig,
-} from "../environment/world.js";
+} from "../world/world.js";
 import { EvaluationClient, HueApiError } from "../evals/client.js";
 import type {
   ExperimentCase,
@@ -51,9 +51,12 @@ import {
   type ScenarioPins,
 } from "../evals/scenarios.js";
 import { collectDirectOutputs, stageDirectCase } from "./eval-direct.js";
+import { runEnvironmentTarget } from "../evals/environment-target.js";
 import {
   runSimulation,
+  simulationTargetContext,
   type SimulationProgress,
+  type SimulationReport,
   type SimulationTargetContext,
 } from "../evals/simulation.js";
 import {
@@ -110,7 +113,9 @@ Selection (exactly one, not used with --worker):
   --dataset-version <id>          Frozen dataset version; requires --scorer or --scorer-version
   --scorer <slug|name|id>         Evaluator to pin at its latest published version (repeatable)
   --scorer-version <id>           Scorer version to pin (repeatable)
-  --mode <auto|direct|simulation> Case kind; auto picks direct for sets whose cases pin no world
+  --mode <auto|direct|simulation> Case kind; auto picks direct for sets whose cases pin no
+                                  world and runs a set mixing both kinds as one run, each
+                                  case through its own kind's path
 
 Agent (exactly one):
   <adapter-file>                  Module exporting default or runMyAgent(inputs, context)
@@ -171,6 +176,8 @@ Output and limits:
                                   arrive, which Hue attaches once its export is complete
   --timeout <seconds>             Per-case --command timeout (default: 600)
   --wait <seconds>                Verdict wait after the run finishes (default: 300)
+  --judges                        Request pinned hosted model judges after outputs upload
+                                  (off by default; uses the project's judge budget)
   -h, --help                      Show this help
 
 HUE_API_KEY must be a "Read and write" project key; it is never printed.
@@ -231,6 +238,7 @@ function parse(argv: string[]) {
         content: { type: "boolean" },
         "no-content": { type: "boolean", default: false },
         "no-output": { type: "boolean", default: false },
+        judges: { type: "boolean", default: false },
         "trace-not-accepted": { type: "string" },
         "save-version": { type: "boolean", default: false },
         check: { type: "boolean", default: false },
@@ -1154,14 +1162,20 @@ function parseMode(value: string | undefined): RunMode {
   throw new UsageError("--mode must be auto, direct or simulation");
 }
 
-/** The selection's cases, and whether the run is direct: when `--mode` leaves it open, direct
- * means nothing pins a simulated world, not a Scenario and no case of the version. A simulation
- * run cannot execute a case that pins no world, so a selection mixing both kinds is refused. */
+/** How a one-shot run executes its cases: every case without a world (`direct`), every case in
+ * a fresh world (`simulation`), or each case through its own kind's path (`mixed`). */
+type RunKind = "direct" | "simulation" | "mixed";
+
+/** The selection's cases and how they run. When `--mode` leaves it open, a version mixing cases
+ * that pin a world with cases that pin none runs as one mixed run; direct means nothing pins a
+ * simulated world, not a Scenario and no case of the version; anything else is a simulation. A
+ * simulation run cannot execute a case that pins no world, so `--mode simulation` over such
+ * cases is refused. */
 async function inspectSelection(
   client: EvaluationClient,
   pins: ScenarioPins,
   mode: RunMode,
-): Promise<{ direct: boolean; cases: number; worldCases: number; refusal?: string }> {
+): Promise<{ kind: RunKind; cases: number; worldCases: number; refusal?: string }> {
   let cases = 0;
   let worldCases = 0;
   let after: string | undefined;
@@ -1171,16 +1185,20 @@ async function inspectSelection(
     worldCases += page.items.filter((item) => item.environmentVersionId).length;
     after = page.nextCursor ?? undefined;
   } while (after);
-  const direct =
-    mode === "auto"
-      ? !pins.scenarioId && !pins.environmentVersionId && worldCases === 0
-      : mode === "direct";
   const answerOnly = cases - worldCases;
+  const kind: RunKind =
+    mode !== "auto"
+      ? mode
+      : worldCases > 0 && answerOnly > 0
+        ? "mixed"
+        : worldCases === 0 && !pins.scenarioId && !pins.environmentVersionId
+          ? "direct"
+          : "simulation";
   const refusal =
-    !direct && answerOnly > 0
-      ? `${answerOnly} of the ${cases} ${cases === 1 ? "case pins" : "cases pin"} no world, so a simulation run would fail ${answerOnly === 1 ? "it" : "them"} before the agent starts. Put the answer-only cases in their own eval set${mode === "simulation" ? ", or drop --mode simulation" : ""}.`
+    kind === "simulation" && answerOnly > 0
+      ? `${answerOnly} of the ${cases} ${cases === 1 ? "case pins" : "cases pin"} no world, so a simulation run would fail ${answerOnly === 1 ? "it" : "them"} before the agent starts. ${mode === "simulation" ? "Drop --mode simulation: --mode auto runs the world cases and the answer-only cases together as one run" : "Put the answer-only cases in their own eval set"}.`
       : undefined;
-  return { direct, cases, worldCases, ...(refusal ? { refusal } : {}) };
+  return { kind, cases, worldCases, ...(refusal ? { refusal } : {}) };
 }
 
 function toJson(
@@ -1254,17 +1272,188 @@ function withTelemetryFailures(
   return { ...verdicts, summary: { cases, totals } };
 }
 
-/** Waits for Hue's verdicts, prints them (table or JSON, with the optional baseline) and returns the exit code. */
+/** Requests only the run's pinned model judges. Stable batches let an interrupted CLI resume
+ * dispatch without creating a second paid job for the same scoring item and evaluator. */
+export async function dispatchPinnedJudges(
+  client: Pick<EvaluationClient, "getExperiment" | "listEvaluationItems" | "createJudgeJobs">,
+  experimentId: string,
+  subjectIds: string[],
+  signal?: AbortSignal,
+): Promise<number> {
+  signal?.throwIfAborted();
+  const experiment = await client.getExperiment(experimentId);
+  const run = experiment.evaluation;
+  const scorerVersionIds = [
+    ...new Set(
+      run.scorerVersions
+        .filter((version) => version.definition.kind === "llm_judge")
+        .map((version) => version.id),
+    ),
+  ].sort();
+  if (!scorerVersionIds.length) return 0;
+  const subjects = new Set(subjectIds);
+  const items = new Set<string>();
+  let after: string | undefined;
+  do {
+    signal?.throwIfAborted();
+    const page = await client.listEvaluationItems(run.id, { after });
+    for (const item of page.items)
+      if (item.hasOutput && subjects.has(item.subjectId)) items.add(item.id);
+    after = page.nextCursor ?? undefined;
+  } while (after);
+  if (!items.size) return 0;
+  let count = 0;
+  let jobs: { evaluationItemId: string; scorerVersionId: string }[] = [];
+  const dispatch = async () => {
+    signal?.throwIfAborted();
+    try {
+      // Admission belongs to the server: an accepted keyed request must remain replayable
+      // even if the project's budget is disabled before its acknowledgement reaches us.
+      await client.createJudgeJobs(run.id, {
+        idempotencyKey: `cli-judges-${digest({ runId: run.id, jobs })}`,
+        jobs,
+      });
+    } catch (error) {
+      if (error instanceof HueApiError && error.status === 402)
+        throw new Error(
+          "Hosted judges are unavailable for this project; check its judge budget in Hue",
+          { cause: error },
+        );
+      throw error;
+    }
+    count += jobs.length;
+    jobs = [];
+  };
+  for (const evaluationItemId of [...items].sort()) {
+    for (const scorerVersionId of scorerVersionIds) {
+      jobs.push({ evaluationItemId, scorerVersionId });
+      if (jobs.length === 100) await dispatch();
+    }
+  }
+  if (jobs.length) await dispatch();
+  return count;
+}
+
+interface UploadedRun {
+  experimentId: string;
+  subjectIds: string[];
+  runUrl: string;
+  extra?: Record<string, JsonValue>;
+  telemetryNotAccepted?: TelemetryNotAccepted[];
+}
+interface PendingJudgeDispatch {
+  selectionDigest: string;
+  run: UploadedRun;
+  completion: { kind: "attempt" } | { kind: "worker"; runId: string; workerId: string };
+}
+interface JudgeCheckpoint {
+  store: CheckpointStore;
+  selectionDigest: string;
+  source: {
+    directory: string;
+    identity: {
+      kind: RunKind | "local-agent-worker";
+      projectId: string;
+      baseUrl: string;
+      agent?: { key: string; revision: string };
+    };
+  };
+}
+
+/** Durable handoff before the original attempt marker or queue acknowledgement. */
+async function checkpointJudges(
+  judging: JudgeCheckpoint,
+  run: UploadedRun,
+  completion: PendingJudgeDispatch["completion"],
+): Promise<void> {
+  await judging.store.write("pending", {
+    selectionDigest: judging.selectionDigest,
+    run: {
+      experimentId: run.experimentId,
+      subjectIds: run.subjectIds,
+      runUrl: run.runUrl,
+      ...(run.extra ? { extra: run.extra } : {}),
+      ...(run.telemetryNotAccepted ? { telemetryNotAccepted: run.telemetryNotAccepted } : {}),
+    },
+    completion,
+  });
+}
+
+/** Finish the original handoff if the process stopped between the two durable writes. */
+async function completeJudgeHandoff(
+  client: EvaluationClient,
+  judging: JudgeCheckpoint,
+  pending: PendingJudgeDispatch,
+): Promise<boolean> {
+  const store = await CheckpointStore.acquire(judging.source.directory, judging.source.identity);
+  try {
+    if (pending.completion.kind === "worker") {
+      try {
+        await client.completeLocalAgentRun({
+          runId: pending.completion.runId,
+          workerId: pending.completion.workerId,
+          state: "completed",
+        });
+      } catch (error) {
+        // Released or cancelled work cannot be completed by this worker. Temporary failures
+        // still throw, leaving the durable handoff available for the unchanged command.
+        if (error instanceof HueApiError && error.status === 409) return false;
+        throw error;
+      }
+    } else {
+      const attempt = await store.read<{ experimentId?: string; stage: string }>("active-attempt");
+      if (!attempt || attempt.experimentId !== pending.run.experimentId)
+        throw new Error("Hosted judge checkpoint does not match the uploaded attempt");
+      if (attempt.stage !== "completed")
+        await store.write("active-attempt", { ...attempt, stage: "completed" });
+    }
+    return true;
+  } finally {
+    await store.release();
+  }
+}
+
+/** Discards only the matching terminal worker claim; a retry retains its handoff. */
+async function discardWorkerJudgeHandoff(judging: JudgeCheckpoint, runId: string): Promise<void> {
+  const pending = await judging.store.read<PendingJudgeDispatch>("pending");
+  if (pending?.completion.kind === "worker" && pending.completion.runId === runId)
+    await judging.store.write("pending", null);
+}
+
+async function requestRunJudges(
+  client: EvaluationClient,
+  run: UploadedRun,
+  output: Output,
+  signal: AbortSignal,
+  judging: JudgeCheckpoint,
+): Promise<void> {
+  const count = await dispatchPinnedJudges(client, run.experimentId, run.subjectIds, signal);
+  await judging.store.write("pending", null);
+  if (count) output.log(`Requested ${count} hosted judge check${count === 1 ? "" : "s"}.`);
+}
+
+/** Dispatch failures retain the handoff; reading verdicts does not dispatch again. */
 async function reportVerdicts(
   client: EvaluationClient,
   values: ReturnType<typeof parse>["values"],
-  run: {
-    experimentId: string;
-    subjectIds: string[];
-    runUrl: string;
-    extra?: Record<string, JsonValue>;
-    telemetryNotAccepted?: TelemetryNotAccepted[];
-  },
+  run: UploadedRun,
+  baselineId: string | undefined,
+  output: Output,
+  signal: AbortSignal,
+  judging?: JudgeCheckpoint,
+): Promise<number> {
+  if (values.judges) {
+    if (!judging) throw new Error("Hosted judge recovery checkpoint is unavailable");
+    await requestRunJudges(client, run, output, signal, judging);
+  }
+  return readAndReportVerdicts(client, values, run, baselineId, output, signal);
+}
+
+/** Waits for Hue's verdicts, prints them and returns the exit code. */
+async function readAndReportVerdicts(
+  client: EvaluationClient,
+  values: ReturnType<typeof parse>["values"],
+  run: UploadedRun,
   baselineId: string | undefined,
   output: Output,
   signal: AbortSignal,
@@ -1359,98 +1548,145 @@ async function runOnce(
   }
   const runName = values.name ?? defaultRunName(agent);
   const project = await client.checkConnection();
-  if (selection.direct)
-    return runDirect(
-      {
-        client,
-        values,
-        pins,
-        runName,
-        projectId: project.id,
-        agent,
-        agents,
-        hue,
-        output,
-        signal,
-        concurrency,
-        baselineId,
-      },
-      connection,
-    );
-  const environmentClient = createEnvironmentClient(connection);
+  // Each kind of run has its own checkpoint directory and identity: a mixed run never resumes
+  // from, or is resumed by, a direct or simulation run's checkpoint.
   const checkpointDirectory = await prepareCheckpointDirectory(
     values["checkpoint-dir"],
     agent.key,
     project.id,
-    "simulation",
+    selection.kind,
   );
-  const caseKeys = new Map<string, string>();
-  let runUrl = "";
-  const telemetry = telemetryReporter(output);
-  const report = await runSimulation({
-    client,
-    environmentClient,
-    hue,
-    checkpointDirectory,
-    definition: {
-      kind: "pins",
-      datasetVersionId: pins.datasetVersionId,
-      scorerVersionIds: pins.scorerVersionIds,
-    },
-    runName,
-    // Outputs, error messages and explanations are stored unless opted out; --content governs
-    // only the telemetry.
-    persistResultContent: !values["no-output"],
-    traceEvidence: { mode: "required" },
-    // A case whose telemetry Hue did not accept fails instead of staying started.
-    traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
-    onTelemetryNotAccepted: telemetry.report,
-    concurrency,
-    agentRevision: agent.revision,
-    // The CLI adapts to whatever the deployment serves; the library warning is for code that
-    // still reads the legacy capability itself.
-    deprecationWarnings: false,
-    signal,
-    target: agents.simulation,
-    async onProgress(event: SimulationProgress) {
-      if (event.type === "run_created") {
-        runUrl = event.runUrl;
-        output.log(`Run: ${event.runUrl}`);
-        output.log(`Experiment: ${event.experimentId}`);
-        try {
-          let after: string | undefined;
-          do {
-            const page = await client.listExperimentItems(event.experimentId, { after });
-            for (const item of page.items) caseKeys.set(item.id, item.externalKey);
-            after = page.nextCursor ?? undefined;
-          } while (after);
-        } catch {
-          // Progress labels fall back to case IDs; the run itself is unaffected.
-        }
-        return;
+  const judging: JudgeCheckpoint | undefined = values.judges
+    ? {
+        store: await CheckpointStore.acquire(
+          checkpointPath(checkpointDirectory, ["judge-dispatch", "judge checkpoint"]),
+          { kind: "cli-judge-dispatch", projectId: project.id, baseUrl: connection.baseUrl },
+        ),
+        selectionDigest: digest({
+          datasetVersionId: pins.datasetVersionId,
+          scorerVersionIds: [...pins.scorerVersionIds].sort(),
+          agent,
+        }),
+        source: {
+          directory: checkpointDirectory,
+          identity: {
+            kind: selection.kind,
+            projectId: project.id,
+            baseUrl: connection.baseUrl,
+          },
+        },
       }
-      const label = caseKeys.get(event.caseId) ?? event.caseId;
-      if (event.type === "world_created") output.log(`[${label}] world created`);
-      else if (event.type === "target_started") output.log(`[${label}] agent started`);
-      else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
-      else if (event.type === "attempt_prepared")
-        output.log(`[${label}] attempt prepared: ${event.status}`);
-    },
-  });
-  telemetry.rest(report.telemetryNotAccepted);
-  return reportVerdicts(
-    client,
-    values,
-    {
-      experimentId: report.experimentId,
-      subjectIds: report.subjectIds,
-      runUrl: runUrl || report.runUrl,
-      telemetryNotAccepted: report.telemetryNotAccepted,
-    },
-    baselineId,
-    output,
-    signal,
-  );
+    : undefined;
+  try {
+    const pending = await judging?.store.read<PendingJudgeDispatch>("pending");
+    if (pending) {
+      if (pending.selectionDigest !== judging!.selectionDigest)
+        throw new Error(
+          "Recover the pending judge dispatch with the unchanged command or use another --checkpoint-dir",
+        );
+      output.log(`Resuming hosted checks: ${pending.run.runUrl}`);
+      await completeJudgeHandoff(client, judging!, pending);
+      return await reportVerdicts(client, values, pending.run, baselineId, output, signal, judging);
+    }
+    if (selection.kind !== "simulation")
+      return await runExperimentAttempt(
+        {
+          kind: selection.kind,
+          client,
+          values,
+          pins,
+          runName,
+          projectId: project.id,
+          agent,
+          agents,
+          hue,
+          output,
+          signal,
+          concurrency,
+          baselineId,
+          judging,
+          checkpointDirectory,
+        },
+        connection,
+      );
+    const environmentClient = createEnvironmentClient(connection);
+    const caseKeys = new Map<string, string>();
+    let runUrl = "";
+    const telemetry = telemetryReporter(output);
+    const report = await runSimulation({
+      client,
+      environmentClient,
+      hue,
+      checkpointDirectory,
+      definition: {
+        kind: "pins",
+        datasetVersionId: pins.datasetVersionId,
+        scorerVersionIds: pins.scorerVersionIds,
+      },
+      runName,
+      // Outputs, error messages and explanations are stored unless opted out; --content governs
+      // only the telemetry.
+      persistResultContent: !values["no-output"],
+      traceEvidence: { mode: "required" },
+      // A case whose telemetry Hue did not accept fails instead of staying started.
+      traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
+      onTelemetryNotAccepted: telemetry.report,
+      concurrency,
+      agentRevision: agent.revision,
+      // The CLI adapts to whatever the deployment serves; the library warning is for code that
+      // still reads the legacy capability itself.
+      deprecationWarnings: false,
+      signal,
+      target: agents.simulation,
+      ...(judging
+        ? {
+            onUploaded: (report: SimulationReport) =>
+              checkpointJudges(judging, report, { kind: "attempt" }),
+          }
+        : {}),
+      async onProgress(event: SimulationProgress) {
+        if (event.type === "run_created") {
+          runUrl = event.runUrl;
+          output.log(`Run: ${event.runUrl}`);
+          output.log(`Experiment: ${event.experimentId}`);
+          try {
+            let after: string | undefined;
+            do {
+              const page = await client.listExperimentItems(event.experimentId, { after });
+              for (const item of page.items) caseKeys.set(item.id, item.externalKey);
+              after = page.nextCursor ?? undefined;
+            } while (after);
+          } catch {
+            // Progress labels fall back to case IDs; the run itself is unaffected.
+          }
+          return;
+        }
+        const label = caseKeys.get(event.caseId) ?? event.caseId;
+        if (event.type === "world_created") output.log(`[${label}] world created`);
+        else if (event.type === "target_started") output.log(`[${label}] agent started`);
+        else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
+        else if (event.type === "attempt_prepared")
+          output.log(`[${label}] attempt prepared: ${event.status}`);
+      },
+    });
+    telemetry.rest(report.telemetryNotAccepted);
+    return await reportVerdicts(
+      client,
+      values,
+      {
+        experimentId: report.experimentId,
+        subjectIds: report.subjectIds,
+        runUrl: runUrl || report.runUrl,
+        telemetryNotAccepted: report.telemetryNotAccepted,
+      },
+      baselineId,
+      output,
+      signal,
+      judging,
+    );
+  } finally {
+    await judging?.store.release();
+  }
 }
 
 /**
@@ -1481,8 +1717,11 @@ async function checkRun(
       return 1;
     }
   }
-  const { direct, cases, worldCases, refusal } = selection;
+  const { kind, cases, worldCases, refusal } = selection;
   const unsaved = !pins.saved && !values["save-version"];
+  // What each kind of run gives its cases: a direct run gives no case a world, a simulation
+  // run gives every case one (and is refused over cases that pin none), a mixed run gives one
+  // to each case that pins one.
   const check = {
     ok: !unsaved && !refusal,
     project: { id: project.id, name: project.name },
@@ -1494,8 +1733,9 @@ async function checkRun(
       cases,
       evaluators: pins.scorerVersionIds.length,
     },
-    mode: direct ? "direct" : "simulation",
-    worldCases: direct ? 0 : worldCases,
+    mode: kind,
+    worldCases: kind === "direct" ? 0 : worldCases,
+    directCases: kind === "direct" ? cases : cases - worldCases,
     agent: { key: agent.key, revision: agent.revision, concurrency: values.concurrency ?? "1" },
   };
   if (values.json) process.stdout.write(`${JSON.stringify({ check })}\n`);
@@ -1504,10 +1744,13 @@ async function checkRun(
     output.log(
       `Selection: ${check.selection.kind === "case" ? "case" : "eval set"} "${pins.name}", ${cases} ${cases === 1 ? "case" : "cases"}, ${pins.scorerVersionIds.length} ${pins.scorerVersionIds.length === 1 ? "evaluator" : "evaluators"}`,
     );
+    const worlds = `${worldCases} ${worldCases === 1 ? "case gets" : "cases get"} a fresh world, reached through the HUE_SIM_*_URL mirrors and HUE_WORLD_TOKEN`;
     output.log(
-      direct
+      kind === "direct"
         ? "Mode: direct; the agent answers without a simulated world or app mirrors"
-        : `Mode: simulation; ${worldCases} ${worldCases === 1 ? "case gets" : "cases get"} a fresh world, reached through the HUE_SIM_*_URL mirrors and HUE_WORLD_TOKEN`,
+        : kind === "simulation"
+          ? `Mode: simulation; ${worlds}`
+          : `Mode: mixed; ${worlds}, and ${check.directCases} ${check.directCases === 1 ? "case answers" : "cases answer"} without one`,
     );
     output.log(`Agent: ${agent.key} @ ${agent.revision}`);
   }
@@ -1527,8 +1770,8 @@ async function checkRun(
   return 0;
 }
 
-/** Resumable direct-run attempt: the created experiment is finished before a new one starts. */
-interface DirectAttempt {
+/** Resumable one-shot attempt: the created experiment is finished before a new one starts. */
+interface ExperimentAttempt {
   /** Digest of the selection: dataset version, scorer pins and experiment configuration. */
   selectionDigest: string;
   /** Stable experiment-creation key; a resumed attempt never creates a second experiment. */
@@ -1538,14 +1781,19 @@ interface DirectAttempt {
 }
 
 /**
- * Direct cases: one ordinary experiment through `runExperiment`. The agent receives the case's
- * pinned files and returns generated documents; code evaluators pinned to the run stay deferred
- * for Hue's executor (`deferUnboundLocalScorers`), so no evaluator source runs on this machine.
- * The attempt is checkpointed as in simulation mode: rerunning the same selection resumes the
- * saved experiment without invoking the agent again for its finished cases.
+ * One ordinary experiment through `runExperiment`, for a direct run and for a mixed one. A
+ * direct run's agent receives the case's pinned files and returns generated documents. A mixed
+ * run routes each case by its pin: a case pinning no world goes to the direct adapter, a case
+ * pinning one gets a fresh world through the environment target and the simulation adapter, as
+ * a simulation run gives it. Code evaluators pinned to the run stay deferred for Hue's executor
+ * (`deferUnboundLocalScorers`), so no evaluator source runs on this machine. The attempt is
+ * checkpointed as in simulation mode, under the run kind's own identity: rerunning the same
+ * selection resumes the saved experiment without invoking the agent again for its finished
+ * cases.
  */
-async function runDirect(
+async function runExperimentAttempt(
   run: {
+    kind: "direct" | "mixed";
     client: EvaluationClient;
     values: ReturnType<typeof parse>["values"];
     pins: ScenarioPins;
@@ -1558,22 +1806,20 @@ async function runDirect(
     signal: AbortSignal;
     concurrency: number;
     baselineId: string | undefined;
+    judging?: JudgeCheckpoint;
+    checkpointDirectory: string;
   },
   connection: Connection,
 ): Promise<number> {
-  const { client, values, pins, output, signal } = run;
+  const { client, kind, values, pins, output, signal } = run;
   const config = { agentKey: run.agent.key, agentRevision: run.agent.revision };
-  const checkpointDirectory = await prepareCheckpointDirectory(
-    values["checkpoint-dir"],
-    run.agent.key,
-    run.projectId,
-    "direct",
-  );
-  const store = await CheckpointStore.acquire(checkpointDirectory, {
-    kind: "direct",
+  const store = await CheckpointStore.acquire(run.checkpointDirectory, {
+    kind,
     projectId: run.projectId,
     baseUrl: connection.baseUrl,
   });
+  // Only a mixed run creates worlds; its world cases reach Hue through the environment client.
+  const environmentClient = kind === "mixed" ? createEnvironmentClient(connection) : undefined;
   let experimentId = "";
   let runUrl = "";
   let report: RunnerReport;
@@ -1584,10 +1830,10 @@ async function runDirect(
       scorerVersionIds: [...pins.scorerVersionIds].sort(),
       config,
     });
-    let attempt = await store.read<DirectAttempt>("active-attempt");
+    let attempt = await store.read<ExperimentAttempt>("active-attempt");
     if (attempt && attempt.stage !== "completed" && attempt.selectionDigest !== selectionDigest)
       throw new Error(
-        "Recover the unfinished direct run before running a changed selection: run the unchanged command again to finish it, or pass another --checkpoint-dir",
+        `Recover the unfinished ${kind} run before running a changed selection: run the unchanged command again to finish it, or pass another --checkpoint-dir`,
       );
     if (!attempt || attempt.stage === "completed") {
       attempt = { selectionDigest, idempotencyKey: randomUUID(), stage: "preparing" };
@@ -1625,9 +1871,41 @@ async function runDirect(
       scorers: [],
       deferUnboundLocalScorers: true,
       environmentEvidence: "when_pinned",
+      // A world case that a process which died here left running runs again in a fresh world;
+      // an answer-only case it left running stays uncertain, since its agent may still be
+      // acting. A direct run gives no case a world, so none of its cases reruns.
+      ...(environmentClient
+        ? { rerunCrashedCases: (item: ExperimentCase) => Boolean(item.environmentVersionId) }
+        : {}),
       async target(inputs, context) {
         if (signal.aborted) throw new TargetCancelledError();
-        output.log(`[${context.item.externalKey}] agent started`);
+        const label = context.item.externalKey;
+        if (environmentClient && context.item.environmentVersionId)
+          return runEnvironmentTarget({
+            client,
+            environmentClient,
+            hue: run.hue,
+            inputs,
+            context,
+            agentRevision: run.agent.revision,
+            // The CLI adapts to whatever the deployment serves; the library warning is for
+            // code that still reads the legacy capability itself.
+            deprecationWarnings: false,
+            signal,
+            onProgress(event) {
+              if (event.type === "world_created") output.log(`[${label}] world created`);
+              else if (event.type === "target_started") output.log(`[${label}] agent started`);
+              else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
+              else if (event.type === "attempt_prepared")
+                output.log(`[${label}] attempt prepared: ${event.status}`);
+            },
+            target: (targetInputs, targetContext) =>
+              run.agents.simulation(
+                structuredClone(targetInputs),
+                simulationTargetContext(targetContext),
+              ),
+          });
+        output.log(`[${label}] agent started`);
         const result = await run.agents.direct(inputs, {
           mode: "direct",
           config: structuredClone(context.config),
@@ -1648,6 +1926,18 @@ async function runDirect(
         return result;
       },
     });
+    if (run.judging)
+      await checkpointJudges(
+        run.judging,
+        {
+          experimentId,
+          subjectIds: report.subjectIds,
+          runUrl,
+          extra: { mode: kind, deferredScorerVersionIds: report.deferredScorerVersionIds },
+          telemetryNotAccepted: report.telemetryNotAccepted,
+        },
+        { kind: "attempt" },
+      );
     attempt.stage = "completed";
     await store.write("active-attempt", attempt);
   } finally {
@@ -1665,12 +1955,13 @@ async function runDirect(
       experimentId,
       subjectIds: report.subjectIds,
       runUrl,
-      extra: { mode: "direct", deferredScorerVersionIds: report.deferredScorerVersionIds },
+      extra: { mode: kind, deferredScorerVersionIds: report.deferredScorerVersionIds },
       telemetryNotAccepted: report.telemetryNotAccepted,
     },
     run.baselineId,
     output,
     signal,
+    run.judging,
   );
 }
 
@@ -1687,7 +1978,7 @@ async function runWorker(
   const environmentClient = createEnvironmentClient(connection);
   const wait = integer("wait", values.wait, 300, 0, 86_400);
   const concurrency = integer("concurrency", values.concurrency, 1, 1, 100);
-  const maxRuns =
+  let maxRuns =
     values["max-runs"] === undefined
       ? undefined
       : integer("max-runs", values["max-runs"], 1, 1, 1_000_000);
@@ -1699,124 +1990,201 @@ async function runWorker(
     "worker",
     slug(agent.revision) || "dev",
   );
-  let current: LocalAgentClaim | undefined;
-  client.onRegistered = (registered) => {
-    output.log(
-      `Registered agent ${registered.key} (revision ${registered.revision}) with ${connection.baseUrl}; waiting for runs launched from Hue${maxRuns ? ` (stops after ${maxRuns})` : " (Ctrl+C to stop)"}`,
-    );
-  };
-  client.onClaimed = (claim) => {
-    current = claim;
-    output.log(
-      `Claimed run ${claim.runId}: ${new URL(`/runs/${claim.experimentId}`, connection.baseUrl).toString()}`,
-    );
-  };
-  const telemetry = telemetryReporter(output);
-  // A command can use the same stdin contract for both case kinds. Existing adapter files
-  // may require a world, so their direct context remains an explicit capability opt-in.
-  const direct = values.command !== undefined || values.capability?.includes("direct:v1");
-  await runLocalAgent({
-    client,
-    environmentClient,
-    hue,
-    checkpointDirectory,
-    agent: {
-      key: agent.key,
-      name: agent.name,
-      revision: agent.revision,
-      capabilities: ["environment:v1", ...(values.capability ?? [])],
-    },
-    scorers: [],
-    concurrency,
-    traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
-    onTelemetryNotAccepted: telemetry.report,
-    deprecationWarnings: false,
-    signal,
-    ...(maxRuns === undefined ? {} : { maxRuns }),
-    onPollError(error) {
-      output.error(`Hue did not answer the poll (${explain(error)}); polling again`);
-    },
-    onRunFailed(failure) {
-      const run = `Run ${failure.runId}`;
-      if (failure.outcome === "retry") {
-        const waitMillis = failure.waitMillis ?? 0;
-        output.error(
-          `${run} attempt ${failure.attempt} failed (${explain(failure.error)}); resuming in ${Math.round(waitMillis / 1000)} s`,
-        );
-      } else if (failure.outcome === "attention")
-        output.error(
-          `${run} needs attention (${explain(failure.error)}); requeue or cancel it from its run page`,
-        );
-      else
-        output.error(`${run} was released or cancelled in Hue; its outcome here is not recorded`);
-    },
-    target(inputs, tools: Record<string, EnvironmentTool>, context) {
-      output.log(`[${context.item.externalKey}] agent started`);
-      return agents.simulation(inputs, {
-        config: context.config,
-        item: context.item,
-        executionId: context.executionId,
-        environmentRunId: context.environmentRunId,
-        tools,
-        ...(context.world ? { world: context.world } : {}),
-        ...(context.mcp ? { mcp: context.mcp } : {}),
-        ...(context.connectionBundle ? { connectionBundle: context.connectionBundle } : {}),
-        files: context.files,
-        outputDirectory: context.outputDirectory,
-        // The case's own signal: the worker stopping, or the world's deadline passing, both
-        // end a command that would otherwise keep running past its timed-out case.
-        signal: context.signal ?? signal,
-      });
-    },
-    ...(direct
-      ? {
-          directTarget(inputs: JsonValue, context: LocalAgentDirectContext) {
-            output.log(`[${context.item.externalKey}] agent started`);
-            return agents.direct(inputs, {
-              mode: "direct",
-              config: context.config,
-              item: context.item,
-              executionId: context.executionId,
-              files: context.files,
-              outputDirectory: context.outputDirectory,
-              signal: context.signal ?? signal,
-            });
+  const judging: JudgeCheckpoint | undefined = values.judges
+    ? {
+        store: await CheckpointStore.acquire(
+          checkpointPath(checkpointDirectory, ["judge-dispatch", "judge checkpoint"]),
+          {
+            kind: "cli-judge-dispatch",
+            projectId: project.id,
+            baseUrl: connection.baseUrl,
           },
-        }
-      : {}),
-    async onCompleted(report) {
+        ),
+        selectionDigest: digest(agent),
+        source: {
+          directory: checkpointDirectory,
+          identity: {
+            kind: "local-agent-worker",
+            projectId: project.id,
+            baseUrl: connection.baseUrl,
+            agent: { key: agent.key, revision: agent.revision },
+          },
+        },
+      }
+    : undefined;
+  const reportJudgedRun = async (run: UploadedRun) => {
+    if (!judging) throw new Error("Hosted judge recovery checkpoint is unavailable");
+    await requestRunJudges(client, run, output, signal, judging);
+    try {
+      await readAndReportVerdicts(client, values, run, undefined, output, signal);
+    } catch (error) {
+      output.error(`Unable to read verdicts: ${explain(error)}`);
+    }
+  };
+  try {
+    const pending = await judging?.store.read<PendingJudgeDispatch>("pending");
+    if (pending) {
+      if (pending.selectionDigest !== judging!.selectionDigest)
+        throw new Error(
+          "Recover the pending judge dispatch with the unchanged command or use another --checkpoint-dir",
+        );
+      output.log(`Resuming hosted checks: ${pending.run.runUrl}`);
+      if (await completeJudgeHandoff(client, judging!, pending)) {
+        await reportJudgedRun(pending.run);
+      } else if (pending.completion.kind === "worker") {
+        await discardWorkerJudgeHandoff(judging!, pending.completion.runId);
+        output.error(`Run ${pending.completion.runId} was released or cancelled in Hue`);
+      }
+      if (signal.aborted) return 130;
+      if (maxRuns !== undefined && --maxRuns === 0) return 0;
+    }
+    let current: LocalAgentClaim | undefined;
+    client.onRegistered = (registered) => {
       output.log(
-        `Run ${report.runId} completed: ${report.subjectIds.length} case${report.subjectIds.length === 1 ? "" : "s"}`,
+        `Registered agent ${registered.key} (revision ${registered.revision}) with ${connection.baseUrl}; waiting for runs launched from Hue${maxRuns ? ` (stops after ${maxRuns})` : " (Ctrl+C to stop)"}`,
       );
-      telemetry.rest(report.telemetryNotAccepted);
-      if (!current) return;
-      output.log("Waiting for Hue checks...");
-      try {
-        const verdicts = withTelemetryFailures(
-          await collectExperimentVerdicts(client, {
+    };
+    client.onClaimed = (claim) => {
+      current = claim;
+      output.log(
+        `Claimed run ${claim.runId}: ${new URL(`/runs/${claim.experimentId}`, connection.baseUrl).toString()}`,
+      );
+    };
+    const telemetry = telemetryReporter(output);
+    // A command can use the same stdin contract for both case kinds. Existing adapter files
+    // may require a world, so their direct context remains an explicit capability opt-in.
+    const direct = values.command !== undefined || values.capability?.includes("direct:v1");
+    await runLocalAgent({
+      client,
+      environmentClient,
+      hue,
+      checkpointDirectory,
+      agent: {
+        key: agent.key,
+        name: agent.name,
+        revision: agent.revision,
+        capabilities: ["environment:v1", ...(values.capability ?? [])],
+      },
+      scorers: [],
+      concurrency,
+      traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
+      onTelemetryNotAccepted: telemetry.report,
+      deprecationWarnings: false,
+      signal,
+      ...(maxRuns === undefined ? {} : { maxRuns }),
+      onPollError(error) {
+        output.error(`Hue did not answer the poll (${explain(error)}); polling again`);
+      },
+      async onRunFailed(failure) {
+        if (judging && failure.outcome !== "retry")
+          await discardWorkerJudgeHandoff(judging, failure.runId);
+        const run = `Run ${failure.runId}`;
+        if (failure.outcome === "retry") {
+          const waitMillis = failure.waitMillis ?? 0;
+          output.error(
+            `${run} attempt ${failure.attempt} failed (${explain(failure.error)}); resuming in ${Math.round(waitMillis / 1000)} s`,
+          );
+        } else if (failure.outcome === "attention")
+          output.error(
+            `${run} needs attention (${explain(failure.error)}); requeue or cancel it from its run page`,
+          );
+        else
+          output.error(`${run} was released or cancelled in Hue; its outcome here is not recorded`);
+      },
+      target(inputs, tools: Record<string, EnvironmentTool>, context) {
+        output.log(`[${context.item.externalKey}] agent started`);
+        return agents.simulation(inputs, {
+          config: context.config,
+          item: context.item,
+          executionId: context.executionId,
+          environmentRunId: context.environmentRunId,
+          tools,
+          ...(context.world ? { world: context.world } : {}),
+          ...(context.mcp ? { mcp: context.mcp } : {}),
+          ...(context.connectionBundle ? { connectionBundle: context.connectionBundle } : {}),
+          files: context.files,
+          outputDirectory: context.outputDirectory,
+          // The case's own signal: the worker stopping, or the world's deadline passing, both
+          // end a command that would otherwise keep running past its timed-out case.
+          signal: context.signal ?? signal,
+        });
+      },
+      ...(direct
+        ? {
+            directTarget(inputs: JsonValue, context: LocalAgentDirectContext) {
+              output.log(`[${context.item.externalKey}] agent started`);
+              return agents.direct(inputs, {
+                mode: "direct",
+                config: context.config,
+                item: context.item,
+                executionId: context.executionId,
+                files: context.files,
+                outputDirectory: context.outputDirectory,
+                signal: context.signal ?? signal,
+              });
+            },
+          }
+        : {}),
+      ...(judging
+        ? {
+            onUploaded: (report: RunnerReport, claim: LocalAgentClaim & { workerId: string }) =>
+              checkpointJudges(
+                judging,
+                {
+                  experimentId: claim.experimentId,
+                  subjectIds: report.subjectIds,
+                  runUrl: new URL(`/runs/${claim.experimentId}`, connection.baseUrl).toString(),
+                  telemetryNotAccepted: report.telemetryNotAccepted,
+                },
+                { kind: "worker", runId: claim.runId, workerId: claim.workerId },
+              ),
+          }
+        : {}),
+      async onCompleted(report) {
+        output.log(
+          `Run ${report.runId} completed: ${report.subjectIds.length} case${report.subjectIds.length === 1 ? "" : "s"}`,
+        );
+        telemetry.rest(report.telemetryNotAccepted);
+        if (!current) return;
+        if (values.judges) {
+          await reportJudgedRun({
             experimentId: current.experimentId,
             subjectIds: report.subjectIds,
-            timeoutMillis: wait * 1000,
-            signal,
-          }),
-          report.telemetryNotAccepted,
-        );
-        if (signal.aborted) return;
-        if (values.json)
-          process.stdout.write(
-            `${JSON.stringify(toJson(verdicts, new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(), undefined, {}, report.telemetryNotAccepted))}\n`,
+            runUrl: new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(),
+            telemetryNotAccepted: report.telemetryNotAccepted,
+          });
+          return;
+        }
+        try {
+          output.log("Waiting for Hue checks...");
+          const verdicts = withTelemetryFailures(
+            await collectExperimentVerdicts(client, {
+              experimentId: current.experimentId,
+              subjectIds: report.subjectIds,
+              timeoutMillis: wait * 1000,
+              signal,
+            }),
+            report.telemetryNotAccepted,
           );
-        else renderTable(verdicts, output);
-      } catch (error) {
-        output.error(`Unable to read verdicts: ${explain(error)}`);
-      }
-    },
-  });
-  if (signal.aborted) {
-    process.stderr.write("Interrupted.\n");
-    return 130;
+          if (signal.aborted) return;
+          if (values.json)
+            process.stdout.write(
+              `${JSON.stringify(toJson(verdicts, new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(), undefined, {}, report.telemetryNotAccepted))}\n`,
+            );
+          else renderTable(verdicts, output);
+        } catch (error) {
+          output.error(`Unable to read verdicts: ${explain(error)}`);
+        }
+      },
+    });
+    if (signal.aborted) {
+      process.stderr.write("Interrupted.\n");
+      return 130;
+    }
+    return 0;
+  } finally {
+    await judging?.store.release();
   }
-  return 0;
 }
 
 /**
@@ -1858,6 +2226,8 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     worker = values.worker;
     if (values.content && values["no-content"])
       throw new UsageError("Choose either --content or --no-content");
+    if (values.judges && values["no-output"])
+      throw new UsageError("--judges requires stored case outputs; remove --no-output");
     // A usage error before anything is prepared or created: no run is left to recover from it.
     traceNotAcceptedPolicy(values["trace-not-accepted"]);
     json = values.json;

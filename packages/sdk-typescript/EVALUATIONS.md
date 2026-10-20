@@ -9,7 +9,7 @@ npm install @hue-run/sdk zod
 
 The SDK executes targets and scorers on your machine. Hue stores pinned definitions, experiment progress and results. It does not execute uploaded source code. Follow [Install the SDK](https://docs.hue.run/quickstart#2-install-the-sdk) to add `@hue-run/sdk` to your application.
 
-Create a **Read and write** project service key under **Settings → Integrations & API keys** and expose it to this server-side process as `HUE_API_KEY`. A **Tracing only** key cannot author datasets or evaluation runs.
+Create a **Read and write** project service key under **Settings → API keys** and expose it to this server-side process as `HUE_API_KEY`. A **Tracing only** key cannot author datasets or evaluation runs.
 
 ```ts
 import { randomUUID } from "node:crypto";
@@ -104,6 +104,11 @@ resolution, a fresh linked world per case, local and hosted MCP tools, finalizat
 evidence and scoring while retaining this runner's checkpoint guarantees. See
 [Simulated environments](ENVIRONMENTS.md#run-a-definition-like-a-test).
 
+The `onUploaded` callback in `runSimulation` and `runLocalAgent` supports durable
+application handoffs after outputs upload and before the attempt or worker queue is marked
+completed. A callback failure stops completion and preserves the uploaded work for recovery.
+The callback may run again after an interruption, so make its writes idempotent.
+
 Cases whose inputs are a task plus pinned documents, and rescoring over documents a run already
 saved, use the same runner without a world. See [Direct cases and files](#direct-cases-and-files).
 
@@ -179,7 +184,7 @@ Scorer deferral shipped in TypeScript `0.3.1`: the local runner executes only th
 
 `world_outcome` pins (`hue.conversion_outcome.v1` and `.v2`, and the `hue.outcome_assertions.v2` and `.v3` case-outcome evaluators, `.v3` with its pinned judge in `config.judge`) run inside Hue and need no local callback or executable source digest. A supporting server owns their execution from saved world evidence. Legacy `local_code` pins still require the exact registered callback; changing the worker cannot convert those immutable pins into hosted ones.
 
-Manual results require a human session. Hosted model-judge dispatch is an explicit separate API operation: inspect `getJudgeBudget()`, then call `createJudgeJobs(runId,{idempotencyKey,jobs:[{evaluationItemId,scorerVersionId}]})`. `listJudgeJobs`, `getJudgeJob` and `cancelJudgeJob` expose job progress and cancellation requests. These methods never claim that local execution has hosted provenance. Hosted job endpoints are covered by HTTP contract tests here; live hosted model execution is a separate platform acceptance phase. `listResults` and `getResult` read recorded local or hosted results.
+Manual results require a human session. Hosted model-judge dispatch is explicit: call `createJudgeJobs(runId,{idempotencyKey,jobs:[{evaluationItemId,scorerVersionId}]})`. Hue checks its judge budget when admitting new requests. `getJudgeBudget()` reports its current state, and on current servers the organization's monthly AI budget as `organizationBudget`, but replay an interrupted request with the same key and body even if that state changed. The [`hue eval --judges`](./CLI.md#evaluate-an-agent-against-a-case) option performs this dispatch after outputs upload; it is off by default. `listJudgeJobs`, `getJudgeJob` and `cancelJudgeJob` expose job progress and cancellation requests. These methods never claim that local execution has hosted provenance. Hosted job endpoints are covered by HTTP contract tests here; live hosted model execution is a separate platform acceptance phase. `listResults` and `getResult` read recorded local or hosted results.
 
 When present, the budget's `authentication` reports credential resolution only. An
 `available` status or `configured: true` does not prove that a provider accepted the
@@ -295,16 +300,71 @@ an `error` of type `TargetTimeout` and the world is sealed abandoned. Public pac
 proves this lifecycle against local fixtures; exact installed-registry-package to hosted-facade
 acceptance remains a post-publication Fern gate.
 
+## Case files
+
+`addCase` and `addEvalSetCase` pin up to 32 input files with `files`. Name an artifact the
+project already holds as `{ artifactId, role }`, or give the file, from `bytes` or a `path`, and
+the client uploads it as a verified artifact first:
+
+```ts
+await client.addEvalSetCase(versionId, {
+  expectedRevision,
+  externalKey: "chart-question",
+  inputs: { messages },
+  files: [
+    { role: "source", filename: "chart.png", contentType: "image/png", bytes: chart },
+    { role: "evaluator_reference", filename: "answers.csv", contentType: "text/csv", path: "answers.csv" },
+  ],
+});
+```
+
+An uploaded file needs one of `outputContentTypes`, a well-formed name of 1–255 UTF-16 code units
+(as JavaScript counts a string's `length`) without path separators or control characters, and 1
+byte to 25 MiB. Every file, and the case itself as it will be sent (its revision, key, values and
+size), is checked before the first upload; a file outside that policy, a `path` that cannot be
+read, or a case Hue would refuse throws `TypeError` or `RangeError` without a request. A `path`
+is hashed a slice at a time when it is checked and read again when it is uploaded, one file at a
+time, so the write holds at most one file in memory and sends only the bytes its check hashed. A
+file that changed in between, or can no longer be read, sends nothing: the write throws `TypeError`
+and the case is not written. The reservation key names the version, the case's
+`externalKey`, the role, the bytes, the name and the content type, so sending the same case again
+reuses its artifacts and a corrected name or type reserves a new one; a reference to the artifact a file uploads as pins it once. `source`, `attached_template`, `attached_reference` and `original` files reach
+the target as `context.files`; `org_template` and `evaluator_reference` files reach only scorers.
+
+Recorded messages copied into a case's inputs keep their large files as digest parts. Pin each file
+to the case, and the target can send the recorded model call again with the real image, document
+or audio:
+
+```ts
+import { rehydrateMedia, runExperiment } from "@hue-run/sdk/evals";
+
+await runExperiment({
+  // ...client, hue, experimentId, checkpointDirectory and the other options
+  target: async (inputs, { files }) => {
+    const { value } = await rehydrateMedia(inputs, files);
+    return callModel(value);
+  },
+});
+```
+
+`rehydrateMedia(value, files, { as })` matches digest parts to files by SHA-256, checks each
+file's bytes against the digest and writes them as `client.media.resolve` does (see the
+[README](README.md#read-recorded-media-back)); `files` may also hold `{ sha256, contentType, bytes }`
+entries. A part without a matching file stays as it is and is listed in `failures`.
+
 ## Direct cases and files
 
 Cases without a simulated world — answer-only tasks, or document workflows with pinned files —
 run on the same runner under the same checkpoint rules. They shipped in `@hue-run/sdk` `0.5.0`
 and require a Hue deployment that serves case `inputFiles` on experiment
 items, subject `files`, and the artifact reservation, upload, completion and download APIs. The
-Python SDK has no equivalent.
+Python SDK's `run_experiment` and `rescore` hand pinned input files to targets and scorers;
+generated files and the outbound worker are TypeScript-only.
 
 Since TypeScript 0.13.2, the `hue eval --worker --command "…"` wrapper supplies both callbacks, so one
-command worker accepts direct and world cases, including mixed eval sets. It keeps the launch
+command worker accepts direct and world cases, including mixed eval sets. Since 0.20.3, a one-shot
+`hue eval --set` over such a set runs it as one `mixed` run: each case takes its own kind's path
+under one experiment and its own checkpoint identity (`--mode simulation` over it is refused). It keeps the launch
 directory for relative application entry points; private case inputs/output still use
 `HUE_CASE_*`. An adapter-file worker opts into the direct callback with `--capability direct:v1`
 and must handle `context.mode === "direct"`. Restart an existing environment-only command
@@ -380,7 +440,8 @@ evaluator material must stay out of its reach. Verified copies live under `files
 `<checkpointDirectory>/files`, created mode 0700), evaluator-only files apart from the agent's, and
 each case gets its own private `context.outputDirectory` to write into. The files of a case pinned
 to a world are removed when it ends, except staged outputs an interrupted upload resumes from;
-those of a direct case stay for inspection.
+those of a direct case stay for inspection, except its evaluator-only files, which are removed when
+it ends so no later case's agent finds them.
 
 Return generated documents by wrapping the output in `withFiles(output, files)`. Each entry names a
 `path` or in-memory `bytes`, a `filename`, a Hue-accepted `contentType` and at most one `primary`.

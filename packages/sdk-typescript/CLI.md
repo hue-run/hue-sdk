@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.17.0`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.20.8`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -114,6 +114,9 @@ hue setup --origin http://127.0.0.1:PORT # isolated loopback tests only
 hue login                 # validate keys created in Hue and store them in ./.env.hue
 hue mcp install --client claude-code # write the Hue MCP configuration for a coding agent
 hue listen --subscription <id> --forward-to http://localhost:3000/slack/events # deliver events to a local bot
+hue import langfuse --from 2026-01-01 --dry-run # count a Langfuse project's traces, then import them
+hue traces import prepare ./exports --out ./exports.hue-import --json # convert exports into a bundle
+hue traces import upload ./exports.hue-import --authorization-file ./authorization.json --json # deliver it
 ```
 
 Hosted setup accepts HTTPS origins only. HTTP is accepted solely for `localhost`, `127.0.0.1` and
@@ -365,6 +368,232 @@ codes: `0` stopped, `1` Hue refused the credential, the subscription (unknown, r
 delivers to a request URL) or the pull itself (a redirect, another refusal or an answer without
 deliveries), `2` usage error, `130` interrupted twice.
 
+## Import traces from Langfuse
+
+`hue import langfuse` copies a Langfuse project's traces into Hue, for a team moving from Langfuse.
+It runs on your machine: it reads Langfuse's public API with the project's own keys and sends the
+spans with your Hue project key through the SDK's exporter, so the Langfuse keys go only to Langfuse
+and Hue never receives or stores them. The command is part of the `hue` executable and runs with
+`npx` whatever language the application is written in; the Python SDK has no counterpart.
+
+```sh
+# .env.langfuse, kept out of version control:
+#   LANGFUSE_PUBLIC_KEY=pk-lf-...
+#   LANGFUSE_SECRET_KEY=sk-lf-...
+#   LANGFUSE_BASE_URL=https://cloud.langfuse.com
+npx -y @hue-run/sdk@0.20.8 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.20.8 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+```
+
+`LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` come from the environment or `--env-path`
+(`--env-file` also works when the file exists), loaded first; a variable already set keeps its
+value. `--langfuse-public-key` replaces the public key on the command line, but the secret key is
+never taken from it, where other local processes and shell history can read it. The host is
+`--langfuse-host`, then `LANGFUSE_BASE_URL`, then `LANGFUSE_HOST`, then `https://cloud.langfuse.com`:
+use your region's host or your self-hosted URL, over HTTPS (plain HTTP only on this machine). A
+request carrying the keys follows no redirect. `HUE_API_KEY` is the Hue project key the spans are
+sent with, from the environment, the env file, or `./.env.hue` (where `hue login` stores it) when
+neither sets it (a dry run, which needs no Hue key, reads no `./.env.hue` beside a named file); `--origin` (default `HUE_BASE_URL`, then `https://app.hue.run`) is checked with
+`GET /api/v1/projects/current` before Langfuse is read. Keys are never printed.
+
+**What is read.** The command first asks for `GET /api/public/v2/observations`, which Langfuse Cloud
+and self-hosted Langfuse v4 answer. The traces are then the root observations
+(`isRootObservation=true`) that started in the window, listed newest first in cursor pages, and each
+trace's observations are read 100 a page with the field groups
+`core,basic,time,io,metadata,model,usage,prompt,trace_context`; a page whose metadata values Langfuse
+cut at 200 characters is read again with those keys expanded. A deployment that answers `404` there
+(self-hosted Langfuse v3) is read through `GET /api/public/traces` (`fromTimestamp`, `toTimestamp`,
+`orderBy=timestamp.desc`, `fields=core,io`) and `GET /api/public/observations?traceId=…`, in numbered
+pages. An answer over 32 MiB, or a `413`, is asked for again in smaller pages.
+
+**Selection.** `--from` and `--to` take an ISO 8601 date (midnight UTC) or a date and time with a time
+zone. A trace is selected by when it started, its root observation's start time or a v1 trace's
+timestamp, `--from` inclusive and `--to` exclusive. Without `--to` the window ends an hour before the
+command starts, so a trace still running, or still arriving in Langfuse, is left for a later run
+rather than sent half recorded. `--limit N` imports the N
+newest traces; `--trace-id ID` (repeatable, up to 1,000) imports those traces only and is not combined
+with the window or the limit.
+
+**What Hue receives.** Each observation becomes a completed span as a Langfuse OpenTelemetry SDK
+records it: its name, start, end (an observation without an end lasts no time) and parent, with
+`langfuse.observation.type` (lower case), `langfuse.observation.input` and `.output` (a string as
+recorded, any other value as its JSON), one `langfuse.observation.metadata.<key>` per metadata key,
+`.level`, `.status_message`, `.model.name`, `.model.parameters`, `.usage_details`, `.cost_details`,
+`.completion_start_time`, `.prompt.name` and `.prompt.version`, and the trace's
+`langfuse.trace.name`, `langfuse.trace.tags`, `langfuse.user.id`, `langfuse.session.id`,
+`langfuse.release`, `langfuse.version` and `langfuse.environment`. The model is also
+`gen_ai.request.model`, and Langfuse's `input` and `output` usage counts are
+`gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens`. An observation at level `ERROR` is an
+error span with its status message. A v1 trace is also a span of its own, named as the trace and
+carrying `langfuse.trace.input`, `.output`, `.metadata.<key>`, `.tags` and `.public`; its observations
+without a parent are its children, and it lasts from the earliest of its timestamp and their starts
+to their last end. Spans carry `service.name` `langfuse` (`--service-name` sets another) and the
+instrumentation scope `@hue-run/sdk/import/langfuse`.
+
+**Environment and Worlds.** A span whose observation, or v1 trace, records an environment also
+carries it as recorded in `hue.import.source_environment`, which marks the trace as imported; one
+that records none carries neither attribute, and the resource never declares
+`deployment.environment.name`, since one import can mix environments. A trace adds to its user's
+World only when Langfuse recorded it in its `production` environment: Hue reads the root's
+`langfuse.environment` as the trace's deployment environment, and never takes an imported trace in
+which any span names another environment, such as Langfuse's `default`, as production history.
+
+**Ids and resuming.** A Langfuse id that already is an OpenTelemetry id (32 lowercase hex digits for
+a trace, 16 for an observation, as Langfuse's OpenTelemetry SDKs write them) is kept; any other id,
+such as an older SDK's UUID, becomes one derived from it with SHA-256. The original ids are kept as
+`langfuse.trace.id` and `langfuse.observation.id`. Running the same command again sends the same
+spans, and Hue keeps one copy of an exact replay of a completed span, so an interrupted or partly
+failed import is resumed by running it again. Hue refuses a different payload for a span it already
+holds: keep `--media`, `--no-content`, `--service-name` and the SDK version the same when
+resuming, and expect a span whose Langfuse data changed after it was imported to be refused. For
+the same reason the import sends nothing that depends on the run: a trace's root never carries
+`hue.sdk.dropped_records`, and files and large values are stored before their span is sent. Leave
+out of the window any traces that already reached Hue through OpenTelemetry.
+
+**Export and content.** Spans go through the SDK's own exporter, as `createHue` sends them: batched,
+compressed, retried and within the limits Hue advertises. Before a span is sent, its content is
+stored as that exporter stores it, with the exporter's own placement: a file inline in an attribute
+Hue reads files from (a `data:` URL, or the bytes of a provider part, that Langfuse kept in place) is
+uploaded and placed in its digest form, and a text value still over Hue's inline limit (1 MiB) is
+uploaded whole and replaced by its first 16 KiB, each listed in `hue.blobs` (a whole value also in
+`hue.truncated`). Doing this first means a file or value that cannot be stored right now holds its
+span back for the next run instead of being kept inline or cut; one over a limit (Hue's size limit,
+or a span's 64 entries) is placed the same way on every run and counted in the summary. Content is
+captured, the SDK's default; `--no-content` sends metadata only, as `captureContent: false` does (no
+inputs, outputs, status messages or model parameters; metadata, model names and usage stay, and
+nothing is uploaded). The import waits for its queue to be sent every 1,024 spans or 32 MiB, so its
+memory stays bounded whatever the project's size.
+
+**Media.** Langfuse's SDKs replace a file in an input, output or metadata value with a reference,
+`@@@langfuseMedia:type=<media type>|id=<id>|source=<source>@@@`. Without `--media`, references are
+sent as recorded, and Hue shows them as files held in Langfuse. With `--media`, each reference where
+Hue reads a file (a whole string, or the content of a provider part such as an OpenAI `image_url` or
+`input_audio`, an Anthropic `source` or a GenAI `blob`, no deeper than ten levels) is looked up with
+`GET /api/public/media/{id}`. The file is downloaded from the link Langfuse answers (following up to
+five of its store's redirects, without the Langfuse keys). The link and each redirect must use HTTPS
+without credentials or a fragment and reach a public address, or the Langfuse host itself; a link to
+this machine, a private network or a link-local address such as cloud metadata fails the file. When
+the Langfuse host is on this machine, any address is accepted, and plain HTTP to this machine. The
+file is then uploaded under the span's trace through Hue's upload route (reservation, presigned
+`PUT`, completion), and placed in the digest form the SDK writes for media it records: a whole string
+becomes `{"type":"blob","mime_type":…,"modality":…,"sha256":…,"size":…}` and a provider part loses its
+bytes and gains `sha256` and `size`, every other byte of the value's text kept, each file listed in
+`hue.blobs` under `<attribute>#<JSON pointer>`. Each file is downloaded once per trace. A reference
+stays as recorded when Langfuse holds no bytes for it, its file is over 25 MiB, it sits inside longer
+text, or its span already lists 64 files. A file that cannot be downloaded or stored right now holds
+its span back: the trace is reported, and the next run sends it.
+
+**Rate limits and failures.** A `429` from Langfuse is waited out for as long as its `Retry-After`
+asks, up to 15 minutes and ten times in a row; connection failures, timeouts and `5xx` answers are
+retried after 1, 2, 4, 8 and 16 seconds. Langfuse Cloud limits each organization's requests per
+minute by plan, so a large project imports at that pace: a request per page of traces and per page
+of each trace's observations, and one per media file. A refusal of the Langfuse keys (`401` or `403`)
+or of `HUE_API_KEY` stops the import before anything is sent; a trace Langfuse cannot answer for is
+reported and the import goes on.
+
+**Output and exit codes.** `--dry-run` reads and counts traces, spans and media references, needs no
+Hue key and sends nothing. Without `--yes` the command asks for confirmation in a terminal (declining
+exits `1`) and refuses to start without one. Progress is printed every 100 traces or 10 seconds, then
+a summary of the traces imported, the spans sent and accepted, and the media files uploaded and left
+in Langfuse; each trace not fully imported is named with the reason. Ctrl+C or `SIGTERM` stops
+reading, sends what was read and exits `130`; a second Ctrl+C a second or more later exits `130` at
+once, abandoning exports still in flight for the next run to send. Exit codes: `0` every selected
+trace was imported, `1` a trace, span or file was not (or a key was refused), `2` usage error, `130`
+stopped.
+
+## Import a bundle of existing traces
+
+`hue traces import` brings historical traces into Hue from exports you already hold: OTLP/JSON
+trace exports (a `{"resourceSpans": […]}` document, a list of them, or one per line), complete
+Langfuse observation exports (the `data` or native `observations` envelope) and text ATIF v1.7 and
+v1.8 exports, embedded subagents included. It needs no project key. `prepare` runs on the machine
+that holds the exports and sends nothing; a Hue MCP connection then authorizes the delivery
+(`prepare_trace_import`); `upload` delivers the bundle with that authorization, and
+`get_trace_import` reports what arrived.
+
+```sh
+npx -y @hue-run/sdk@latest traces import prepare ./exports --out ./exports.hue-import --json
+npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authorization-file ./authorization.json --json
+```
+
+**Prepare.** `prepare <path>` reads a file, a directory tree or a ZIP archive (members are inflated
+in memory; encrypted members, unsafe paths and nested archives are listed, not read) and
+recognizes each file by its content, never by its name. Every trace becomes gzip OTLP/JSON batches
+of at most 3 MiB decoded and 900 KiB on the wire, written to `--out` (default `<path>.hue-import`,
+created with mode 0700) beside `manifest.json`, which declares each trace's id, span count, batches
+(by the SHA-256 of each gzip body), large values, history owner and origin. A text value over 1 MiB
+is stored as a value of its own and listed in `hue.blobs`, as the exporter lists the values it
+uploads. OTLP spans are kept as recorded; a trace or span id that is not an OpenTelemetry id (an
+exporter's UUID, for example) is mapped to one derived from it by SHA-256, with the original kept
+as `hue.import.original_trace_id` or `hue.import.original_span_id`. A Langfuse observation becomes
+one span keeping its whole record (`hue.import.source_record`) beside the `langfuse.*` and GenAI
+attributes Hue reads; an id that is no OpenTelemetry id is mapped as `hue import langfuse` maps it,
+so an export and a live import of the same trace agree. An ATIF export becomes one trace: an agent
+span for the run, a model span per agent step with the conversation so far, a tool span per call,
+each embedded subagent as its own agent span under the call that spawned it, and the export's
+`extra.user_id` as the trace's `user.id`; its spans carry `hue.import.format` `atif` under the
+instrumentation scope `hue.import.atif`, and the run's agent span is named `invoke_agent
+<agent.name>` from the export's own agent. ATIF records instants, not durations, so model and tool
+spans are points in time, and a tool's result is kept as text with no error status of the
+importer's making. The same trace in two files is one trace when the copies agree and a refusal
+when they differ; a trace with more than 100,000 spans, 512 batches or 10,000 values is refused and
+named, and an input of more than 25,000 traces, or whose manifest would exceed 32 MiB (4 MiB
+compressed), is refused whole. Nothing about where a file sat or what it was called reaches a span: a renamed, reordered
+or re-zipped copy of the bundle prepares to byte-identical batches and the same manifest digest.
+
+The report (`--json` prints it as one object) names `manifest_digest`, `totals` (traces, batches,
+spans, blobs, bytes) and `source`, which `prepare_trace_import` takes as given; the formats
+recognized and the traces each file held; the files it could not read, with the reason; the traces
+and spans it refused; the traces without a history owner (a root `user.id`, a Langfuse `userId`, an
+ATIF `extra.user_id`, or an explicit `hue.world.entity.namespace` and `hue.world.entity.id`), which
+import like any other trace but leave a gap in continuous history; the origin each source recorded
+(`production`, `evaluation`, `simulation` or `unknown`; evaluation and simulation traffic is
+imported and kept out of production history); and the traces whose vendor ids were mapped. An
+existing `--out` directory is accepted only while it holds nothing but an earlier preparation and
+no upload has started in it.
+
+**Authorize.** Call `prepare_trace_import` over the Hue MCP with the report's `manifest_digest`,
+`totals` and `source`. It answers the import id, `upload_url` and an `authorization` (`hue_it_` and
+43 characters) valid for a day. Save its answer, or the authorization alone, in a private file
+(mode 0600; never in a transcript, a message or a shell history). The same digest in the same
+project is the same import: calling again renews the authorization for an interrupted upload and
+revokes the earlier one.
+
+**Upload.** `upload <directory> --authorization-file <file>` reads the authorization from the file
+(its JSON answer, or the authorization on the first line and the `upload_url` on the second;
+`--import-url` names the URL otherwise, and `--origin` refuses a URL on any other Hue origin),
+never from the command line or the environment, and never prints it. It registers the manifest's
+exact bytes, then, trace by trace in declared order and two requests at a time, reserves each large
+value, sends it to the URL Hue answers and completes it, posts each batch with its SHA-256 in
+`Hue-Import-Batch`, and reads the trace's receipt for every span id: a trace counts as verified only
+when Hue confirms every span. It then reconciles and completes the import. Progress is written to
+`progress.json` in the bundle as it goes; running the same command again resumes there, and what
+Hue already holds is not sent twice (a batch sent again after a lost acknowledgement is taken as
+duplicates). Connection failures, timeouts, `408`, `429` and `5xx` answers are retried after 1, 2,
+4, 8, 16 and 30 seconds, waiting for `Retry-After`; after eight retries the command stops and the
+next run resumes. Ctrl+C or `SIGTERM` finishes the requests in flight, saves progress and exits
+`130`; a second signal stops at once.
+
+**What Hue refuses.** Every refusal carries a fixed code, which the report names in `error.code`.
+An expired or replaced authorization (`401`), a lapsed connection (`403` `authority_lapsed`) and an
+expired import (`410`) stop the upload: call `prepare_trace_import` again with the same
+`manifest_digest` and `totals`, write the new authorization to the file and run the same command.
+A manifest whose digest or totals are not the import's (`409`), an authorization of another import
+(`403`), an unknown import (`404`) and a canceled import (`410`) are final. A batch or value Hue
+refuses for the trace's own sake (undeclared, another digest, another trace's records, fewer
+finished spans than declared, a size or type the manifest did not declare), or a record Hue already
+holds under the same id with other content, is a conflict: it is recorded, the trace is reported,
+none of its later records are sent, and the same bytes are never sent again. An import Hue reports
+already completed is done: the command exits `0` and points to `get_trace_import`.
+
+**Output and exit codes.** Without `--json`, the command prints the registration, every hundredth
+verified trace, each conflict and a summary. With `--json`, one progress object per line goes to
+stderr and the report to stdout: the state (`completed`, `incomplete`, `stopped` or `failed`), the
+traces verified and conflicted, the batches landed and values stored, Hue's own note and the traces
+it still lists when completion was refused, the conflicts with their codes, and `next_action`. Exit
+codes: `0` prepared or completed, `1` not completed (the report says what to do next), `2` usage
+error, `130` stopped.
+
 ## Local state and conflicts
 
 Before its first network write, setup creates a lowercase UUIDv4 and a 32-byte random installation
@@ -469,7 +698,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.17.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.20.8.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -480,7 +709,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.17.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.20.8.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -522,10 +751,10 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.17.0 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.17.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.17.0 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.17.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.20.8 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.20.8 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.20.8 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.20.8 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 One invocation creates one run holding every selected case; it prints the run URL
@@ -563,7 +792,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.17.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.20.8 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
@@ -604,6 +833,23 @@ former; a case failed for its telemetry has `state: "error"`,
 `telemetry: { code: "telemetry_not_accepted", issues: [{ signal, kind, status?, count }] }`. `--wait <seconds>` (default 300) bounds the verdict wait because
 Hue-owned `world_outcome` checks are graded after the world seals. An experiment always covers
 every case of the saved version; there is no case subset.
+
+`--judges` requests the run's pinned
+`llm_judge` evaluators after outputs upload, before verdict polling. It is off by default and
+works in direct, simulation and worker modes. Requests use Hue's hosted judge budget;
+Hue applies its admission controls to new jobs. An accepted request remains replayable if the
+budget is later disabled. Cases without stored output are excluded, and combining
+`--judges` with `--no-output` is refused. `--check` creates no judge jobs.
+
+With `--judges --wait 0`, the CLI requests the jobs and returns their current verdict state;
+pending jobs continue in Hue. Uploaded outputs are checkpointed before the attempt or worker
+queue is marked completed. If this handoff or dispatch fails, or its acknowledgement is lost,
+rerun the unchanged command with the same checkpoint directory. The CLI resumes judging the uploaded
+outputs without invoking the agent, using the same idempotency keys. After dispatch succeeds,
+the next ordinary invocation starts a new run as usual.
+
+`--worker --judges` discards cancelled or released handoffs. Once judge requests succeed, a
+verdict-read failure is logged and the worker keeps accepting runs.
 
 `--command "<shell command>"` spawns the command once per case with the world's environment
 (`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW` (the world's clock at creation, RFC 3339; `worldNow()` reads it and returns

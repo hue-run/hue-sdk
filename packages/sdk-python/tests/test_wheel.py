@@ -9,6 +9,55 @@ from importlib.metadata import version
 from pathlib import Path
 
 
+def test_installed_wheel_preparation_retries_and_cancellation(tmp_path):
+    package = Path(__file__).resolve().parents[1]
+    dist = tmp_path / "dist"
+    consumer = tmp_path / "consumer"
+    for command in (
+        [sys.executable, "-m", "build", "--no-isolation", str(package), "--outdir", str(dist)],
+        ["uv", "venv", str(consumer), "--python", sys.executable],
+    ):
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    python = consumer / "bin" / "python"
+    subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            str(next(dist.glob("*.whl"))),
+            f"pytest=={version('pytest')}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    for name in ("conftest.py", "test_world_preparation.py"):
+        shutil.copy(package / "tests" / name, tests / name)
+    environment = {"PATH": os.environ["PATH"], "PYTHONNOUSERSITE": "1"}
+    imported = subprocess.run(
+        [str(python), "-I", "-c", "import hue_sdk; print(hue_sdk.__file__)"],
+        env=environment,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert str(consumer) in imported.stdout
+    result = subprocess.run(
+        [str(python), "-I", "-m", "pytest", "-q", str(tests)],
+        env=environment,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "12 passed" in result.stdout
+
+
 def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):
     package = Path(__file__).resolve().parents[1]
     repository = package.parents[1]
@@ -169,9 +218,12 @@ with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=
         "test_receipts.py",
         "test_isolation.py",
         "test_live_spans.py",
+        "test_tool_endpoint.py",
         "test_limits.py",
         "test_blobs.py",
         "test_media_parts.py",
+        "test_attachments.py",
+        "test_large_media.py",
     ):
         shutil.copyfile(package / "tests" / name, receipt_tests / name)
     shutil.copytree(package / "tests/fixtures/media-parts", receipt_tests / "fixtures/media-parts")

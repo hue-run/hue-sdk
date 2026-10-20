@@ -59,6 +59,14 @@ const project = {
   slug: "sdk-test",
 };
 
+/** The transport takes its receiver to lack the upload route from the start, as it would for ten
+ * minutes after the receiver's first answer: values over the cap are cut when queued, never listed
+ * for an upload the receiver cannot store. */
+function withoutUploadRoute(transport: HueTransport): void {
+  (transport as unknown as { uploader: { unsupportedUntil: number } }).uploader.unsupportedUntil =
+    Infinity;
+}
+
 function receiver(
   mode:
     | "success"
@@ -861,19 +869,12 @@ describe("Hue SDK contract", () => {
     };
     const memo = new MediaDigestMemo();
     const digest = spyOn(memo, "bytes");
-    const expected = JSON.stringify([
-      {
-        role: "user",
-        parts: [
-          {
-            type: "blob",
-            mime_type: "image/png",
-            sha256: createHash("sha256").update(Buffer.alloc(65537, 11)).digest("hex"),
-            size: 65537,
-          },
-        ],
-      },
-    ]);
+    // The digest replaces only the part's content; the rest of the recorded text is kept.
+    const expected = large.replace(
+      /,\n\s*"content": "[A-Za-z0-9+/=]*"/,
+      `,"sha256":"${createHash("sha256").update(Buffer.alloc(65537, 11)).digest("hex")}","size":65537`,
+    );
+    expect(expected).not.toBe(large);
     try {
       const snapshot = snapshotSpan(source, 4 * 1024 * 1024, true, 1024 * 1024, undefined, memo);
       expect(digest).not.toHaveBeenCalled();
@@ -1261,6 +1262,7 @@ describe("Hue SDK contract", () => {
       baseUrl: endpoint.url,
       ...(maxQueueBytes ? { maxQueueBytes } : {}),
     });
+    withoutUploadRoute(transport);
     const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
     const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
     const hue = createHue({ transport, tracerProvider, loggerProvider });
@@ -1410,6 +1412,7 @@ describe("Hue SDK contract", () => {
       baseUrl: endpoint.url,
       redact: (text) => (text.startsWith("expand") ? "x".repeat(1_100_000) : text),
     });
+    withoutUploadRoute(transport);
     const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
     const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
     const hue = createHue({ transport, tracerProvider, loggerProvider });
@@ -1610,6 +1613,7 @@ describe("Hue SDK contract", () => {
       captureContent: true,
       baseUrl: endpoint.url,
     });
+    withoutUploadRoute(transport);
     const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
     const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
     const hue = createHue({ transport, tracerProvider, loggerProvider });
@@ -1618,8 +1622,9 @@ describe("Hue SDK contract", () => {
     const imageDigest = createHash("sha256").update(image).digest("hex");
     const text = `${"line\n".repeat(20000)}end`;
     const textDigest = createHash("sha256").update(text, "utf8").digest("hex");
-    // Declared text stays raw UTF-8 even in the base64 alphabet: over 64 KiB, hashed.
-    const asciiText = "A".repeat(64 * 1024 + 4);
+    // Text in the base64 alphabet is the file's base64 whatever the declared type, as Hue reads
+    // it: its 66,000 decoded bytes are over 64 KiB and hashed.
+    const asciiText = "A".repeat(88_000);
     try {
       const span = tracerProvider.getTracer("third-party").startSpan("external");
       // AI SDK 6 file parts: the large image is hashed, its other fields kept; small data stays.
@@ -1636,7 +1641,8 @@ describe("Hue SDK contract", () => {
           },
         ]),
       );
-      // GenAI blob parts: a text file's own text is hashed as UTF-8, a data: URL is decoded.
+      // GenAI blob parts: a text file's own text is hashed as UTF-8, base64 and a data: URL are
+      // decoded.
       span.setAttribute(
         "gen_ai.output.messages",
         JSON.stringify([
@@ -1691,8 +1697,8 @@ describe("Hue SDK contract", () => {
           type: "blob",
           modality: "document",
           mime_type: "text/plain",
-          sha256: createHash("sha256").update(asciiText, "utf8").digest("hex"),
-          size: Buffer.byteLength(asciiText),
+          sha256: createHash("sha256").update(Buffer.alloc(66_000)).digest("hex"),
+          size: 66_000,
         },
         {
           type: "blob",
@@ -3406,6 +3412,7 @@ describe("Receiver limits", () => {
       baseUrl: endpoint.url,
       maxQueueBytes: 64 * MiB,
     });
+    withoutUploadRoute(hue.transport);
     try {
       await hue.withSpan("first", () => undefined);
       await hue.flush();
@@ -3599,6 +3606,7 @@ describe("Receiver limits", () => {
       captureContent: true,
       baseUrl: endpoint.url,
     });
+    withoutUploadRoute(hue.transport);
     try {
       const span = hue.tracer.startSpan("huge");
       span.setAttribute("output.value", "z".repeat(4_000_000));
@@ -3659,6 +3667,7 @@ describe("Receiver limits", () => {
       captureContent: true,
       baseUrl: endpoint.url,
     });
+    withoutUploadRoute(hue.transport);
     try {
       const span = hue.tracer.startSpan("request");
       span.setAttribute(
@@ -4659,6 +4668,31 @@ describe("Application failure isolation", () => {
     await expect(result).rejects.toBe(original);
     expect(hue.transport.getReport().failedSpans).toBe(1);
     endpoint.server.stop(true);
+  });
+
+  test("flushSafe with an invalid budget never leaves its failing flush unhandled", async () => {
+    // Bun fails the test on an unhandled rejection; Node's default mode ends the process.
+    const endpoint = receiver("unauthorized");
+    const hue = createHue({
+      apiKey,
+      serviceName: "invalid-budget",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      for (const timeoutMillis of [0, 1500.5, Number.NaN, 60_001]) {
+        await hue.withSpan("request", () => undefined);
+        expect(await hue.flushSafe({ timeoutMillis })).toMatchObject({
+          ok: false,
+          timedOut: false,
+        });
+        await expect(hue.flush()).rejects.toBeInstanceOf(HueExportError);
+      }
+      expect(hue.transport.getReport().failedSpans).toBe(4);
+    } finally {
+      await hue.shutdownSafe();
+      endpoint.server.stop(true);
+    }
   });
 
   test("safe lifecycle returns within budget for a hung borrowed provider without queuing new drains", async () => {

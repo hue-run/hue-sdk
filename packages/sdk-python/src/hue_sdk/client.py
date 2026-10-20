@@ -10,10 +10,10 @@ import re
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Event, Lock, Thread
 from time import monotonic, time_ns
-from typing import Any, TypeVar, cast
+from typing import Any, TypeAlias, TypeVar, cast
 
 import requests
 from opentelemetry import trace
@@ -28,9 +28,23 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import AttributeValue
 
+from ._attachment import (
+    MAX_ATTACHMENT_DEPTH,
+    Attachment,
+    PathFile,
+    PlacedAttachment,
+    holds_attachment,
+    locate_parts,
+    read_path,
+)
 from ._blobs import MAX_BLOB_BYTES, ExplicitFile, Tally, Uploads
-from ._inline_files import is_media_name
-from ._limits import AdvertisedLimits, cut_utf8
+from ._inline_files import (
+    INLINE_FILE_TEXT_PER_RECORD,
+    digest_form_size,
+    dumps_message,
+    is_media_name,
+)
+from ._limits import AdvertisedLimits, cut_utf8, over_utf8
 from ._otel_compat import encode_logs
 from ._provider_tools import (
     ABSENT,
@@ -40,6 +54,7 @@ from ._provider_tools import (
     provider_error_description,
 )
 from ._tool_definitions import tool_catalog_summary
+from ._tool_endpoint import ToolEndpoint, tool_endpoint_attributes
 from ._version import __version__
 from .processors import HUE_TRACER_SCOPE, BoundedLogProcessor, BoundedSpanProcessor
 from .receipts import TraceReceiptField, TraceVerificationResult, verify_trace
@@ -60,6 +75,34 @@ from .transport import (
 
 Redactor = Callable[[str, Any], Any]
 _Function = TypeVar("_Function", bound=Callable[..., Any])
+
+# A span attribute value that may hold an ``Attachment`` anywhere: recorded as JSON text.
+AttachmentValue: TypeAlias = Attachment | Mapping[str, Any] | Sequence[Any]
+
+
+def _recorded_as_json(value: Any) -> bool:
+    """Whether a span attribute passed to a helper is recorded as JSON text: an attachment, a
+    value holding one, or JSON data OpenTelemetry cannot hold as an attribute (a dict, or a list
+    or tuple that is not of one primitive type), as the TypeScript SDK records it."""
+    if holds_attachment(value):
+        return True
+    if isinstance(value, Mapping):
+        return True
+    if not isinstance(value, (list, tuple)):
+        return False
+    first: type | None = None
+    for item in value:
+        if item is None:
+            continue
+        if type(item) not in (bool, str, int, float):
+            return True
+        if first is None:
+            first = type(item)
+        elif not isinstance(item, first):
+            return True
+    return False
+
+
 _MISSING = object()
 _FILE_ROLES = frozenset({"input", "attachment", "output"})
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -192,9 +235,27 @@ class HueSpan:
             self._client._record_issue()
             return "0" * 16
 
-    def set_attribute(self, name: str, value: AttributeValue) -> None:
-        """Custom metadata is caller-owned and may contain sensitive data."""
-        self._client._instrument(lambda: self.otel_span.set_attribute(name, value))
+    def set_attribute(self, name: str, value: AttributeValue | AttachmentValue) -> None:
+        """Custom metadata is caller-owned and may contain sensitive data.
+
+        A value that is a dict, a list OpenTelemetry cannot hold (not of one primitive type) or an
+        ``Attachment`` is recorded as JSON text, with each attachment as its digest part and its
+        bytes uploaded."""
+        if not _recorded_as_json(value):
+            plain = cast(AttributeValue, value)
+            self._client._instrument(lambda: self.otel_span.set_attribute(name, plain))
+            return
+
+        def record() -> None:
+            attributes, placed = self._client._attribute_values({name: value})
+            if name in attributes:
+                self.otel_span.set_attribute(name, attributes[name])
+            for key, found, copied in placed:
+                self._stage_attachments(
+                    key, found, copied, capture_content=self._client.capture_content
+                )
+
+        self._client._instrument(record)
 
     def set_input(self, value: Any) -> None:
         key = {
@@ -228,9 +289,15 @@ class HueSpan:
             return
 
         def record() -> None:
-            content, truncated = self._client._bounded_content(key, value, whole=True)
+            placed: list[PlacedAttachment] = []
+            final: list[Any] = []
+            content, truncated = self._client._bounded_content(
+                key, value, whole=True, placed=placed, final=final
+            )
             with self._truncated_lock:
                 self.otel_span.set_attribute(key, content)
+                # The attachments the value holds are staged in place of any it held before.
+                self._stage_attachments(key, placed, final[0], truncated=truncated)
                 # The key is listed under ``hue.truncated``, where Hue's receiver lists the
                 # values it cuts itself, so a reader learns of the partial value from one place;
                 # a whole value replacing a cut one unmarks its key, and a list that would not
@@ -245,6 +312,28 @@ class HueSpan:
                     )
 
         self._client._instrument(record)
+
+    def _stage_attachments(
+        self,
+        attribute: str,
+        placed: list[PlacedAttachment],
+        value: Any,
+        *,
+        truncated: bool = False,
+        capture_content: bool = True,
+    ) -> None:
+        """Stage the attachments ``value``, the value recorded as ``attribute``, now holds."""
+        uploads = self._client._uploads
+        files = self._client._attachment_files(
+            placed, value, attribute, self.trace_id, truncated, capture_content, "traces"
+        )
+        if uploads is None or not self.otel_span.is_recording():
+            return
+        tally = Tally()
+        for reason in uploads.stage_parts(self.otel_span, attribute, files):
+            tally.fallback(reason, self.trace_id)
+        if tally.fallbacks:
+            self._client._span_exporter._report_uploads(tally)
 
     def set_usage(
         self, *, input_tokens: int | None = None, output_tokens: int | None = None
@@ -409,21 +498,29 @@ class HueSpan:
         byte_size: int | None = None,
         name: str | None = None,
         upload: bool = False,
+        path: str | os.PathLike[str] | None = None,
     ) -> None:
         """Add a ``hue.file`` event for a file the work read, received or produced.
 
         ``role`` is ``input`` (given to the agent), ``attachment`` (from a tool or message) or
-        ``output`` (produced by the agent). ``data`` is hashed and measured locally;
-        ``upload=True`` also stores its bytes when content capture and a project key are enabled.
-        A ``str`` is hashed as UTF-8. The event carries ``hue.file.sha256``,
-        ``hue.file.role``, ``hue.file.media_type``, ``hue.file.size`` when known and, when
-        content is captured, ``hue.file.name``. An invalid record is omitted and counted; an
-        invalid name alone is omitted and counted while the rest is recorded.
+        ``output`` (produced by the agent). ``data``, or the file at ``path``, is hashed and
+        measured locally; ``upload=True`` also stores its bytes when content capture and a
+        project key are enabled: the file is listed in the span's ``hue.blobs`` when the span is
+        exported and uploaded in the background. A ``str`` is hashed as UTF-8. ``data`` is limited
+        to 25 MiB, as it is held in memory until it is uploaded; a file at ``path`` up to 25 MiB
+        is read now as ``data`` is, and a larger regular file, up to Hue's 1 GB upload limit, is
+        hashed now a slice at a time and read again from disk when it is uploaded, which it is
+        only if it still has the size and SHA-256 it was recorded with; a ``path`` that is no
+        regular file, such as a named pipe, is refused without waiting on it. Give ``data`` or
+        ``path``, not both. The event carries ``hue.file.sha256``, ``hue.file.role``,
+        ``hue.file.media_type``, ``hue.file.size`` when known and, when content is captured,
+        ``hue.file.name``. An invalid record is omitted and counted; an invalid name alone is
+        omitted and counted while the rest is recorded.
         """
         if not self._client._active:
             return
         self._client._instrument(
-            lambda: self._record_file(role, media_type, sha256, data, byte_size, name, upload)
+            lambda: self._record_file(role, media_type, sha256, data, byte_size, name, upload, path)
         )
 
     def _record_file(
@@ -435,6 +532,7 @@ class HueSpan:
         byte_size: int | None,
         name: str | None,
         upload: bool,
+        path: str | os.PathLike[str] | None = None,
     ) -> None:
         # Nothing to attach to: report once, before hashing or validating anything.
         if not self.otel_span.is_recording():
@@ -447,6 +545,26 @@ class HueSpan:
         uploads = self._client._uploads
         digest = sha256.lower() if isinstance(sha256, str) else sha256
         size = byte_size
+        # A file given by path over 25 MiB: hashed now and read again from disk when uploaded.
+        on_disk: PathFile | None = None
+        if path is not None:
+            if data is not None:
+                raise ValueError("A file takes data or a path, not both.")
+            if not isinstance(path, (str, os.PathLike)) or not os.fspath(path):
+                raise ValueError("Invalid file path.")
+            read = read_path(path)
+            if read is None:
+                raise ValueError("File must be a regular file within Hue's 1 GB upload limit.")
+            if isinstance(read, PathFile):
+                on_disk = read
+                # A caller-supplied digest or size must describe the same bytes.
+                if (digest is not None and digest != read.sha256) or (
+                    size is not None and size != read.size
+                ):
+                    raise ValueError("File digest or size does not match its data.")
+                digest, size = read.sha256, read.size
+            else:
+                data = read
         if data is not None:
             if isinstance(data, str):
                 if _utf8_byte_size(data, _MAX_FILE_DATA_BYTES) > _MAX_FILE_DATA_BYTES:
@@ -492,17 +610,25 @@ class HueSpan:
         timestamp = time_ns()
         refused = False
         if upload and uploads is not None:
-            if content is None:
+            staged = (
+                len(content)
+                if content is not None
+                else on_disk.size
+                if on_disk is not None
+                else None
+            )
+            if staged is None:
                 refused = True
-            elif content and not uploads.stage(
+            elif staged and not uploads.stage(
                 self.otel_span,
                 ExplicitFile(
-                    content,
-                    (digest, len(content)),
+                    content or b"",
+                    (digest, staged),
                     media_type,
                     name if is_media_name(name) else None,
                     role=role,
                     timestamp=timestamp,
+                    on_disk=on_disk,
                 ),
             ):
                 refused = True
@@ -565,6 +691,7 @@ class HueSpan:
                 attributes.pop(key, None)
                 self._client._record_issue()
         body: dict[str, Any] = {}
+        placed: list[PlacedAttachment] = []
         for key, value in (
             ("gen_ai.input.messages", input),
             ("gen_ai.output.messages", output),
@@ -572,15 +699,35 @@ class HueSpan:
         ):
             if value is not _MISSING:
                 # Bound and redact each field as JSON, then send the structure rather than its text.
-                body[key] = json.loads(self._client._content(key, value))
-        self._client._logger.emit(
-            timestamp=time_ns(),
-            context=trace.set_span_in_context(self.otel_span),
-            severity_number=SeverityNumber.INFO,
-            event_name="gen_ai.client.inference.operation.details",
-            body=body,
-            attributes=attributes,
+                # While media may be uploaded, a field's files may take it past the cap.
+                found: list[PlacedAttachment] = []
+                body[key] = json.loads(self._client._content(key, value, media=True, placed=found))
+                # A field's attachments sit one level below the body's root.
+                placed.extend(replace(item, depth=item.depth + 1) for item in found)
+        # Attachments in the body are staged with it until this client's processor admits it;
+        # export uploads them with the media the body holds.
+        uploads = self._client._uploads
+        files = self._client._attachment_files(
+            placed, body, "body", self.trace_id, False, True, "logs"
         )
+        if uploads is not None and files:
+            tally = Tally()
+            for reason in uploads.stage_log(body, files):
+                tally.fallback(reason, self.trace_id)
+            if tally.fallbacks:
+                self._client._span_exporter._report_uploads(tally, "logs")
+        try:
+            self._client._logger.emit(
+                timestamp=time_ns(),
+                context=trace.set_span_in_context(self.otel_span),
+                severity_number=SeverityNumber.INFO,
+                event_name="gen_ai.client.inference.operation.details",
+                body=body,
+                attributes=attributes,
+            )
+        finally:
+            if uploads is not None and files:
+                uploads.unstage_log()
 
 
 class Hue:
@@ -761,6 +908,8 @@ class Hue:
             self._ledger,
             limits=self._limits,
             dropped_records=dropped_records,
+            uploads=self._uploads,
+            report_uploads=self._span_exporter._report_uploads,
         )
         self._span_processor = BoundedSpanProcessor(
             self._span_exporter,
@@ -781,7 +930,11 @@ class Hue:
             capture_content=self.capture_content,
             limits=self._limits,
             dropped_records=dropped_records,
+            uploads=self._uploads,
         )
+        if self._uploads is not None:
+            # Settled uploads are counted with the span exporter's, for both signals.
+            self._uploads.uploader.report = self._span_exporter._report_uploads
         sdk_tracer_provider.add_span_processor(self._span_processor)
         sdk_logger_provider.add_log_record_processor(self._log_processor)
         self.tracer = self.tracer_provider.get_tracer(HUE_TRACER_SCOPE, __version__)
@@ -837,15 +990,123 @@ class Hue:
             self._record_issue()
             return None
 
-    def _content(self, key: str, value: Any) -> str:
+    def _content(
+        self,
+        key: str,
+        value: Any,
+        *,
+        media: bool = False,
+        placed: list[PlacedAttachment] | None = None,
+    ) -> str:
         """The value as JSON text within the cap, for a caller that parses it back (an inference
-        log's body): a value the cap would cut is omitted instead, since its prefix is no JSON."""
-        content, truncated = self._bounded_content(key, value)
+        log's body): a value the cap would cut is omitted instead, since its prefix is no JSON.
+
+        With ``media``, while values may be uploaded, a value over the cap is kept whole when it
+        fits the cap with each file it holds as its digest: export uploads the files."""
+        cap = self._limits.current.value_bytes
+        if media and self._uploads is not None and self._uploads.holds():
+            content, truncated = self._bounded_content(
+                key, value, whole=True, bound=cap + INLINE_FILE_TEXT_PER_RECORD, placed=placed
+            )
+            if not truncated and (
+                not over_utf8(content, cap) or digest_form_size(json.loads(content)) <= cap
+            ):
+                return content
+            raise ValueError("Captured content exceeds Hue's value cap.")
+        content, truncated = self._bounded_content(key, value, placed=placed)
         if truncated:
             raise ValueError("Captured content exceeds Hue's value cap.")
         return content
 
-    def _bounded_content(self, key: str, value: Any, *, whole: bool = False) -> tuple[str, bool]:
+    def _attachment_files(
+        self,
+        placed: list[PlacedAttachment],
+        value: Any,
+        attribute: str,
+        trace_id: str,
+        truncated: bool,
+        capture_content: bool,
+        signal: str,
+    ) -> list[ExplicitFile]:
+        """The files of the attachments a value placed that are uploaded, each at its part's
+        pointer in ``value`` as recorded: an invalid attachment, and an invalid name with content
+        capture, count as instrumentation issues; nothing is uploaded without content capture or
+        with setup credentials; a ``truncated`` value, or a part deeper than Hue reads, keeps its
+        digest part and counts as not uploaded; a part the redactor removed is not uploaded."""
+        tally = Tally()
+        candidates: list[Attachment] = []
+        for item in placed:
+            attachment = item.attachment
+            if item.part is None:
+                self._record_issue()
+                continue
+            if attachment._invalid_name and capture_content:
+                self._record_issue()
+            if self._uploads is None or not attachment.size:
+                continue
+            if truncated or item.depth > MAX_ATTACHMENT_DEPTH:
+                tally.fallback("budget", trace_id)
+                continue
+            candidates.append(attachment)
+        if tally.fallbacks:
+            self._span_exporter._report_uploads(tally, signal)
+        return [
+            ExplicitFile(
+                attachment._data or b"",
+                (attachment._sha256 or "", attachment.size or 0),
+                attachment.content_type,
+                name,
+                attribute=attribute,
+                pointer=pointer,
+                # A file given by path over 25 MiB is read again from disk when it is uploaded.
+                on_disk=attachment._file,
+            )
+            for attachment, pointer, name in locate_parts(value, candidates)
+        ]
+
+    def _attribute_values(
+        self, attributes: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], list[tuple[str, list[PlacedAttachment], Any]]]:
+        """Span attributes as recorded: a value that is an ``Attachment``, a dict or list holding
+        one, or JSON data OpenTelemetry cannot hold as an attribute (a dict, or a list that is not
+        of one primitive type), becomes its JSON text with each attachment as its digest part (an
+        invalid attachment alone is omitted); every other value is left to OpenTelemetry as
+        given."""
+        result = dict(attributes)
+        placed: list[tuple[str, list[PlacedAttachment], Any]] = []
+        for key, value in attributes.items():
+            if not _recorded_as_json(value):
+                continue
+            found: list[PlacedAttachment] = []
+            try:
+                copied = snapshot_content(
+                    value, attachments=found, capture_content=self.capture_content
+                )
+                text = dumps_message(copied)
+                cap = self._limits.current.value_bytes
+                if len(text) > cap or len(text.encode("utf-8")) > cap:
+                    raise ValueError("Attribute exceeds Hue's value cap.")
+            except Exception:
+                result.pop(key, None)
+                self._record_issue()
+                continue
+            if copied is None:
+                result.pop(key, None)
+            else:
+                result[key] = text
+            placed.append((key, found, copied))
+        return result, placed
+
+    def _bounded_content(
+        self,
+        key: str,
+        value: Any,
+        *,
+        whole: bool = False,
+        bound: int | None = None,
+        placed: list[PlacedAttachment] | None = None,
+        final: list[Any] | None = None,
+    ) -> tuple[str, bool]:
         """The value as JSON text within Hue's value cap (1 MiB unless the receiver advertises
         another), and whether it was cut to fit.
 
@@ -858,16 +1119,21 @@ class Hue:
         """
         cap = self._limits.current.value_bytes
         whole = whole and self._uploads is not None and self._uploads.holds()
-        bound = MAX_BLOB_BYTES if whole else cap
+        bound = cap if not whole else MAX_BLOB_BYTES if bound is None else bound
         # Redact before serialization, before queues and before any exporter receives content.
         try:
             # A redactor may mutate its argument before returning or raising.
             # It must never receive the application's live mutable values.
-            value = snapshot_content(value, whole=whole)
+            # Each attachment is copied as its digest part, which the redactor sees.
+            value = snapshot_content(value, whole=whole, attachments=placed)
             if self._redactor is not None:
                 # Bound the returned tree too, before JSONEncoder can allocate
                 # an arbitrarily large nested string or invoke custom hooks.
-                value = snapshot_content(self._redactor(key, value), whole=whole)
+                value = snapshot_content(
+                    self._redactor(key, value), whole=whole, attachments=placed
+                )
+            if final is not None:
+                final.append(value)
             # A direct string past the cap is cut before JSON creates an escaped copy: its text
             # is cut again below to the cap, so the prefix kept is the same.
             if isinstance(value, str) and len(value) > bound:
@@ -938,7 +1204,7 @@ class Hue:
         self,
         name: str,
         *,
-        attributes: Mapping[str, AttributeValue] | None = None,
+        attributes: Mapping[str, AttributeValue | AttachmentValue] | None = None,
         kind: SpanKind = SpanKind.INTERNAL,
         parent_context: Context | None = None,
         _category: str = "span",
@@ -946,10 +1212,11 @@ class Hue:
         otel_span: trace.Span = trace.INVALID_SPAN
         scope = None
         record_attributes: dict[str, str] | None = None
+        placed: list[tuple[str, list[PlacedAttachment], Any]] = []
         if self._active:
             try:
                 inherited = self._context_attributes.get() or {}
-                merged = {**inherited, **(attributes or {})}
+                merged, placed = self._attribute_values({**inherited, **(attributes or {})})
                 # Copied now so log_inference keeps the enclosing model() metadata and session
                 # even after their blocks exit.
                 record_attributes = dict(self._model_scope.get() or {})
@@ -970,6 +1237,15 @@ class Hue:
                 self._record_issue()
                 scope = None
         helper = HueSpan(self, otel_span, _category, record_attributes)
+        if placed:
+
+            def stage() -> None:
+                for key, found, copied in placed:
+                    helper._stage_attachments(
+                        key, found, copied, capture_content=self.capture_content
+                    )
+
+            self._instrument(stage)
         try:
             # The business block is yielded exactly ONCE, outside setup catches.
             yield helper
@@ -1058,6 +1334,7 @@ class Hue:
         *,
         call_id: str | None = None,
         mcp: Mapping[str, Any] | None = None,
+        endpoint: ToolEndpoint | None = None,
     ) -> Iterator[HueSpan]:
         name = self._metadata_string(name, "unknown")
         attributes: dict[str, AttributeValue] = {
@@ -1082,6 +1359,15 @@ class Hue:
                     elif self._active:
                         self._record_issue()
             elif self._active:
+                self._record_issue()
+        if self._active and self.capture_content and endpoint is not None:
+            try:
+                evidence = tool_endpoint_attributes(endpoint)
+                for key, value in evidence.items():
+                    redacted = self._text_content(key, value)
+                    if redacted is not None:
+                        attributes[key] = redacted
+            except Exception:
                 self._record_issue()
         with self.span(f"execute_tool {name}", attributes=attributes, _category="tool") as span:
             yield span
@@ -1236,6 +1522,15 @@ class Hue:
         network read may finish in the background after timeout.
         """
         self._ensure_open()
+
+        def project_or_none() -> Project | None:
+            try:
+                return self.validate_project()
+            except ProjectValidationError:
+                return None
+
+        # Once Hue reports the trace missing, name the project this key searched so a wrong key
+        # reads differently from a trace that is not stored yet.
         return verify_trace(
             self.base_url,
             self._headers,
@@ -1245,16 +1540,19 @@ class Hue:
             timeout_millis=timeout_millis,
             request_timeout=self._timeout,
             poll_lock=self._receipt_lock,
+            on_missing=project_or_none,
         )
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         """Drain pending telemetry. False means a timeout or a recorded export failure.
 
         A single background worker drains both signals while this caller waits
-        only up to its own budget. Queue drops and omitted helper data also fail
-        the result, independently of successful exports.
-        A timed-out operation continues in the background. Counters are cumulative;
-        this is not an exactly-once or durable-queue guarantee.
+        only up to its own budget; the caller then waits, within the same budget, for
+        the uploads accepted so far, which hold up no later flush's records. An upload
+        that fails is a warning, not a failure.
+        Queue drops and omitted helper data also fail the result, independently of
+        successful exports. A timed-out operation continues in the background. Counters
+        are cumulative; this is not an exactly-once or durable-queue guarantee.
         """
         self._validate_timeout(timeout_millis)
         if self._pid != os.getpid():
@@ -1285,7 +1583,13 @@ class Hue:
         except RuntimeError:
             self._flush_lock.release()
             return False
-        return completed.wait(max(0, deadline - monotonic())) and result
+        if not completed.wait(max(0, deadline - monotonic())):
+            return False
+        # The records are sent. Their uploads are waited for on this thread, after the drain has
+        # let go of the coordinator: a later flush sends its own records at once, never behind an
+        # earlier caller's wait for uploads.
+        settled = self._uploads_settled(deadline)
+        return result and settled
 
     @staticmethod
     def _validate_timeout(timeout_millis: int) -> None:
@@ -1297,9 +1601,10 @@ class Hue:
             raise ValueError("timeout_millis must be a positive integer.")
 
     def _drain(self, deadline: float) -> bool:
+        """Sends both signals' queued records; waits for no upload."""
         traces, logs = False, False
         try:
-            traces = self._span_processor.force_flush(
+            traces = self._span_processor.flush_records(
                 timeout_millis=max(0, int((deadline - monotonic()) * 1000))
             )
         except Exception:
@@ -1307,17 +1612,28 @@ class Hue:
         try:
             # Even with no wait remaining, request the other signal's export.
             # The processor's own worker continues without holding this drain.
-            logs = self._log_processor.force_flush(
+            logs = self._log_processor.flush_records(
                 timeout_millis=max(0, int((deadline - monotonic()) * 1000))
             )
         except Exception:
             pass
         return traces and logs and self.export_status.ok
 
+    def _uploads_settled(self, deadline: float) -> bool:
+        """Waits until every upload accepted so far has settled and is counted; False when
+        ``deadline`` came first."""
+        uploads = self._uploads
+        try:
+            return uploads is None or uploads.uploader.wait_idle(deadline)
+        except Exception:
+            return False
+
     def shutdown(self, timeout_millis: int = 30_000) -> bool:
         """Stop new helpers, drain and close Hue exporters within the caller's wait budget.
 
-        Work continues after a timeout. Call again to await the same shutdown;
+        Work continues after a timeout. Pending uploads get up to 30 seconds more in the
+        background once the exporters stop; the rest are then abandoned and counted in
+        ``export_status.upload_fallbacks``. Call again to await the same shutdown;
         repeated calls never launch extra workers. Borrowed providers stay usable.
         """
         self._validate_timeout(timeout_millis)
@@ -1357,9 +1673,16 @@ class Hue:
                                 self.logger_provider.shutdown()
                             else:
                                 self._log_processor.shutdown()
+                        # Pending uploads get their grace once the processors stopped, never
+                        # inside a processor's shutdown, which would hold a borrowed provider's
+                        # other processors; an upload still pending after it fails the result.
+                        settled = self._uploads_settled(
+                            monotonic() if self._uploads is None else self._uploads.grace_deadline()
+                        )
                         # An expired caller budget is not an export failure.
                         # Recheck completed cleanup without starting another wait.
-                        self._shutdown_result = self._drain(monotonic())
+                        drained = self._drain(monotonic())
+                        self._shutdown_result = settled and drained
                     except Exception:
                         self._shutdown_result = False
                     finally:
@@ -1417,16 +1740,18 @@ class _Subagent:
         kind: SpanKind,
     ) -> None:
         self._open = lambda: client._subagent_span(name, input, parent_context, kind)
-        self._scopes: list[Any] = []
+        self._scopes: ContextVar[tuple[Any, ...]] = ContextVar("hue_subagent_scopes", default=())
 
     def __enter__(self) -> HueSpan:
         scope = self._open()
         span = scope.__enter__()
-        self._scopes.append(scope)
+        self._scopes.set((*self._scopes.get(), scope))
         return span
 
     def __exit__(self, *exc: Any) -> bool | None:
-        return self._scopes.pop().__exit__(*exc)
+        scopes = self._scopes.get()
+        self._scopes.set(scopes[:-1])
+        return scopes[-1].__exit__(*exc)
 
     def __call__(self, function: _Function) -> _Function:
         if inspect.iscoroutinefunction(function):

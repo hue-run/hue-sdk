@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Agent, ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { gzip } from "node:zlib";
 import type { Attributes, Span as ApiSpan } from "@opentelemetry/api";
@@ -38,15 +39,24 @@ import {
   BlobUploader,
   FALLBACK_MESSAGES,
   fallbackAttributes,
+  fallbackRecord,
+  heldBytesOf,
+  LATE_FALLBACK_MESSAGES,
   MAX_HELD_BLOB_BYTES,
+  mergeWhenSettled,
   newTally,
+  mediaKey,
   offloadAttributes,
+  offloadRecord,
+  sizeOf,
   uploadBudgetMillis,
+  type LateUploads,
   type OffloadCollector,
   type MediaAttachment,
   type OffloadTally,
   type UploadContext,
 } from "./blobs.js";
+import { isByteSource } from "./large-media.js";
 import {
   advertisedLimits,
   BATCH_TARGET_BYTES,
@@ -64,6 +74,7 @@ import {
 } from "./live-spans.js";
 import { estimateRecordBytes, spanSource } from "./safety.js";
 import { MediaDigestMemo, isMediaName } from "./inline-files.js";
+import { locateParts } from "./attachment.js";
 import { snapshotLog, snapshotSpan, type DigestedMessage } from "./snapshot.js";
 import {
   DROPPED_RECORDS_KEY,
@@ -114,25 +125,93 @@ interface ExportSink {
   adoptLimits(headers: IncomingHttpHeaders): void;
   offloadsValues(): boolean;
   mediaAttachments(record: RecordValue): MediaAttachment[];
-  offloadSpan(
-    span: ReadableSpan,
+  offloadSpan<T extends RecordValue>(
+    record: T,
     collector: OffloadCollector,
     upload: UploadContext,
     tally: OffloadTally,
-  ): Promise<ReadableSpan>;
-  reportOffload(tally: OffloadTally): void;
+    late: LateUploads,
+    queued: RecordValue,
+  ): Promise<T>;
+  offloadLog(
+    log: ReadableLogRecord,
+    collector: OffloadCollector,
+    upload: UploadContext,
+    tally: OffloadTally,
+    late: LateUploads,
+    queued: RecordValue,
+  ): Promise<ReadableLogRecord>;
+  reportOffload(tally: OffloadTally, signal?: Signal, late?: boolean): void;
+  awaitUploads(report: Promise<void>): void;
 }
 
-/** Each surviving event authorizes one staged request, including repeated digests. */
+/** A record's trace: a span's context, a log record's span identifiers; "" when unreadable. */
+function recordTraceId(record: RecordValue): string {
+  try {
+    return "spanContext" in record && typeof record.spanContext === "function"
+      ? (record as ReadableSpan).spanContext().traceId
+      : ((record as ReadableLogRecord).spanContext?.traceId ?? "");
+  } catch {
+    return "";
+  }
+}
+
+/** The value of a record's attribute, or a log record's body, that holds placed attachments. */
+function placedValue(record: RecordValue, attribute: string): unknown {
+  if (
+    attribute === "body" &&
+    !("spanContext" in record && typeof record.spanContext === "function")
+  )
+    return (record as ReadableLogRecord).body;
+  return record.attributes[attribute];
+}
+
+/**
+ * The staged files a record still authorizes. Each surviving `hue.file` event authorizes one
+ * staged request, including repeated digests. An attachment placed in a value is authorized by
+ * its own part in the value as exported: after redaction (`before` absent) each part is found in
+ * its value, and keyed at its pointer there, a part the redactor removed taking its upload with
+ * it; after fitting (`before`, the record as it was fitted) a part survives while fitting left its
+ * value as it was.
+ */
 function survivingMedia(
   files: readonly MediaAttachment[],
-  span: ReadableSpan,
+  record: RecordValue,
   tally: OffloadTally,
+  before?: RecordValue,
 ): MediaAttachment[] {
   const consumed = new Set<number>();
-  const traceId = span.spanContext().traceId;
-  return files.flatMap((file) => {
-    const index = span.events.findIndex(
+  const traceId = recordTraceId(record);
+  const events = "events" in record ? (record as ReadableSpan).events : [];
+  const located = new Map<string, MediaAttachment[]>();
+  const locate = (attribute: string): MediaAttachment[] => {
+    let parts = located.get(attribute);
+    if (parts) return [];
+    let value = placedValue(record, attribute);
+    try {
+      if (typeof value === "string") value = JSON.parse(value);
+    } catch {
+      value = undefined;
+    }
+    parts = locateParts(
+      value,
+      files.filter((file) => file.attribute === attribute),
+    ).map(({ file, pointer, name }) => {
+      const { name: _staged, ...rest } = file;
+      return { ...rest, key: `${attribute}#${pointer}`, ...(name ? { name } : {}) };
+    });
+    located.set(attribute, parts);
+    return parts;
+  };
+  return files.flatMap((file): MediaAttachment[] => {
+    if (file.attribute !== undefined) {
+      if (!before) return locate(file.attribute);
+      if (placedValue(record, file.attribute) === placedValue(before, file.attribute))
+        return [file];
+      countFallback(tally, "budget", traceId);
+      return [];
+    }
+    const index = events.findIndex(
       (event, index) =>
         !consumed.has(index) &&
         event.name === "hue.file" &&
@@ -147,7 +226,7 @@ function survivingMedia(
       return [];
     }
     consumed.add(index);
-    const name = span.events[index]!.attributes?.["hue.file.name"];
+    const name = events[index]!.attributes?.["hue.file.name"];
     return [
       {
         bytes: file.bytes,
@@ -162,7 +241,7 @@ function survivingMedia(
 
 function mediaEntry(file: MediaAttachment): string {
   return blobEntry(
-    `event:hue.file:${file.digest.sha256}`,
+    mediaKey(file),
     file.digest.sha256,
     file.digest.size,
     file.contentType,
@@ -178,9 +257,11 @@ function mediaEntry(file: MediaAttachment): string {
  */
 export const MAX_RATE_LIMIT_HOLD_MILLIS = 60_000;
 
-/** How long one export may take with requests of `timeoutMillis` each: its uploads of values over
+/** How long one export may take with requests of `timeoutMillis` each: hashing its values over
  * the inline limit, its requests, and a hold for a rate-limited receiver on top. Processors and
- * providers wait this long for a drain. */
+ * providers wait this long for a drain. A drain also waits for the uploads its exports queued,
+ * which run beside the requests and end within six timeouts and a minute of being queued, so they
+ * fit within the same budget. */
 export function exportBudgetMillis(timeoutMillis: number): number {
   return uploadBudgetMillis(timeoutMillis) + timeoutMillis * 16 + 1000 + MAX_RATE_LIMIT_HOLD_MILLIS;
 }
@@ -255,6 +336,9 @@ export class HueTransport {
    * over the request limit), reported on the trace's root span as `hue.sdk.dropped_records` when
    * the root is exported, so Hue reads the trace as incomplete by that many records. */
   private droppedByTrace = new Map<string, number>();
+  /** Whether a trace's root carries `hue.sdk.dropped_records`; off for a replay of recorded
+   * spans, which must send the same root on every run. */
+  private marksDroppedRecords = true;
   private instrumentationFailures = 0;
   private diagnosticPending = false;
   private lastDiagnosticAt = -Infinity;
@@ -262,7 +346,11 @@ export class HueTransport {
   private logExporter: ReportingExporter<ReadableLogRecord>;
   private closed = false;
   private shutdownPromise?: Promise<ExportReport>;
-  private flushPromise?: Promise<ExportReport>;
+  /** The latest flush's send of its records; the next flush's send starts after it. */
+  private sendPromise?: Promise<unknown>;
+  /** Set while a flush sends its records: the processors leave the uploads to that flush, which
+   * waits for them after its send, so no flush's send waits behind another's uploads. */
+  private sendingRecords = new AsyncLocalStorage<true>();
   // Open spans not yet announced. Each is considered once, at the next tick after it starts.
   private live = new Set<ReadableSpan>();
   private liveTimer?: ReturnType<typeof setInterval>;
@@ -286,15 +374,25 @@ export class HueTransport {
   private admissionDigests = new WeakMap<RecordValue, ReadonlyMap<string, DigestedMessage>>();
   // The span's own messages each admitted span inspected, or left to export to inspect.
   private admissionInspected = new WeakMap<RecordValue, ReadonlySet<string>>();
+  // The span's own values each admitted span held whole past the inspection bounds.
+  private admissionLarge = new WeakMap<RecordValue, ReadonlySet<string>>();
   /** Uploads values over the inline limit apart from their spans; absent when disabled. */
   private uploader?: BlobUploader;
   /** Bytes of values over the inline limit queued spans hold whole for upload, and each span's. */
   private heldBytes = 0;
   private held = new WeakMap<RecordValue, number>();
+  /** Bytes of each record's charge (its own held values and its staged files) that its queued
+   * uploads took over before the record was finished: charged to the uploads alone until they
+   * settle or the record is finished. */
+  private heldByUploads = new WeakMap<RecordValue, number>();
   private mediaMemo = new MediaDigestMemo();
   // Context identity also matches safe API wrappers to the provider's ended span. Abandoned
   // spans retain no span objects, and share the 2048-span / 128 MiB holding bounds.
   private media = new Map<string, MediaAttachment[]>();
+  // Attachments placed in a log record's body, from `emit` until the record is admitted, and
+  // the admitted records' own.
+  private logParts = new Map<object, { traceId: string; files: MediaAttachment[] }>();
+  private logMedia = new WeakMap<RecordValue, MediaAttachment[]>();
   private mediaOwners = new Map<string, { source: WeakRef<ApiSpan>; token: object }>();
   private mediaTimer?: ReturnType<typeof setInterval>;
   private mediaFinalizer = new FinalizationRegistry<{ identity: string; token: object }>(
@@ -304,6 +402,11 @@ export class HueTransport {
   );
   private uploaded = 0;
   private uploadFallbacks = 0;
+  /** Each export's queued uploads, until they all settle and are reported. */
+  private uploadReports = new Set<Promise<void>>();
+  /** Settles once every upload report registered so far has: each drain awaits this one promise,
+   * so a drain costs the same however many uploads are pending. */
+  private uploadsSettled: Promise<void> = Promise.resolve();
 
   constructor(options: HueOptions) {
     this.options = validateOptions(options);
@@ -316,8 +419,12 @@ export class HueTransport {
       ProtobufTraceSerializer,
       TraceExporterMetricsHelper,
       (span, cache, offload) => {
-        // Export inspects only the messages admission inspected within the record's allowance.
-        if (offload) offload.inspected = this.admissionInspected.get(span);
+        // Export inspects only the messages admission inspected within the record's allowance,
+        // and reads in place the values it held whole past the inspection bounds.
+        if (offload) {
+          offload.inspected = this.admissionInspected.get(span);
+          offload.large = this.admissionLarge.get(span);
+        }
         return redactSpan(span, this.options, cache, {
           valueBytes: this.limits.valueBytes,
           cut: this.admissionCuts.get(span),
@@ -331,10 +438,11 @@ export class HueTransport {
       "logs",
       ProtobufLogsSerializer,
       LogsExporterMetricsHelper,
-      (log, cache) =>
+      (log, cache, offload) =>
         redactLog(log, this.options, cache, {
           valueBytes: this.limits.valueBytes,
           cut: this.admissionCuts.get(log),
+          ...(offload ? { offload } : {}),
         }),
     );
     if (this.options.enabled !== false)
@@ -388,7 +496,7 @@ export class HueTransport {
           if (!queued) {
             const tally = newTally();
             for (const file of this.mediaAttachments(span))
-              if (file.bytes.byteLength) countFallback(tally, "budget", span.spanContext().traceId);
+              if (sizeOf(file.bytes)) countFallback(tally, "budget", span.spanContext().traceId);
             this.reportOffload(tally);
             this.releaseMedia(span);
             return;
@@ -410,10 +518,22 @@ export class HueTransport {
           );
         }
       },
-      forceFlush: () => spans.forceFlush(),
-      shutdown: () => {
+      // The spans are sent first, then the uploads queued so far are waited for, unless a
+      // flush sends them: that flush waits for the uploads after its send.
+      forceFlush: async () => {
+        try {
+          await spans.forceFlush();
+        } finally {
+          if (!this.sendingRecords.getStore()) await this.drainUploads();
+        }
+      },
+      shutdown: async () => {
         this.stopLiveSpans();
-        return spans.shutdown();
+        try {
+          await spans.shutdown();
+        } finally {
+          await this.drainUploads();
+        }
       },
     };
     this.logRecordProcessor = {
@@ -421,8 +541,21 @@ export class HueTransport {
         let admitted: ReadableLogRecord | undefined;
         try {
           const queued = this.enqueue("logs", log);
-          if (!queued) return;
+          if (!queued) {
+            const pending =
+              log.body !== null && typeof log.body === "object"
+                ? this.logParts.get(log.body as object)
+                : undefined;
+            if (pending) {
+              const tally = newTally();
+              for (const _file of pending.files) countFallback(tally, "budget", pending.traceId);
+              this.reportOffload(tally, "logs");
+              this.logParts.delete(log.body as object);
+            }
+            return;
+          }
           admitted = queued as ReadableLogRecord;
+          this.admitLogParts(log, queued);
           logs.onEmit(queued as Parameters<LogRecordProcessor["onEmit"]>[0]);
         } catch {
           if (admitted) this.finish("logs", [admitted]);
@@ -436,8 +569,20 @@ export class HueTransport {
           );
         }
       },
-      forceFlush: () => logs.forceFlush(),
-      shutdown: () => logs.shutdown(),
+      forceFlush: async () => {
+        try {
+          await logs.forceFlush();
+        } finally {
+          if (!this.sendingRecords.getStore()) await this.drainUploads();
+        }
+      },
+      shutdown: async () => {
+        try {
+          await logs.shutdown();
+        } finally {
+          await this.drainUploads();
+        }
+      },
     };
   }
 
@@ -475,11 +620,11 @@ export class HueTransport {
       // that export may upload is held whole instead, within the held-value budget.
       const valueUnits = this.limits.valueBytes + REDACTION_CONTEXT_UNITS;
       const hold =
-        signal === "traces" && !advisory && this.holdsValues()
+        !advisory && this.holdsValues()
           ? {
               valueBytes: this.limits.valueBytes,
-              budget: Math.max(0, MAX_HELD_BLOB_BYTES - this.heldBytes),
-              first: this.heldBytes === 0,
+              budget: this.heldRoom(),
+              first: this.heldBytes === 0 && !this.uploader?.pendingBytes(),
             }
           : undefined;
       const snapshot =
@@ -497,10 +642,13 @@ export class HueTransport {
               remaining,
               this.options.captureContent,
               valueUnits,
+              hold,
+              this.mediaMemo,
             );
       if (snapshot.cut.size) this.admissionCuts.set(snapshot.record, snapshot.cut);
       if (snapshot.digested.size) this.admissionDigests.set(snapshot.record, snapshot.digested);
       if (signal === "traces") this.admissionInspected.set(snapshot.record, snapshot.inspected);
+      if (snapshot.large.size) this.admissionLarge.set(snapshot.record, snapshot.large);
       if (snapshot.held) {
         this.heldBytes += snapshot.held;
         this.held.set(snapshot.record, snapshot.held);
@@ -625,6 +773,7 @@ export class HueTransport {
   finish(signal: Signal, records: RecordValue[]): void {
     for (const record of records) {
       this.releaseMedia(record);
+      this.logMedia.delete(record);
       const pending = signal === "traces" ? this.spans : this.logs;
       this.pendingBytes -= pending.get(record as ReadableSpan & ReadableLogRecord) ?? 0;
       pending.delete(record as ReadableSpan & ReadableLogRecord);
@@ -632,6 +781,12 @@ export class HueTransport {
       if (held) {
         this.heldBytes -= held;
         this.held.delete(record);
+      }
+      // Released whole above: the part its uploads took over stays charged to them.
+      const taken = this.heldByUploads.get(record);
+      if (taken) {
+        this.heldBytes += taken;
+        this.heldByUploads.delete(record);
       }
     }
   }
@@ -643,7 +798,7 @@ export class HueTransport {
 
   /** @internal Retain a defensive copy within the existing held-value budget. */
   stageMedia(span: ApiSpan, file?: MediaAttachment): boolean {
-    if (this.closed || !this.offloadsValues() || file?.bytes.byteLength === 0) return true;
+    if (this.closed || !this.offloadsValues() || (file && sizeOf(file.bytes) === 0)) return true;
     if (!file) {
       const tally = newTally();
       countFallback(tally, "budget", span.spanContext().traceId);
@@ -668,7 +823,7 @@ export class HueTransport {
     if (
       files.length >= 64 ||
       (!this.media.has(identity) && this.media.size >= 2048) ||
-      this.heldBytes + file.bytes.byteLength > MAX_HELD_BLOB_BYTES
+      heldBytesOf(file.bytes) > this.heldRoom()
     ) {
       this.uploadFallbacks++;
       this.issue(
@@ -681,21 +836,159 @@ export class HueTransport {
       );
       return false;
     }
-    const bytes = Uint8Array.from(file.bytes);
+    // A file read from disk as it is uploaded holds no bytes; bytes are copied, so a later change
+    // to the caller's buffer cannot alter what was recorded.
+    const bytes = isByteSource(file.bytes) ? file.bytes : Uint8Array.from(file.bytes);
     files.push({ ...file, bytes });
     this.media.set(identity, files);
-    if (!this.mediaOwners.has(identity)) {
-      const source = spanSource(span);
-      const token = {};
-      this.mediaOwners.set(identity, { source: new WeakRef(source), token });
-      this.mediaFinalizer.register(source, { identity, token }, token);
-      if (!this.mediaTimer) {
-        this.mediaTimer = setInterval(() => this.sweepMedia(), LIVE_SPAN_INTERVAL_MILLIS);
-        this.mediaTimer.unref();
-      }
-    }
-    this.heldBytes += bytes.byteLength;
+    this.ownMedia(span, identity);
+    this.heldBytes += heldBytesOf(bytes);
     return true;
+  }
+
+  /**
+   * @internal Stages the attachments placed in a span's `attribute`, replacing those an earlier
+   * value of the attribute placed: each is uploaded at export when its part survives there. A
+   * file that cannot be held is counted as not uploaded; it keeps its digest part.
+   */
+  stageParts(span: ApiSpan, attribute: string, files: MediaAttachment[]): void {
+    if (this.closed || !this.offloadsValues()) return;
+    const traceId = span.spanContext().traceId;
+    const identity = this.mediaIdentity(span)!;
+    const previous = this.media.get(identity);
+    if (previous?.some((file) => file.attribute === attribute)) {
+      const kept = previous.filter((file) => {
+        if (file.attribute !== attribute) return true;
+        this.heldBytes -= heldBytesOf(file.bytes);
+        return false;
+      });
+      if (kept.length) this.media.set(identity, kept);
+      else this.media.delete(identity);
+    }
+    const tally = newTally();
+    for (const file of files) {
+      if (!sizeOf(file.bytes)) continue;
+      const refused = this.uploader?.refusal();
+      if (!this.holdsValues() || refused) {
+        countFallback(tally, refused ?? "unsupported", traceId);
+        continue;
+      }
+      this.sweepMedia();
+      const staged = this.media.get(identity) ?? [];
+      if (
+        staged.length >= MAX_BLOB_ENTRIES ||
+        (!this.media.has(identity) && this.media.size >= 2048) ||
+        heldBytesOf(file.bytes) > this.heldRoom()
+      ) {
+        countFallback(tally, "budget", traceId);
+        continue;
+      }
+      // Attachment bytes are the attachment's own copy: held as they are.
+      staged.push({ ...file, attribute });
+      this.media.set(identity, staged);
+      this.heldBytes += heldBytesOf(file.bytes);
+      this.ownMedia(span, identity);
+    }
+    if (tally.fallbacks.size) this.reportOffload(tally);
+  }
+
+  /**
+   * @internal Stages the attachments placed in a log record's body until the record is emitted
+   * (`body` is the object passed to `emit`); {@link unstageLogParts} drops what no processor of
+   * this transport admitted.
+   */
+  stageLogParts(body: object, traceId: string, files: MediaAttachment[]): void {
+    if (this.closed || !this.offloadsValues()) return;
+    const tally = newTally();
+    const staged: MediaAttachment[] = [];
+    for (const file of files) {
+      if (!sizeOf(file.bytes)) continue;
+      const refused = this.uploader?.refusal();
+      if (!this.holdsValues() || refused) countFallback(tally, refused ?? "unsupported", traceId);
+      else if (staged.length >= MAX_BLOB_ENTRIES) countFallback(tally, "budget", traceId);
+      else staged.push({ ...file, attribute: "body" });
+    }
+    if (tally.fallbacks.size) this.reportOffload(tally, "logs");
+    if (staged.length) this.logParts.set(body, { traceId, files: staged });
+  }
+
+  /** @internal Drops a log record's staged attachments once it was emitted. */
+  unstageLogParts(body: object): void {
+    this.logParts.delete(body);
+  }
+
+  /** Holds the staged attachments of a log record being admitted with the queued record, within
+   * the held-value budget; those the budget refuses are counted as not uploaded. */
+  private admitLogParts(log: ReadableLogRecord, queued: RecordValue): void {
+    const body = log.body;
+    const pending =
+      body !== null && typeof body === "object" ? this.logParts.get(body as object) : undefined;
+    if (!pending) return;
+    this.logParts.delete(body as object);
+    const size = pending.files.reduce((total, file) => total + heldBytesOf(file.bytes), 0);
+    if (size > this.heldRoom()) {
+      const tally = newTally();
+      for (const _file of pending.files) countFallback(tally, "budget", pending.traceId);
+      this.reportOffload(tally, "logs");
+      return;
+    }
+    this.logMedia.set(queued, pending.files);
+    this.heldBytes += size;
+    this.held.set(queued, (this.held.get(queued) ?? 0) + size);
+  }
+
+  /** What the held-value budget has room for: values queued records hold and bytes unsettled
+   * uploads hold share it. */
+  private heldRoom(): number {
+    return Math.max(0, MAX_HELD_BLOB_BYTES - this.heldBytes - (this.uploader?.pendingBytes() ?? 0));
+  }
+
+  /** An upload `record`'s export queued, as it is queued: flushes and the processors wait for it
+   * from now on, and the `shared` bytes it holds of the record's own are charged to the upload
+   * alone, so the held-value budget never counts them twice while the export goes on. A charge
+   * `released` before the record is finished is handed back to the record, which still holds
+   * them. */
+  private uploadQueued(
+    record: RecordValue,
+    settled: Promise<void>,
+    shared: number,
+    released: Promise<void>,
+  ): void {
+    this.awaitUploads(settled);
+    const identity = this.mediaIdentity(record);
+    const staged = identity
+      ? (this.media.get(identity) ?? []).reduce((total, file) => total + heldBytesOf(file.bytes), 0)
+      : 0;
+    const taken = this.heldByUploads.get(record) ?? 0;
+    const moved = Math.min(shared, (this.held.get(record) ?? 0) + staged - taken);
+    if (moved <= 0) return;
+    this.heldBytes -= moved;
+    this.heldByUploads.set(record, taken + moved);
+    // Held weakly: a pending upload never keeps its finished record alive.
+    const queued = new WeakRef(record);
+    const handBack = () => {
+      const owner = queued.deref();
+      const still = owner && this.heldByUploads.get(owner);
+      if (!owner || !still) return;
+      const back = Math.min(moved, still);
+      this.heldBytes += back;
+      if (still > back) this.heldByUploads.set(owner, still - back);
+      else this.heldByUploads.delete(owner);
+    };
+    void released.then(handBack, handBack);
+  }
+
+  /** Registers a span whose staged files are released if it is never exported. */
+  private ownMedia(span: ApiSpan, identity: string): void {
+    if (this.mediaOwners.has(identity)) return;
+    const source = spanSource(span);
+    const token = {};
+    this.mediaOwners.set(identity, { source: new WeakRef(source), token });
+    this.mediaFinalizer.register(source, { identity, token }, token);
+    if (!this.mediaTimer) {
+      this.mediaTimer = setInterval(() => this.sweepMedia(), LIVE_SPAN_INTERVAL_MILLIS);
+      this.mediaTimer.unref();
+    }
   }
 
   private mediaIdentity(record: object): string | undefined {
@@ -732,7 +1025,7 @@ export class HueTransport {
     }
     const files = this.media.get(identity);
     if (!files) return;
-    for (const file of files) this.heldBytes -= file.bytes.byteLength;
+    for (const file of files) this.heldBytes -= heldBytesOf(file.bytes);
     this.media.delete(identity);
   }
 
@@ -752,8 +1045,10 @@ export class HueTransport {
     }
   }
 
-  /** @internal Staged requests are matched against surviving events before upload. */
+  /** @internal Staged requests are matched against surviving events and parts before upload. */
   mediaAttachments(record: RecordValue): MediaAttachment[] {
+    const logged = this.logMedia.get(record);
+    if (logged) return logged;
     const identity = this.mediaIdentity(record);
     return identity ? (this.media.get(identity) ?? []) : [];
   }
@@ -776,20 +1071,26 @@ export class HueTransport {
   }
 
   /** @internal Exporter callback: a redacted span with the values its redaction left to the
-   * upload step placed: uploaded and listed under `hue.blobs`, or cut as before. Never rejects. */
-  async offloadSpan(
-    span: ReadableSpan,
+   * upload step placed: listed under `hue.blobs` with their uploads queued (each added to `late`
+   * once it settles, and charged in place of the `queued` record it came from), or cut as before.
+   * Never rejects. */
+  async offloadSpan<T extends RecordValue>(
+    span: T,
     collector: OffloadCollector,
     upload: UploadContext,
     tally: OffloadTally,
-  ): Promise<ReadableSpan> {
-    let traceId = "";
-    try {
-      traceId = span.spanContext().traceId;
-    } catch {
-      // A span without a readable context cannot name its trace: its values are cut.
-    }
+    late: LateUploads,
+    queued: RecordValue,
+  ): Promise<T> {
+    // A record without a readable context cannot name its trace: its values are cut.
+    const traceId = recordTraceId(span);
     const valueBytes = this.limits.valueBytes;
+    // A record placed as a fallback counts its values there: its queued uploads are not added.
+    const own: LateUploads = {
+      tally: newTally(),
+      settled: [],
+      queued: (settled, shared, released) => this.uploadQueued(queued, settled, shared, released),
+    };
     try {
       if (!this.uploader) throw new Error("Uploads are unavailable");
       const attributes = await offloadAttributes(span.attributes, collector, {
@@ -799,7 +1100,10 @@ export class HueTransport {
         upload,
         tally,
         memo: this.mediaMemo,
+        background: own,
       });
+      if (own.settled.length)
+        late.settled.push(mergeWhenSettled(late.tally, own.tally, own.settled));
       return { ...span, attributes: attributes as Attributes };
     } catch {
       return {
@@ -816,17 +1120,64 @@ export class HueTransport {
     }
   }
 
+  /** @internal Exporter callback: a redacted log record with the media its redaction left to
+   * the upload step placed: its attributes' and its body's files listed under its own `hue.blobs`
+   * (keys `<attribute>#<pointer>`, `body#<pointer>`) with their uploads queued under the log
+   * record's trace (charged in place of the `queued` record); a file refused keeps its bytes
+   * inline, and the record is cut as before. Never rejects. */
+  async offloadLog(
+    log: ReadableLogRecord,
+    collector: OffloadCollector,
+    upload: UploadContext,
+    tally: OffloadTally,
+    late: LateUploads,
+    queued: RecordValue,
+  ): Promise<ReadableLogRecord> {
+    const traceId = log.spanContext?.traceId ?? "";
+    const valueBytes = this.limits.valueBytes;
+    const placed = (result: { attributes: Record<string, unknown>; body?: unknown }) => ({
+      ...log,
+      attributes: result.attributes as ReadableLogRecord["attributes"],
+      ...(collector.body ? { body: result.body as ReadableLogRecord["body"] } : {}),
+    });
+    const own: LateUploads = {
+      tally: newTally(),
+      settled: [],
+      queued: (settled, shared, released) => this.uploadQueued(queued, settled, shared, released),
+    };
+    try {
+      if (!this.uploader) throw new Error("Uploads are unavailable");
+      const result = await offloadRecord(log.attributes, collector, {
+        uploader: this.uploader,
+        traceId,
+        valueBytes,
+        upload,
+        tally,
+        memo: this.mediaMemo,
+        background: own,
+      });
+      if (own.settled.length)
+        late.settled.push(mergeWhenSettled(late.tally, own.tally, own.settled));
+      return placed(result);
+    } catch {
+      return placed(
+        fallbackRecord(log.attributes, collector, valueBytes, tally, traceId, this.mediaMemo),
+      );
+    }
+  }
+
   /** @internal Exporter callback: counts an export's uploads and reports each kind of fallback
-   * once, as a warning naming its traces: the values were exported, cut as before. */
-  reportOffload(tally: OffloadTally): void {
+   * once, as a warning naming its traces: the values were exported cut as before, or, `late`,
+   * their uploads failed after their records listed them. */
+  reportOffload(tally: OffloadTally, signal: Signal = "traces", late = false): void {
     this.uploaded += tally.uploaded;
     for (const [reason, { count, traceIds }] of tally.fallbacks) {
       this.uploadFallbacks += count;
       this.issue(
-        "traces",
+        signal,
         "warning",
         count,
-        FALLBACK_MESSAGES[reason],
+        (late ? LATE_FALLBACK_MESSAGES : FALLBACK_MESSAGES)[reason],
         undefined,
         traceIds.size && traceIds.size <= MAX_ISSUE_TRACE_IDS ? [...traceIds] : undefined,
       );
@@ -844,10 +1195,18 @@ export class HueTransport {
    * (`consumeDroppedRecords`): a root written again under retry says the same, and a root whose
    * request failed has not told Hue, so its count is not forgotten with it. */
   withDroppedRecords(span: ReadableSpan): ReadableSpan {
-    if (span.parentSpanContext) return span;
+    if (span.parentSpanContext || !this.marksDroppedRecords) return span;
     const count = this.droppedByTrace.get(span.spanContext().traceId);
     if (!count) return span;
     return { ...span, attributes: { ...span.attributes, [DROPPED_RECORDS_KEY]: count } };
+  }
+
+  /** @internal For an import that replays recorded spans: roots never carry the count of
+   * records this run did not deliver, so a later run that delivers them sends each root as it
+   * was first sent, which Hue keeps as an exact replay. The losses are still counted and
+   * reported. */
+  omitDroppedRecords(): void {
+    this.marksDroppedRecords = false;
   }
 
   /** @internal Exporter callback: these counts reached Hue on their traces' roots. Only what a
@@ -890,8 +1249,9 @@ export class HueTransport {
 
   /** @internal Ends every rate-limit hold now and refuses new ones, once a shutdown's caller has
    * stopped waiting: the held records are reported lost to the rate limit, and no timer of theirs
-   * keeps the process running for the receiver's `Retry-After`. Uploads in flight end too, and no
-   * other starts: their values are exported cut, as before uploads existed. */
+   * keeps the process running for the receiver's `Retry-After`. Queued and in-flight uploads end
+   * too, and no other starts: their records' entries stay and the uploads count as failed, and
+   * values not yet exported are exported cut, as before uploads existed. */
   releaseRateLimitHolds(): void {
     this.holdsReleased = true;
     for (const release of [...this.holds]) release();
@@ -1033,30 +1393,75 @@ export class HueTransport {
   }
 
   /**
-   * Waits for the processors' and exporters' in-flight work; drain the providers first.
+   * Waits for the processors' and exporters' in-flight work, then for the uploads their exports
+   * queued; drain the providers first. Only the sends are serialized: a flush sends its records
+   * once an earlier flush sent its own, never after that flush's uploads.
    *
    * @throws HueExportError when a new non-warning issue was recorded since the previous observation.
    */
   flush(): Promise<ExportReport> {
-    const from = this.observedSequence;
-    const next = (this.flushPromise ?? Promise.resolve()).then(
-      () => this.flushOnce(from),
-      () => this.flushOnce(from),
-    );
-    this.flushPromise = next;
-    const clear = () => {
-      if (this.flushPromise === next) this.flushPromise = undefined;
-    };
-    void next.then(clear, clear);
-    return next;
+    return this.flushRecords().report;
   }
 
-  private async flushOnce(from: number): Promise<ExportReport> {
-    const processors = await Promise.allSettled([
-      this.spanProcessor.forceFlush(),
-      this.logRecordProcessor.forceFlush(),
-    ]);
-    await Promise.all([this.traceExporter.forceFlush(), this.logExporter.forceFlush()]);
+  /**
+   * @internal A flush in two steps: its send settles `sent`, then it waits on its own for the
+   * uploads queued so far and settles `report` as {@link flush} does. `providers` (the client's
+   * provider flush) runs first, before the flush joins the transport's sends, so a hung borrowed
+   * provider never holds up the transport's own flushes. `sent` waits for it, though, and the
+   * client starts each flush once the previous one's `sent` settles: it holds up the client's
+   * later flushes.
+   */
+  flushRecords(providers?: () => Promise<void>): {
+    sent: Promise<unknown>;
+    report: Promise<ExportReport>;
+  } {
+    const from = this.observedSequence;
+    const join = () => this.sendRecords();
+    const sent = providers ? this.sendingRecords.run(true, providers).then(join, join) : join();
+    const report = sent.then(async (processors) => {
+      // Exports the processors did not start (a timer's, still in flight) queued uploads too.
+      await this.drainUploads();
+      return this.flushReport(from, processors);
+    });
+    return { sent, report };
+  }
+
+  /** Sends what the processors and exporters hold, once the previous flush's send ended. */
+  private sendRecords(): Promise<PromiseSettledResult<void>[]> {
+    const send = () =>
+      this.sendingRecords.run(true, async () => {
+        const processors = await Promise.allSettled([
+          this.spanProcessor.forceFlush(),
+          this.logRecordProcessor.forceFlush(),
+        ]);
+        await Promise.all([this.traceExporter.forceFlush(), this.logExporter.forceFlush()]);
+        return processors;
+      });
+    const sent = (this.sendPromise ?? Promise.resolve()).then(send, send);
+    this.sendPromise = sent;
+    const clear = () => {
+      if (this.sendPromise === sent) this.sendPromise = undefined;
+    };
+    void sent.then(clear, clear);
+    return sent;
+  }
+
+  /** @internal Exporter callback: an export's queued uploads, reported once they all settle. */
+  awaitUploads(report: Promise<void>): void {
+    // Never an unhandled rejection, whatever the report does.
+    const tracked = report.catch(() => {});
+    this.uploadReports.add(tracked);
+    void tracked.then(() => this.uploadReports.delete(tracked));
+    const earlier = this.uploadsSettled;
+    this.uploadsSettled = tracked.then(() => earlier);
+  }
+
+  /** Waits for the uploads queued so far; each ends within its lifetime, so this is bounded. */
+  private drainUploads(): Promise<void> {
+    return this.uploadsSettled;
+  }
+
+  private flushReport(from: number, processors: PromiseSettledResult<void>[]): ExportReport {
     for (const [index, result] of processors.entries())
       if (result.status === "rejected") {
         const signal = index === 0 ? "traces" : "logs";
@@ -1071,8 +1476,9 @@ export class HueTransport {
   }
 
   /**
-   * Flushes and stops the processors; records emitted afterwards are dropped and counted. In attach
-   * mode call it after shutting down the application's providers.
+   * Flushes and stops the processors, waits for queued uploads, then ends the uploader; records
+   * emitted afterwards are dropped and counted. In attach mode call it after shutting down the
+   * application's providers.
    *
    * @throws HueExportError when the final flush observed new failures.
    */
@@ -1087,8 +1493,12 @@ export class HueTransport {
           this.logRecordProcessor.shutdown(),
         ]);
         await Promise.allSettled([this.traceExporter.forceFlush(), this.logExporter.forceFlush()]);
+        await this.drainUploads();
         this.uploader?.close();
+        // The reports of uploads the close ended land before shutdown resolves.
+        await this.drainUploads();
         for (const identity of this.media.keys()) this.releaseMediaIdentity(identity);
+        this.logParts.clear();
         this.mediaMemo.clear();
       }
     })();
@@ -1236,6 +1646,11 @@ function shedContent(record: RecordValue, signal: Signal, shed: readonly Sheddab
   } as ReadableSpan;
 }
 
+/** Whether a trace id can name an upload's trace: 32 lowercase hex digits, not all zero. */
+function isUploadTraceId(traceId: unknown): boolean {
+  return typeof traceId === "string" && /^[0-9a-f]{32}$/.test(traceId) && !/^0+$/.test(traceId);
+}
+
 class ReportingExporter<T extends RecordValue> {
   private pending = new Set<Promise<void>>();
   constructor(
@@ -1287,7 +1702,28 @@ class ReportingExporter<T extends RecordValue> {
     return real;
   }
 
+  /** Places and sends the records; the uploads their placement queued are reported once they
+   * settle, after the records were sent, never awaited here. */
   private async exportRecords(records: T[]): Promise<void> {
+    const late: LateUploads = { tally: newTally(), settled: [] };
+    try {
+      await this.placeAndSend(records, late);
+    } finally {
+      if (late.settled.length) this.reportWhenSettled(late);
+    }
+  }
+
+  /** Reports an export's uploads once they all settle. Built apart from the export, so a pending
+   * upload never keeps the export's records alive. */
+  private reportWhenSettled(late: LateUploads): void {
+    this.transport.awaitUploads(
+      Promise.all(late.settled).then(() =>
+        this.transport.reportOffload(late.tally, this.signal, true),
+      ),
+    );
+  }
+
+  private async placeAndSend(records: T[], late: LateUploads): Promise<void> {
     // Completed records and placeholders travel in separate requests, completed records first,
     // so a rejection count is always one kind of record's. Placeholders are advisory: losing one
     // is a warning, never an export failure.
@@ -1321,21 +1757,18 @@ class ReportingExporter<T extends RecordValue> {
       }
     };
     const resourceDeadline = Date.now() + this.transport.options.timeoutMillis;
-    // How long this export has held its records for a rate-limited receiver, its value uploads'
-    // waits included.
+    // How long this export has held its records for a rate-limited receiver.
     const hold = { millis: 0 };
-    // A span's values over the inline limit are uploaded before it is measured, within the
-    // export's upload budget; a placeholder's never are.
+    // A span's values over the inline limit are hashed and placed before it is measured, within
+    // the export's hashing deadline; their uploads are queued, never awaited, and a placeholder's
+    // values never upload.
     const upload: UploadContext = {
       deadline: Date.now() + uploadBudgetMillis(this.transport.options.timeoutMillis),
-      wait: async (millis) => {
-        if (hold.millis + millis > MAX_RATE_LIMIT_HOLD_MILLIS) return false;
-        hold.millis += millis;
-        return this.transport.holdForRateLimit(millis);
-      },
+      wait: async () => false,
     };
     const tally = newTally();
-    const helpers = new Map<T, { files: MediaAttachment[]; baseline: string[] }>();
+    // Each record's attachments to upload once it is fitted, with the queued record holding them.
+    const helpers = new Map<T, { files: MediaAttachment[]; baseline: string[]; source: T }>();
     const placed: {
       record: T;
       markers?: Attributes;
@@ -1361,33 +1794,64 @@ class ReportingExporter<T extends RecordValue> {
             clearTimeout(timer);
           }
         }
+        const uploads = !markers && this.transport.offloadsValues();
+        // A log record's media upload under its own trace: one without a trace is not offered.
         const offload: OffloadCollector | undefined =
-          !markers && this.signal === "traces" && this.transport.offloadsValues()
-            ? { candidates: [], cut: [] }
+          uploads &&
+          (this.signal === "traces" ||
+            isUploadTraceId((record as ReadableLogRecord).spanContext?.traceId))
+            ? this.signal === "traces"
+              ? { candidates: [], cut: [] }
+              : { candidates: [], cut: [], log: true }
             : undefined;
         const redacted = this.redact(record, cache, offload);
-        const files = offload
-          ? survivingMedia(this.transport.mediaAttachments(record), redacted as ReadableSpan, tally)
+        let files = uploads
+          ? survivingMedia(this.transport.mediaAttachments(record), redacted, tally)
           : [];
-        placed.push({
-          record,
-          files,
-          ...(markers ? { markers } : {}),
-          redacted:
-            offload && (offload.candidates.length || offload.cut.length)
+        if (this.signal === "logs" && files.length) {
+          // A log record's attachments upload with the media its body holds, in the one step
+          // that places a log record's files; a record without a trace uploads none.
+          if (offload) offload.attachments = files;
+          else
+            for (let index = 0; index < files.length; index++)
+              countFallback(tally, "budget", recordTraceId(record));
+          files = [];
+        }
+        const offloaded =
+          offload &&
+          (offload.candidates.length ||
+            offload.cut.length ||
+            offload.body ||
+            offload.attachments?.length)
+            ? this.signal === "traces"
               ? (this.transport.offloadSpan(
                   redacted as ReadableSpan,
                   offload,
                   upload,
                   tally,
+                  late,
+                  record,
                 ) as Promise<T>)
-              : redacted,
+              : (this.transport.offloadLog(
+                  redacted as ReadableLogRecord,
+                  offload,
+                  upload,
+                  tally,
+                  late,
+                  record,
+                ) as Promise<T>)
+            : undefined;
+        placed.push({
+          record,
+          files,
+          ...(markers ? { markers } : {}),
+          redacted: offloaded ?? redacted,
         });
       } catch {
-        if (!markers && this.signal === "traces" && this.transport.offloadsValues()) {
+        if (!markers && this.transport.offloadsValues()) {
           const files = this.transport.mediaAttachments(record);
           for (let index = 0; index < files.length; index++)
-            countFallback(tally, "budget", (record as ReadableSpan).spanContext().traceId);
+            countFallback(tally, "budget", recordTraceId(record));
         }
         invalid(
           markers !== undefined,
@@ -1412,24 +1876,23 @@ class ReportingExporter<T extends RecordValue> {
           if (kept !== attributes) redacted = { ...redacted, attributes: kept };
         }
         if (files.length) {
-          const span = redacted as ReadableSpan;
-          const listed = span.attributes[BLOBS_KEY];
+          const listed: unknown = redacted.attributes[BLOBS_KEY];
           const baseline = Array.isArray(listed)
             ? listed.filter((entry): entry is string => typeof entry === "string")
             : [];
           retained = files.slice(0, Math.max(0, MAX_BLOB_ENTRIES - baseline.length));
           for (let index = retained.length; index < files.length; index++)
-            countFallback(tally, "budget", span.spanContext().traceId);
+            countFallback(tally, "budget", recordTraceId(redacted));
           if (retained.length) {
-            // Fit the event and its reference together before sending customer bytes.
+            // Fit the event or part and its reference together before sending customer bytes.
             redacted = {
               ...redacted,
               attributes: {
-                ...span.attributes,
+                ...redacted.attributes,
                 [BLOBS_KEY]: [...baseline, ...retained.map(mediaEntry)],
               },
             };
-            helpers.set(redacted, { files: retained, baseline });
+            helpers.set(redacted, { files: retained, baseline, source: record });
           }
         }
         const bytes =
@@ -1444,7 +1907,7 @@ class ReportingExporter<T extends RecordValue> {
         (markers ? pending : real).push(redacted);
       } catch {
         for (let index = 0; index < retained.length; index++)
-          countFallback(tally, "budget", (record as ReadableSpan).spanContext().traceId);
+          countFallback(tally, "budget", recordTraceId(record));
         invalid(
           markers !== undefined,
           "Telemetry record could not be redacted or exceeds supported content limits",
@@ -1595,25 +2058,26 @@ class ReportingExporter<T extends RecordValue> {
       // is written, so a root carries the losses of children that ended after it.
       const admitted: {
         fitted: { record: T; bytes: number };
-        attachments?: { span: ReadableSpan; files: MediaAttachment[] };
+        attachments?: { record: T; files: MediaAttachment[]; source: T };
       }[] = [];
       for (const record of accepted) {
         let fitted: { record: T; bytes: number } | undefined;
-        let attachments: { span: ReadableSpan; files: MediaAttachment[] } | undefined;
+        let attachments: { record: T; files: MediaAttachment[]; source: T } | undefined;
         const helper = helpers.get(record);
         let remaining = helper?.files ?? [];
         try {
           fitted = await fit(record);
           if (fitted && helper) {
-            const span = fitted.record as ReadableSpan;
-            const matched = survivingMedia(remaining, span, tally);
+            const fittedRecord = fitted.record;
+            const traceId = recordTraceId(fittedRecord);
+            const matched = survivingMedia(remaining, fittedRecord, tally, record);
             remaining = matched;
-            const listed = span.attributes[BLOBS_KEY];
+            const listed = fittedRecord.attributes[BLOBS_KEY];
             const entries = Array.isArray(listed) ? [...listed] : [];
             const files = matched.filter((file) => {
               const index = entries.indexOf(mediaEntry(file), helper.baseline.length);
               if (index < 0) {
-                countFallback(tally, "budget", span.spanContext().traceId);
+                countFallback(tally, "budget", traceId);
                 return false;
               }
               entries.splice(index, 1);
@@ -1621,43 +2085,51 @@ class ReportingExporter<T extends RecordValue> {
             });
             remaining = files;
             // Drop provisional entries, retaining only the original references after fitting.
-            const attributes = { ...span.attributes };
+            const attributes = { ...fittedRecord.attributes };
             if (Array.isArray(listed)) {
               const baseline = listed.slice(0, helper.baseline.length);
               if (baseline.length) attributes[BLOBS_KEY] = baseline;
               else delete attributes[BLOBS_KEY];
             }
-            attachments = { span: { ...span, attributes }, files };
+            attachments = {
+              record: { ...fittedRecord, attributes } as T,
+              files,
+              source: helper.source,
+            };
             remaining = [];
           }
         } catch {
           for (let index = 0; index < remaining.length; index++)
-            countFallback(tally, "budget", (record as ReadableSpan).spanContext().traceId);
+            countFallback(tally, "budget", recordTraceId(record));
           invalid(advisory, "Telemetry record could not be serialized", record);
           continue;
         }
         if (!fitted) {
           for (let index = 0; index < remaining.length; index++)
-            countFallback(tally, "budget", (record as ReadableSpan).spanContext().traceId);
+            countFallback(tally, "budget", recordTraceId(record));
           invalid(advisory, OVER_REQUEST_LIMIT, record);
           continue;
         }
         admitted.push({ fitted, attachments });
       }
-      // Decide every event/reference admission before starting helper uploads. The shared
-      // uploader's four workers place files across spans under the same upload deadline.
+      // Decide every event/reference admission before queueing helper uploads: a file fitting
+      // removed is never uploaded. Their entries are written again as the fitted record listed
+      // them, and the files upload after the records are sent.
       const placed = await Promise.all(
         admitted.map(async ({ fitted, attachments }) => {
           if (!attachments) return fitted;
           try {
             const uploaded = await this.transport.offloadSpan(
-              attachments.span,
+              attachments.record,
               { candidates: [], cut: [], attachments: attachments.files },
               upload,
               tally,
+              late,
+              attachments.source,
             );
             measured.delete(fitted.record);
-            // Actual references can differ when an existing object supplies its media type.
+            // The entries name each file's own type, as the fitted record's did; a file refused
+            // when queued leaves its entry out, so the record is measured again, cheaply.
             const final = await probe(uploaded as T);
             if (final?.request) measured.set(final.record, final.request);
             if (!final) invalid(advisory, OVER_REQUEST_LIMIT, fitted.record);
@@ -1668,9 +2140,10 @@ class ReportingExporter<T extends RecordValue> {
           }
         }),
       );
-      // Preparation includes explicit file uploads. Report their outcome once, before delivery
-      // failures can consume the diagnostic callback's rate-limit slot. Placeholders never upload.
-      if (!advisory) this.transport.reportOffload(tally);
+      // Values refused when their records were placed are reported once, before delivery failures
+      // can consume the diagnostic callback's rate-limit slot; queued uploads are reported once
+      // they settle. Placeholders never upload.
+      if (!advisory) this.transport.reportOffload(tally, this.signal);
       let batch: T[] = [];
       let batchBytes = 0;
       for (const fitted of placed) {
@@ -2054,12 +2527,13 @@ class OtlpHttpTransport implements IExporterTransport {
     try {
       if (this.aborted) throw new Error("Hue export deadline exceeded");
       const url = new URL(this.url);
-      const protocol = url.protocol;
       // Loaded on first use, as OpenTelemetry's exporter does, so importing Hue never loads http
-      // before the application's http instrumentation can patch it. A request measured before it
-      // was sent is not compressed again.
+      // before the application's http instrumentation can patch it. Each specifier is a literal:
+      // bundlers (Next.js Turbopack, webpack) cannot resolve a computed one and replace the import
+      // with a throw, so every export would fail. A request measured before it was sent is not
+      // compressed again.
       const [{ Agent: ConnectionAgent, request }, body] = await Promise.all([
-        import(protocol === "https:" ? "node:https" : "node:http"),
+        url.protocol === "https:" ? import("node:https") : import("node:http"),
         this.body && data === this.body.data ? this.body.compressed : compress(data),
       ]);
       if (this.aborted) throw new Error("Hue export deadline exceeded");

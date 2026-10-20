@@ -5,7 +5,7 @@ import { request as httpsRequest } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
 import { resolve } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
-import { HUE_CONTROL_PLANE_VARIABLES } from "../environment/world.js";
+import { HUE_CONTROL_PLANE_VARIABLES } from "../world/world.js";
 import { scrubCredentialText } from "../tool-definitions.js";
 import { sdkVersion } from "../version.js";
 import { envFileArgument, envFileOptions } from "./env-file.js";

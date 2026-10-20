@@ -1,5 +1,5 @@
 import { HueConnectionError } from "../client.js";
-import { HueEnvironmentError } from "../environment/client.js";
+import { HueEnvironmentError } from "../world/client.js";
 import { HueApiError } from "./client.js";
 
 /**

@@ -1,9 +1,9 @@
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
-import { isTransientEnvironmentError, type EnvironmentClient } from "../environment/client.js";
-import type { EnvironmentTool } from "../environment/tools.js";
-import type { WorldHandoff } from "../environment/types.js";
+import { isTransientEnvironmentError, type EnvironmentClient } from "../world/client.js";
+import type { EnvironmentTool } from "../world/tools.js";
+import type { WorldHandoff } from "../world/types.js";
 import type {
   ActualAgentManifestInputV2,
   AttemptConnectionBundleV2,
@@ -243,6 +243,12 @@ export interface RunLocalAgentOptions {
     inputs: JsonValue,
     context: LocalAgentDirectContext,
   ): JsonValue | TargetResult | undefined | Promise<JsonValue | TargetResult | undefined>;
+  /** Called after outputs upload, before queue completion. A failure stops the worker with
+   * its claim intact. A resumed claim may repeat this callback without invoking the agent. */
+  onUploaded?(
+    report: RunnerReport,
+    claim: LocalAgentClaim & { workerId: string },
+  ): void | Promise<void>;
   /** Called after the experiment and queue completion are acknowledged. */
   onCompleted?(report: RunnerReport): void | Promise<void>;
 }
@@ -471,6 +477,7 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
       );
       let experimentFinished = false;
       let queueCompleted = false;
+      let handoffFailed = false;
       try {
         const requested = requestedConfiguration
           ? pinRequestedAttemptV2(
@@ -538,6 +545,12 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
         // queue completion fails, leave the claim intact for checkpointed recovery instead of
         // rewriting a successful experiment as an agent failure.
         experimentFinished = true;
+        try {
+          await options.onUploaded?.(report, { ...claim, workerId });
+        } catch (error) {
+          handoffFailed = true;
+          throw error;
+        }
         await options.client.completeLocalAgentRun({
           runId: claim.runId,
           workerId,
@@ -550,7 +563,7 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
       } catch (error) {
         // The run is completed in the queue: a failure after that is the caller's own
         // (`onCompleted` threw) and is thrown as itself, not reported as a retry that cannot be.
-        if (queueCompleted) throw error;
+        if (queueCompleted || handoffFailed) throw error;
         if (experimentFinished && error instanceof HueApiError && error.status === 409) {
           // The experiment finished, but Hue no longer accepts this worker's completion: the
           // run was released or cancelled meanwhile. Its outcome is recorded; nothing to resume.

@@ -241,8 +241,11 @@ export interface RunExperimentOptions extends RunnerOptions {
   signal?: AbortSignal;
   /** Rerun, as a new attempt, a case that a process which died on this machine left running.
    * Only for targets that give every attempt a fresh world: elsewhere the dead run's agent may
-   * still be acting, so such a case stays uncertain. */
-  rerunCrashedCases?: boolean;
+   * still be acting, so such a case stays uncertain. A predicate decides per frozen case, for a
+   * target that gives a fresh world only to the cases that pin one: those rerun, the others stay
+   * uncertain. The crash is recorded in the case's checkpoint before the case is read, so a read
+   * that fails leaves the decision to the next invocation. */
+  rerunCrashedCases?: boolean | ((item: ExperimentCase) => boolean);
   /** Experiment to run; its dataset version must be frozen. */
   experimentId: string;
   /** Whether each case waits for acknowledged trace export or explicitly omits evidence. Required. */
@@ -418,7 +421,15 @@ type CaseCheckpoint =
   | Prepared
   | Uploading
   | { stage: "starting"; startKey: string; traceExternalId: string; previousExecutionId?: string }
-  | { stage: "running" | "serialization_failed"; executionId: string; attempt?: string }
+  // `crashed`: a process that died on this machine left the case running; recorded for every such
+  // case by the run that reclaimed its lock (or the next one, from the sweep record it leaves),
+  // before anything is read, so the recovery decision survives a failed read, write or run.
+  | {
+      stage: "running" | "serialization_failed";
+      executionId: string;
+      attempt?: string;
+      crashed?: boolean;
+    }
   // The caller's signal stopped the target: the next run retries the case with a new attempt.
   | { stage: "interrupted"; executionId: string; attempt?: string };
 
@@ -715,6 +726,23 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       .map((version) => version.id),
   };
   try {
+    // A run that reclaimed a dead process's lock first records that a crash sweep is due, then
+    // marks every case that process left running as crashed, before anything else happens and
+    // under the same release as the rest. The record outlives this run: a sweep that stops part
+    // way (a write the disk refuses) is finished by the next run, which holds no reclaimed lock
+    // but reads the record, so each case's recovery decision survives, and a failure further on
+    // (a case read Hue refuses stops the run) leaves it to the next run the same way.
+    const sweep = "crash-sweep";
+    if (store.reclaimed) await store.write(sweep, { pending: true });
+    if ((await store.read<{ pending: boolean }>(sweep))?.pending) {
+      for (const item of items) {
+        const file = `case-${uuid(item.id)}`;
+        const checkpoint = await store.read<CaseCheckpoint>(file).catch(() => undefined);
+        if (checkpoint?.stage === "running" && !checkpoint.crashed)
+          await store.write(file, { ...checkpoint, crashed: true });
+      }
+      await store.write(sweep, { pending: false });
+    }
     const filesRoot = resolve(options.filesDirectory ?? join(options.checkpointDirectory, "files"));
     const sanitize = (message: string) =>
       message.slice(0, 4000).toWellFormed().replaceAll("\u0000", "");
@@ -810,9 +838,10 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     // A retry gets its own, so an agent a dead run left behind cannot write into it.
     const worldDirectoryOf = (itemId: string, attempt?: string) =>
       join(filesRoot, `world-case-${uuid(itemId)}${attempt ? `-${uuid(attempt)}` : ""}`);
+    const directDirectoryOf = (itemId: string) => join(filesRoot, `case-${uuid(itemId)}`);
     const runCase = async (item: (typeof items)[number], files: CaseFiles) => {
       const file = `case-${uuid(item.id)}`;
-      const directDirectory = join(filesRoot, `case-${uuid(item.id)}`);
+      const directDirectory = directDirectoryOf(item.id);
       const caseDirectoryOf = (frozen: ExperimentCase) =>
         frozen.environmentVersionId ? files.directory : directDirectory;
       let checkpoint: CaseCheckpoint | undefined;
@@ -827,10 +856,21 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       files.keepOutputs = checkpoint?.stage === "uploading";
       if (checkpoint && "attempt" in checkpoint)
         files.directory = worldDirectoryOf(item.id, checkpoint.attempt);
+      // The frozen case, read once per case: the crash decision below and the start need it.
+      let frozen: ExperimentCase | undefined;
+      const frozenCaseOf = async () =>
+        (frozen ??= await options.client.getExperimentCase(experiment.id, item.id));
       let retryOf: string | undefined;
-      // A case left running by a process that died here is as interrupted as one the caller
-      // stopped; a fresh world isolates it from anything the dead run's agent still does.
-      if (checkpoint?.stage === "running" && store.reclaimed && options.rerunCrashedCases) {
+      // A case left running by a process that died here (recorded above, before anything was
+      // read) is as interrupted as one the caller stopped; a fresh world isolates it from
+      // anything the dead run's agent still does.
+      if (
+        checkpoint?.stage === "running" &&
+        checkpoint.crashed &&
+        options.rerunCrashedCases &&
+        (typeof options.rerunCrashedCases !== "function" ||
+          options.rerunCrashedCases(structuredClone(await frozenCaseOf())))
+      ) {
         checkpoint = { ...checkpoint, stage: "interrupted" };
         await store.write(file, checkpoint);
       }
@@ -861,7 +901,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         // second invocation. Metadata-only mode discarded the output, so its outcome is lost.
         if (checkpoint.hasOutput && checkpoint.output === undefined)
           throw new UncertainExecutionError(item.id, checkpoint.executionId);
-        const frozenCase = await options.client.getExperimentCase(experiment.id, item.id);
+        const frozenCase = await frozenCaseOf();
         checkpoint = await prepare(
           file,
           checkpoint,
@@ -875,7 +915,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         if (options.signal?.aborted) throw new TargetCancelledError();
         if (item.execution && item.execution.id !== retryOf)
           throw new UncertainExecutionError(item.id, item.execution.id);
-        const frozenCase = await options.client.getExperimentCase(experiment.id, item.id);
+        const frozenCase = await frozenCaseOf();
         if (frozenCase.datasetVersionId !== version.id)
           throw new Error("Case is not from the pinned dataset version");
         // Validate before creating a remote execution. SDK/input failures are not
@@ -903,119 +943,135 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         const outputDirectory = join(caseDirectory, "work");
         await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
         const failureSequenceBefore = options.hue.transport.getFailureSequence();
-        checkpoint = await options.hue.withSpan(
-          "hue.experiment.case",
-          async (span): Promise<Prepared> => {
-            const start = {
-              stage: "starting" as const,
-              startKey: randomUUID(),
-              traceExternalId: span.traceId,
-              ...(retryOf ? { previousExecutionId: retryOf } : {}),
-            };
-            await store.write(file, start);
-            const execution = await options.client.startExecution(experiment.id, item.id, {
-              idempotencyKey: start.startKey,
-              traceExternalId: span.traceId,
-              ...retry(retryOf),
-            });
-            const attempt = retryOf ? { attempt: retryOf } : {};
-            await store.write(file, { stage: "running", executionId: execution.id, ...attempt });
-            let state: TerminalState = "succeeded";
-            let output: JsonValue | undefined;
-            let generated: TargetResult["files"] | undefined;
-            let targetError: unknown;
-            try {
-              const result = await options.target(targetInputs, {
-                config: targetConfig,
-                item: structuredClone(frozenCase),
-                span,
-                executionId: execution.id,
-                files: structuredClone(inputFiles),
-                outputDirectory,
+        let outcome: Uploading | undefined;
+        try {
+          checkpoint = await options.hue.withSpan(
+            "hue.experiment.case",
+            async (span): Promise<Prepared> => {
+              const start = {
+                stage: "starting" as const,
+                startKey: randomUUID(),
+                traceExternalId: span.traceId,
+                ...(retryOf ? { previousExecutionId: retryOf } : {}),
+              };
+              await store.write(file, start);
+              const execution = await options.client.startExecution(experiment.id, item.id, {
+                idempotencyKey: start.startKey,
+                traceExternalId: span.traceId,
+                ...retry(retryOf),
               });
-              if (result instanceof TargetResult) {
-                output = result.output;
-                generated = result.files;
-              } else output = result;
-            } catch (error) {
-              if (error instanceof TargetOutcomeUncertainError) throw error;
-              // A stop the caller asked for is no outcome: the execution stays open for the
-              // resumed run to replace instead of being scored as cancelled.
-              if (error instanceof TargetCancelledError && options.signal?.aborted) {
-                options.hue.recordError(span.span, error);
-                await store.write(file, {
-                  stage: "interrupted",
+              const attempt = retryOf ? { attempt: retryOf } : {};
+              await store.write(file, { stage: "running", executionId: execution.id, ...attempt });
+              let state: TerminalState = "succeeded";
+              let output: JsonValue | undefined;
+              let generated: TargetResult["files"] | undefined;
+              let targetError: unknown;
+              try {
+                const result = await options.target(targetInputs, {
+                  config: targetConfig,
+                  item: structuredClone(frozenCase),
+                  span,
                   executionId: execution.id,
-                  ...attempt,
+                  files: structuredClone(inputFiles),
+                  outputDirectory,
                 });
-                throw error;
-              }
-              state = error instanceof TargetCancelledError ? "cancelled" : "error";
-              targetError = error;
-              options.hue.recordError(span.span, error);
-            }
-            // Output validation is outside the target catch: a successful target never becomes an agent error because upload serialization failed.
-            if (output !== undefined) {
-              try {
-                output = json(output);
+                if (result instanceof TargetResult) {
+                  output = result.output;
+                  generated = result.files;
+                } else output = result;
               } catch (error) {
-                // An output over the size, count or depth bounds is the target's own failure, as
-                // a file it cannot deliver is: the case completes as an error and the run goes
-                // on. Output that is not JSON at all still stops the run for inspection.
-                const limit =
-                  error instanceof RangeError ? outputLimits.get(error.message) : undefined;
-                if (limit === undefined) {
+                if (error instanceof TargetOutcomeUncertainError) throw error;
+                // A stop the caller asked for is no outcome: the execution stays open for the
+                // resumed run to replace instead of being scored as cancelled.
+                if (error instanceof TargetCancelledError && options.signal?.aborted) {
+                  options.hue.recordError(span.span, error);
                   await store.write(file, {
-                    stage: "serialization_failed",
+                    stage: "interrupted",
                     executionId: execution.id,
+                    ...attempt,
                   });
-                  throw new OutcomeSerializationError(execution.id);
+                  throw error;
                 }
-                state = "error";
-                output = undefined;
-                targetError = new OutputTooLargeError(limit);
-                options.hue.recordError(span.span, targetError);
-              }
-            }
-            if (output !== undefined) span.setOutput(output);
-            let staged: StagedOutputFile[] = [];
-            // An empty declared list (a direct case answered only through stdout, or
-            // `withFiles(output, [])`) means no generated files, not a missing-files error.
-            if (generated !== undefined && generated.length > 0 && state === "succeeded") {
-              try {
-                staged = await stageOutputFiles(generated, join(caseDirectory, "outputs"));
-              } catch (error) {
-                // Files the target declared but did not deliver are its own failure; the
-                // outcome is still saved instead of leaving the execution uncertain.
-                if (!(error instanceof OutputFileError)) throw error;
-                state = "error";
+                state = error instanceof TargetCancelledError ? "cancelled" : "error";
                 targetError = error;
                 options.hue.recordError(span.span, error);
               }
-            }
-            const uploading: Uploading = {
-              stage: "uploading",
-              executionId: execution.id,
-              trace: { traceId: span.traceId, spanId: span.spanId },
-              state,
-              hasOutput: output !== undefined,
-              ...(options.persistResultContent && output !== undefined ? { output } : {}),
-              ...(state === "error" ? { error: errorPayload(targetError) } : {}),
-              files: staged,
-              ...attempt,
-            };
-            // Without persisted result content a restart cannot reconstruct the outcome; the
-            // saved stage then reports the execution as uncertain instead of guessing.
-            files.keepOutputs = true;
-            await store.write(file, uploading);
-            return prepare(file, uploading, frozenCase, caseDirectory, output);
-          },
-          {
-            parentContext: ROOT_CONTEXT,
-            input: frozenCase.inputs,
-            attributes: { "hue.experiment.id": experiment.id, "hue.dataset.case.id": item.id },
-          },
-        );
+              // Output validation is outside the target catch: a successful target never becomes an agent error because upload serialization failed.
+              if (output !== undefined) {
+                try {
+                  output = json(output);
+                } catch (error) {
+                  // An output over the size, count or depth bounds is the target's own failure, as
+                  // a file it cannot deliver is: the case completes as an error and the run goes
+                  // on. Output that is not JSON at all still stops the run for inspection.
+                  const limit =
+                    error instanceof RangeError ? outputLimits.get(error.message) : undefined;
+                  if (limit === undefined) {
+                    await store.write(file, {
+                      stage: "serialization_failed",
+                      executionId: execution.id,
+                    });
+                    throw new OutcomeSerializationError(execution.id);
+                  }
+                  state = "error";
+                  output = undefined;
+                  targetError = new OutputTooLargeError(limit);
+                  options.hue.recordError(span.span, targetError);
+                }
+              }
+              if (output !== undefined) span.setOutput(output);
+              let staged: StagedOutputFile[] = [];
+              // An empty declared list (a direct case answered only through stdout, or
+              // `withFiles(output, [])`) means no generated files, not a missing-files error.
+              if (generated !== undefined && generated.length > 0 && state === "succeeded") {
+                try {
+                  staged = await stageOutputFiles(generated, join(caseDirectory, "outputs"));
+                } catch (error) {
+                  // Files the target declared but did not deliver are its own failure; the
+                  // outcome is still saved instead of leaving the execution uncertain.
+                  if (!(error instanceof OutputFileError)) throw error;
+                  state = "error";
+                  targetError = error;
+                  options.hue.recordError(span.span, error);
+                }
+              }
+              const uploading: Uploading = {
+                stage: "uploading",
+                executionId: execution.id,
+                trace: { traceId: span.traceId, spanId: span.spanId },
+                state,
+                hasOutput: output !== undefined,
+                ...(options.persistResultContent && output !== undefined ? { output } : {}),
+                ...(state === "error" ? { error: errorPayload(targetError) } : {}),
+                files: staged,
+                ...attempt,
+              };
+              // Without persisted result content a restart cannot reconstruct the outcome; the
+              // saved stage then reports the execution as uncertain instead of guessing.
+              files.keepOutputs = true;
+              await store.write(file, uploading);
+              outcome = uploading;
+              return prepare(file, uploading, frozenCase, caseDirectory, output);
+            },
+            {
+              parentContext: ROOT_CONTEXT,
+              input: frozenCase.inputs,
+              attributes: { "hue.experiment.id": experiment.id, "hue.dataset.case.id": item.id },
+            },
+          );
+        } catch (error) {
+          // A failure after the outcome was saved (fetching the scorers' files, uploading the
+          // target's files): the root has ended, so the count of spans the case ended is saved with
+          // the outcome, and a resume holds the trace's receipt to it before completing.
+          const spans = outcome?.trace
+            ? options.hue.transport.spansEnded?.(outcome.trace.traceId)
+            : undefined;
+          if (outcome?.trace && spans !== undefined) {
+            outcome.trace.spans = spans;
+            await store.write(file, outcome);
+          }
+          throw error;
+        }
         files.keepOutputs = false;
         // End root before waiting for both OTLP signals. Export failure leaves the prepared checkpoint intact.
         let exportError: Error | undefined;
@@ -1209,9 +1265,14 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     await pool(items, concurrency, async (item) => {
       // A world case's directory goes however the case ends, a forced exit included. An
       // interrupted upload keeps only the staged outputs it resumes from; inputs are downloaded
-      // anew for scoring. A direct case has no such directory, so nothing is removed for it.
+      // anew for scoring. A direct case's directory stays for inspection, except the scorers'
+      // copies of evaluator-only files, which go too, so no later case's target finds them.
       const files: CaseFiles = { keepOutputs: true, directory: worldDirectoryOf(item.id) };
-      const untrack = onForcedExit(() => releaseWorldFilesSync(files.directory, files.keepOutputs));
+      const evaluatorInputs = join(directDirectoryOf(item.id), "evaluator-inputs");
+      const untrack = onForcedExit(() => {
+        releaseWorldFilesSync(files.directory, files.keepOutputs);
+        rmSync(evaluatorInputs, { recursive: true, force: true });
+      });
       try {
         await runCase(item, files);
         await releaseWorldFiles(files.directory, false);
@@ -1219,6 +1280,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         await releaseWorldFiles(files.directory, files.keepOutputs);
         throw error;
       } finally {
+        await removeCaseFiles(evaluatorInputs);
         untrack();
       }
     });

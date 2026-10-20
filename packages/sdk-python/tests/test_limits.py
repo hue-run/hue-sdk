@@ -8,6 +8,7 @@ import os
 import time
 
 import pytest
+from conftest import learn_no_upload_route
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.trace import Link, set_span_in_context
@@ -64,6 +65,8 @@ def test_advertised_limits_are_adopted_from_any_response_clamped_and_never_excee
         with hue.span("first"):
             pass
         assert hue.force_flush()
+        # A receiver without the upload route (the loopback receiver) gets values cut.
+        learn_no_upload_route(hue)
         span = hue.tracer.start_span("capped")
         span.set_attribute("output.value", "v" * (300 * 1024))
         span.end()
@@ -168,6 +171,8 @@ def test_a_2_mb_input_is_kept_cut_to_the_value_cap_and_listed(receiver):
     with Hue(
         receiver.url, KEY, capture_content=True, tracer_provider=provider, live_spans=False
     ) as hue:
+        # A receiver without the upload route (the loopback receiver) gets values cut.
+        learn_no_upload_route(hue)
         # A third-party instrumentation's 2 MB input, once a record over 1 MiB dropped whole.
         span = provider.get_tracer("openinference").start_span("llm")
         span.set_attribute("input.value", "é" * 1_000_000)

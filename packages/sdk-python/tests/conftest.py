@@ -61,6 +61,17 @@ class Receiver:
         return result
 
 
+def learn_no_upload_route(hue) -> None:
+    """Has the client learn that its receiver lacks the upload route, as the loopback receiver
+    does: a value over the cap is listed when its span is exported and its reservation then
+    finds no route, which the flush waits for. From then on the redactor's view is bounded by
+    four value caps again, and values over the cap are cut when they are queued."""
+    learning = hue.tracer.start_span("learns the receiver lacks uploads")
+    learning.set_attribute("custom.blob", "u" * (1024 * 1024 + 1))
+    learning.end()
+    assert hue.force_flush()
+
+
 @pytest.fixture
 def receiver():
     state = Receiver()

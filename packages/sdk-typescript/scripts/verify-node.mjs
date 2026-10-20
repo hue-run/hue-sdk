@@ -171,9 +171,16 @@ try {
       assert.equal(result.receipt.spanCount, requestSpans.length);
       assert.deepEqual(result.receipt.matchedSpanIds, expectedSpanIds);
     }
+    // A trace the server reports missing names the project the key searched.
     assert.deepEqual(await verifier.verifyTrace("f".repeat(32), { timeoutMillis: 100 }), {
       verified: false,
       receipt: null,
+      project: {
+        id: "synthetic-node-project",
+        name: "Node package verification",
+        organizationId: "synthetic-org",
+        slug: "node-verification",
+      },
     });
   } finally {
     await verifier.shutdown();

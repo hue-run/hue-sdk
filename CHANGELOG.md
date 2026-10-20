@@ -22,6 +22,211 @@ refuses to publish a version without a matching entry below.
   as in `withSpan`. The calling agent's role stays explicit: set `hue.agent.role` `orchestrator`
   on its own span to label it.
 
+### [0.20.8] - 2026-10-19
+
+#### Fixed
+
+- Exports work when a framework bundles the SDK into its server, as Next.js (Turbopack and
+  webpack) does by default. The transport loaded `node:http` or `node:https` through one dynamic
+  import with a computed specifier, which bundlers replace with a throw, so every export failed
+  with `Hue telemetry request failed` and no status while plain Node was unaffected. Both modules
+  are now literal imports, and the package verifier rejects a computed specifier in any module an
+  application bundles. `serverExternalPackages` is no longer needed.
+
+#### Changed
+- `hue login` prints next steps that fit the repository: `hue mcp install --client` names the one client whose configuration the root holds (`.mcp.json` or `.claude`, `.cursor`, `.vscode`, `.codex`, `.gemini`, `.windsurf`) and otherwise lists the clients; the `hue eval` hint shows `./hue-agent.ts` for a TypeScript repository, `--command` for a Python one and nothing when the language is unknown.
+- The optional Vercel AI SDK peers widen to `ai@^6.0.0 || ^7.0.0` and `@ai-sdk/otel@^1.0.0`. `hueTelemetry` uses only the per-call `integrations` option and `OpenTelemetry({ tracer, usage })`, present since `ai@7.0.0` / `@ai-sdk/otel@1.0.0`, so apps on other AI SDK 7 patch releases no longer get peer warnings. The installed-package tests still run the `7.0.99 / 1.0.99` and `7.0.100 / 1.0.100` pairs.
+- `verifyTrace` adds `project` to a result without a receipt once Hue reports the trace missing: the project the key searched (`checkConnection()` shape), so a key for another project is told apart from a trace that is not stored yet. `verified` and `receipt` are unchanged.
+- `hue login` warns on stderr when the shell already exports a different `HUE_API_KEY`, naming the project each key resolves to and never the keys: loaders such as `uv run --env-file` and dotenv keep the exported value over the env file.
+
+### [0.20.7] - 2026-10-18
+
+#### Changed
+
+- `hue traces import prepare` matches the import limits current servers accept: one import takes
+  up to 25,000 traces (was 10,000), a trace up to 512 batches (was 64) and 10,000 large values
+  (was 1,000), and the manifest up to 32 MiB decoded (was 8 MiB). A manifest over 4 MiB
+  compressed, the most a registration takes, is refused by `prepare` and by `upload` before
+  anything is sent. The import authorization `prepare_trace_import` returns now lasts a day (was an
+  hour); renewal, spans per trace, batch size, two requests at a time and the import's week are
+  unchanged.
+
+### [0.20.6] - 2026-10-18
+
+#### Added
+
+- **Wire** `hue import langfuse` also sends the environment Langfuse recorded for an observation,
+  or a v1 trace, as recorded in `hue.import.source_environment` on its span, beside
+  `langfuse.environment`. Hue's World capture reads it as import provenance: an imported trace adds
+  to its user's World only when the trace itself declares production, and never when any of its
+  spans names another environment, such as Langfuse's `default`. An observation without an
+  environment carries neither attribute, and the resource still declares no deployment
+  environment. Hue refuses a different payload for a span it already holds, so finish an import
+  started with an earlier version with that version.
+
+### [0.20.5] - 2026-10-18
+
+#### Fixed
+
+- **Wire** `hue traces import prepare` names a trace converted from ATIF, the Agent Trajectory
+  Interchange Format, by the format alone: its spans carry `hue.import.format` `atif` under the
+  instrumentation scope `hue.import.atif`, and the run's agent span is `invoke_agent <agent.name>`
+  from the export's own `agent.name` (`invoke_agent` when it names none). 0.20.2 through 0.20.4
+  wrote one producer's name into all three. The conversion's identity seed changes with the
+  label, so the trace and span ids derived from an ATIF export differ from the ids those versions
+  derived: prepare such a bundle again before uploading it, and do not mix bundles prepared by
+  both. `gen_ai.agent.name` and `service.name` are unchanged; they already come from the export.
+
+### [0.20.4] - 2026-10-18
+
+#### Added
+
+- `JudgeBudget`, which `getJudgeBudget()` returns, types the optional `organizationBudget` that
+  current servers report: the organization's monthly AI budget (`monthlyAllowanceUsd`,
+  `actualSpendUsd`, `reservedUsd`, `unresolvedUsd`, `unresolvedCalls`, `remainingUsd`,
+  `periodStart`, `resetsAt` and `paused`; amounts as decimal USD strings), or `null` when there is
+  none to report, and the optional `organizationAvailableMicroUsd`. Older servers omit both; the
+  existing fields are unchanged.
+
+### [0.20.3] - 2026-10-18
+
+#### Added
+
+- `hue eval` runs an eval set that mixes cases pinning a World with cases pinning none as one
+  run: each case takes its own kind's path (a fresh World through the simulation adapter, or the
+  direct adapter), under one experiment and one `mixed` checkpoint identity that a direct or
+  simulation run of the same selection neither resumes nor is resumed by. A World case a crashed
+  run left running runs again in a fresh World; a direct case it left running stays uncertain, as
+  before. `--mode simulation` over such a set is still refused before a run exists, and `--check`
+  reports `mode: "mixed"` with `worldCases` and `directCases`. Before, the set was refused.
+
+### [0.20.2] - 2026-10-18
+
+#### Added
+
+- `hue traces import prepare <path> --out <directory> --json` converts files, directories or ZIP
+  archives of OTLP/JSON trace exports, complete Langfuse observation exports and text ATIF v1.7 and
+  v1.8 exports into gzip OTLP/JSON batches beside an immutable `manifest.json`, and prints the
+  manifest digest and totals that Hue MCP's `prepare_trace_import` takes. `hue traces import upload
+  <directory> --authorization-file <file> --json` delivers the bundle to Hue's import routes with the
+  short-lived `hue_it_` authorization that tool returns, two requests at a time and in order within a
+  trace, confirms every span's receipt, and resumes from `progress.json` after an interruption. No
+  project key is involved.
+- `agentEnvironment` strips `hue_it_` import authorizations from an agent child's environment like
+  the other Hue control-plane credentials (`HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES`).
+
+### [0.20.1] - 2026-10-18
+
+#### Added
+
+- `WorldClient.createWorld`, `listWorlds` and `getWorld` provide canonical registry method names.
+  Existing environment methods and routes remain supported.
+- World model results and errors expose optional typed processing and preparation progress.
+
+#### Fixed
+
+- World model errors retain only validated progress fields from at most 16 KiB of response data.
+  Insufficient-evidence and processing-limit diagnostics stop unchanged retries. Ordinary transient
+  failures keep their existing retry behavior.
+
+### [0.20.0] - 2026-10-18
+
+#### Changed
+
+- **Breaking** World materialization, instance creation and reproduction now wait up to 120 seconds
+  when Hue explicitly reports `world_preparing`, separately from the ordinary `maxAttempts` limit.
+  Retries preserve the request body and idempotency identity. Migration: pass `{ signal }` to cancel
+  a preparation wait or active request. Other failures retain the configured attempt limit.
+
+#### Added
+
+- **Wire** `hue eval --judges` explicitly requests the run's pinned hosted model judges after outputs
+  upload, in direct, simulation and worker modes. It is off by default, uses the project's judge
+  budget, and supports `--wait 0`. Interrupted dispatch resumes saved outputs with stable
+  idempotency keys instead of running the agent again, even if the project's judge budget is
+  later disabled. The upload handoff is durable before run completion. Workers discard terminal
+  claim handoffs and keep accepting runs after a post-dispatch verdict-read failure.
+- `runSimulation` and `runLocalAgent` accept an optional `onUploaded` callback before their
+  completion marker or queue acknowledgement, for resumable application handoffs.
+- The World client names, `WorldModelClient` and instance methods use the canonical World,
+  World model and instance routes. The environment module
+  and its HTTP paths remain supported. The handoff's legacy `worldId` still identifies an instance.
+
+
+### [0.19.1] - 2026-10-16
+
+#### Changed
+
+- **Wire** An attribute Hue reads as JSON whose whole text is a `data:` URL instead is read as that file, as Hue's reader reads it: it uploads in the background and becomes a digest-form `blob` part keyed `<attribute>#`. This is what a Langfuse SDK records for a string input or output, such as `observation.update({ output: "data:audio/wav;base64,…" })` on a provider that also carries Hue's span processor; before, the base64 was exported inline. Other text that is not JSON stays as recorded. `hue import langfuse` places such an observation's file the same way before it sends the span.
+- **Wire** Raw 16-bit PCM keeps the format its media type declares. A file typed `audio/pcm`, `audio/x-pcm` or `audio/L16` with a `rate` from 8000 to 192000 and 1 or 2 `channels` (a `data:` URL's header or a part's declared type) is reserved and listed as `audio/pcm;rate=<rate>;channels=<n>` (`audio/L16;…` for big-endian samples), and OpenAI `pcm16` audio as `audio/pcm;rate=24000;channels=1`, so Hue plays the stored file; the part's own fields stay as recorded. Before, the parameters were dropped and the file could only be downloaded.
+
+#### Fixed
+
+- A file upload's PUT answered with no reply, 408, 429 or a 5xx now waits its `Retry-After` (up to 60 s) before the next attempt, as 0.19.0 described; before, it waited the 1 s then 2 s backoff.
+
+### [0.19.0] - 2026-10-16
+
+#### Changed
+
+- **Breaking** **Wire** File and large-value uploads no longer hold up export, as with Langfuse and Braintrust. Export hashes each value, writes its reference into the record (the digest part, or the 16 KiB prefix with `hue.truncated`, and its `hue.blobs` entry), sends the record, and uploads the bytes in the background. A slow, rate-limited or failing upload never delays, holds or drops a span or log record, and spans recorded after an upload started are sent as soon as their own flush or batch runs. Hue shows the file once its bytes land; until then it reads the entry as not uploaded. A value refused when its record is exported (uploads ended by shutdown, a receiver without the upload route, over 1 GB, or the upload budget full) keeps the earlier fallback form. Migration: call `flush()`, `shutdown()` or the `Safe` variants before the process exits, with a budget that covers your uploads.
+- **Breaking** Uploads no longer share an export's 60-second rate-limit hold or upload budget, and the 30-second upload pause after a failure is removed. Each reservation and PUT is tried up to three times on no answer, 408, 429 or 5xx, waiting `Retry-After` (up to 60 s) or 1 s then 2 s with jitter, and gives up its upload slot while it waits; the completion is sent once. At most four uploads run at once and 4,096 are queued; each ends within six export timeouts plus 60 s of being queued (2 minutes at the defaults). The 128 MiB budget for values awaiting upload also covers uploads not yet finished.
+- **Breaking** `flush()`, `shutdown()` and the span and log processors' `forceFlush()`/`shutdown()` (attach mode included) send their records first, then wait for the uploads queued before them, bounded by each upload's lifetime. `report.uploadedValues` counts an upload when it completes; `report.uploadFallbacks` also counts uploads that failed after export, reported in their own warning.
+- **Wire** A `hue.blobs` entry's `content_type` is the type its own reference declared. `hue import langfuse` still stores each file before it sends the span, with Hue's stored type.
+- **Wire** A receiver without the upload route (a local OpenTelemetry Collector) is remembered for the life of the client, so only records exported before its first answer list entries it never stores.
+
+#### Fixed
+
+- `hue import langfuse --media` downloads only links that use HTTPS, carry no credentials or fragment, fit in 8192 characters and reach a public address (or the configured Langfuse host), and checks each redirect the same way, up to five. 0.18.2 fetched any `http`/`https` link the Langfuse media record named and followed redirects anywhere, so a hostile or compromised Langfuse deployment could make the import request addresses on the user's machine or network (such as `169.254.169.254`) and upload the answers to Hue. A refused link fails its file and holds the span back, with the reason reported. With the Langfuse host on this machine, any address is accepted, and plain HTTP to this machine.
+
+### [0.18.2] - 2026-10-13
+
+#### Added
+
+- `Attachment({ path })` and `recordFile({ path })` take a regular file over 25 MiB, up to Hue's 1 GB upload limit: the file is hashed a 1 MiB slice at a time when it is recorded and read again from disk when it is uploaded, so it is never held in memory and does not count against the 128 MiB budget for values awaiting upload. Each slice is hashed as it is sent and the last is sent only once the file ended at the size and SHA-256 it was recorded with; a file that changed, is gone or is no longer a regular file by then is not uploaded, without waiting on a named pipe in its place (the request ends before its body is complete, and Hue's upload URL signs the size and SHA-256, so the store refuses other bytes) and counts in `report.uploadFallbacks`, its part or event keeping the digest it was recorded with. `recordFile` takes `path` in place of `data` (not both); a file up to 25 MiB given by path is read when it is recorded, as `data` is. Bytes given in memory (`data`) keep their 25 MiB limit, since they are held until export. Uploads follow `captureContent`, setup credentials, `redact` and fallback counting as before. All uploads of one export share its upload budget, six export timeouts (60 seconds at the default `timeoutMillis` of 10000), so a 1 GB file needs about 17 MB/s at the defaults; raise `timeoutMillis` (up to 60000) for slower links.
+
+#### Fixed
+
+- **Wire** Inline media in a span's own attribute past the media inspection bounds (8 Mi UTF-16 code units for one attribute, 16 Mi for a record) is uploaded as files: 0.18.1 uploaded such a value whole as JSON text, its first 16 KiB inline, so a model call's 10 MB base64 audio part reached Hue inside that text instead of as an audio file. An attribute held whole for upload past the bounds (it is over the value limit) now has its media read in place when it is exported: each string in it longer than 16 Ki code units and written without escapes as strict base64 or a base64 `data:` URL is decoded, hashed and uploaded a 1 MiB window at a time from the recorded text, never parsed or copied out of it, up to Hue's 1 GB upload limit, and the value is placed exactly as one within the bounds: the same digest form, `hue.blobs` entries and fallbacks, every other byte of the recorded text kept. The scan reads the value a window at a time between turns of the event loop; at 300 MB of audio the longest event-loop stall during the flush is about 50 ms (Node 24) and the flush holds about 3 MB beside the value (13 MB on Bun 1.4.2). The JSON around those strings, files written with escapes or inside a JSON-encoded string included, is parsed within the 8 Mi bound; a value past it, or one whose long file is a percent-escaped `data:` URL, still uploads whole. Admission parses nothing more on the application's thread; each such value's JSON is read within the 8 Mi bound on its own, apart from the record's 16 Mi allowance, while the value stays held within the 128 MiB budget for values awaiting upload, and fallback counting and the exporter's request limits are unchanged. Log records keep the bounds. The shared corpus gains cases with files of 6.3 MB in both SDKs.
+- Placing many files in one value no longer takes time quadratic in them: 20,000 edited parts took about 11 seconds and now take well under one. Uploading a text or a source reuses one buffer for its slices, so an export no longer leaves a slice of garbage per MiB sent (on Bun 1.4.2 that grew with the value).
+- A path that is not a regular file, such as a named pipe or a device, no longer blocks the application: `Attachment({ path })` and `recordFile({ path })` open it without waiting and refuse it, an invalid attachment recorded as `null` and a refused file omitted, each counted as an instrumentation failure. A named pipe given by path used to block the caller until something wrote to it.
+
+### [0.18.1] - 2026-10-12
+
+A limitation that 0.18.0 already had and that this release keeps: an `Attachment` in a value that is still over the value limit with its files as digest parts is uploaded and listed under `hue.blobs` at `<attribute>#<pointer>`. Its bytes are stored, and `client.media.fetch({ traceId, sha256 })` and Hue's span read reach them by digest. The value itself uploads whole and keeps only its first 16 KiB inline, so readers do not place the file at its position in the value.
+
+#### Added
+
+- **Wire** `hue import langfuse` copies a Langfuse project's traces into Hue from your machine, with the Langfuse project's own keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` from the environment or `--env-path`, never the command line; `LANGFUSE_BASE_URL` or `LANGFUSE_HOST`), which go only to Langfuse. It reads the Observations API v2 (Langfuse Cloud and self-hosted v4) or, where that answers `404`, the v1 traces and observations API (self-hosted v3), newest first, selected by start time (`--from`, and `--to`, which defaults to an hour before the command starts so traces still running are left for a later run), `--limit` or `--trace-id`. Each observation becomes the completed span a Langfuse OpenTelemetry SDK records, with `langfuse.observation.*` (type, input, output, one `metadata.<key>` per key, level, status message, model, model parameters, usage and cost details, completion start, prompt), `langfuse.trace.name` and `.tags`, `langfuse.user.id`, `langfuse.session.id`, `langfuse.release`, `langfuse.version`, `langfuse.environment`, `gen_ai.request.model` and the input and output token counts; a v1 trace also becomes a span of its own with `langfuse.trace.input`, `.output`, `.metadata.<key>` and `.public`. Hex Langfuse ids are kept and other ids derived from them with SHA-256 (the originals kept as `langfuse.trace.id` and `langfuse.observation.id`), so running the same command again resumes an import without duplicates; nothing sent depends on the run: no root carries `hue.sdk.dropped_records`, and before a span is sent its inline files and its values over the 1 MiB inline limit are stored with the exporter's own placement, so a failed upload holds the span back instead of leaving a value inline or cut. Spans are exported through the SDK's transport with its content-capture default (`--no-content` sends metadata only), its queue drained every 1,024 spans or 32 MiB. `--media` downloads the files Langfuse media references (`@@@langfuseMedia:…@@@`) point to, up to 25 MiB each, uploads them under the trace and places them in the SDK's digest form listed in `hue.blobs` under `<attribute>#<JSON pointer>`; a reference without bytes stays as recorded, and a file that cannot be copied now holds its span back for the next run. `--dry-run` counts without a Hue key, Langfuse `429` answers are waited out by `Retry-After`, and the exit code is `1` when a trace, span or file was not imported. The Python SDK has no counterpart.
+
+#### Fixed
+
+- **Wire** A text file that a GenAI `blob`, Vertex `media` or AI SDK `file` or `image` part holds as bare base64 is read as Hue reads it: its decoded bytes are measured against the 64 KiB inline limit, uploaded and placed in the digest form, keyed at the part. Base64 is the encoding the GenAI conventions give `blob` content, and what `client.media.resolve` and `rehydrateMedia` write back into a `blob` or `media` part for every media type; 0.18.0 read such content as the text itself whenever its media type was textual, so recording a resolved 72,000-byte text file again uploaded its base64 text and kept that text's first 16 KiB. Content that does not read as base64 (a length divisible by four, base64 characters only) is still the file's own text and keeps the 16 KiB prefix form; a `data:` URL and a field its convention declares base64 are read as before.
+- A refused `client.media.fetch` of a snapshot's copy (`MediaFetchError` reason `forbidden`) says that a snapshot's files need a Read and write key; its message named a Read or Read and write key, which is what a trace's files need. `MediaFetchError` takes a `snapshot` option that selects this message.
+- `CaseWrite.files` given as a `path` (`addCase`, `addEvalSetCase`) are no longer all held in memory at once: each file is hashed in 1 MiB slices when the case is checked and read again when it is uploaded, one file at a time, so 32 files of 25 MiB no longer peak at about 850 MiB. Only bytes that match the checked size and SHA-256 are sent, as in 0.18.0 only the checked bytes were; a file that changed after its check, or can no longer be read, sends nothing: the write throws `TypeError` (`Case file N changed after it was checked`, or `could not be read`) and the case is not written. The upload's requests, `Content-Length`, reservation keys and checks are unchanged; bytes given in memory are used as before.
+
+### [0.18.0] - 2026-10-12
+
+#### Breaking
+
+- **Wire** Inline media is found and uploaded beyond the three recorded message attributes. On a span's own attributes the SDK now also reads the AI SDK's `ai.prompt`, `input.value` and `output.value` (what `withSpan` records), `traceloop.entity.input`/`output`, Langfuse's `langfuse.observation.input`/`output` and `langfuse.trace.input`/`output`, the tool keys `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `ai.toolCall.args`, `ai.toolCall.result`, `tool.parameters`, `tool_arguments` and `tool_response`, the metadata keys `metadata`, `langfuse.observation.metadata[.<key>]`, `langfuse.trace.metadata[.<key>]` and `ai.telemetry.metadata.<key>`, OpenLLMetry's `gen_ai.prompt.<n>.content` and `gen_ai.completion.<n>.content` parts lists, and OpenInference's flattened `llm.input_messages.<n>.message.contents.<m>.message_content.image.image.url` (and output). An uploaded file takes the digest form in place, listed in `hue.blobs` under `<attribute>#<JSON pointer>`. A file in one of these attributes that is not uploaded keeps its bytes inline, as in 0.17.0. Files are read only where Hue's reader reads them: no deeper than ten levels below a value's root, not in attribute JSON Hue keeps as text (nested past 32 levels, or holding an integer past 2^53), and not in an OpenInference `input.value` or `output.value` declared `text/plain` by `input.mime_type` or `output.mime_type`. The same holds for the recorded message attributes (`gen_ai.input.messages`, `gen_ai.output.messages`, `ai.prompt.messages`): a message attribute holding an integer past 2^53 (or nested past 32 levels), or a part more than ten levels deep, now keeps its media inline where 0.17.0 uploaded it or replaced it by its digest, because Hue keeps such JSON as text and never reads those files. Migration: a reader of these attributes finds `sha256` and `size` where inline bytes were and resolves the bytes through the entry (or `client.media`); Hue reads every form.
+- **Wire** Placing a file changes only its own value (a whole `data:` URL string) or the members of the part that held it (its content removed, `sha256` and `size` set); every other byte of the recorded JSON text, its key order, number spellings, escapes and spacing included, is kept, in the recorded messages too. 0.17.0 wrote a message attribute's JSON again as `JSON.stringify` writes it. Migration: none for a JSON reader; a reader that compared the text byte for byte sees the recorded spacing kept.
+- **Wire** A whole string that is a `data:` URL declaring a media type, anywhere inside an inspected value, is uploaded and replaced by a GenAI `blob` part, `{"type":"blob","mime_type":…,"modality":…,"sha256":…,"size":…}`, keyed at the string's pointer; a metadata value that is entirely one becomes the part's JSON text, keyed `<attribute>#`. Text data URLs up to 64 KiB stay inline. Migration: read the part, or the entry, for the file.
+- **Wire** New provider shapes upload: an OpenAI Chat assistant message's `audio` (the message carries `sha256` and `size`, `audio.data` is removed, the entry is keyed at the message, typed by `audio.format` or the bytes' signature) and a Responses `computer_screenshot`. Files inside a tool call's `arguments` or a tool result's JSON-encoded string are uploaded and take the digest form inside the string, the rest of the string kept byte for byte; Hue matches them by digest. In the recorded messages, such files keep their digest without an entry when they are not uploaded, as other message parts do.
+- **Wire** Log records correlated with a span upload their media: `recordMessages`' `gen_ai.client.inference.operation.details` record and any `gen_ai.*` event with a structured body, under the log record's trace, listed in the log record's own `hue.blobs` with keys `body#<JSON pointer>` (for example `body#/gen_ai.input.messages/0/parts/1`) or `<attribute>#<JSON pointer>` for the attributes above; its inline media take the 64 places before the attachments in its body. In 0.17.0, a log record's media up to 64 KiB stayed inline and larger media became its digest without an upload. A log file that is not uploaded is placed as in 0.17.0: a file over 64 KiB in a recorded message attribute becomes its digest and anything else keeps its bytes; text over the value limit is still cut inline and listed under `hue.truncated`, and no log value is uploaded whole. `recordMessages` records a body over the value limit when, with its files as their digest, it fits the limit while uploads are available; 0.17.0 refused such a body. Migration: a log reader that takes a body's inline bytes reads the digest form and the entry instead.
+
+#### Added
+
+- **Wire** `Attachment` places a file anywhere in a recorded value, the equivalent of Langfuse's `LangfuseMedia` and Braintrust's `Attachment`: `new Attachment({ data | path, contentType, name })` in a `withSpan()` input or output, `model()` messages, a tool's arguments or result, `recordMessages()` messages, or a `withSpan()` attribute (`SpanOptions.attributes` accepts an attachment, a JSON object or an array OpenTelemetry cannot hold, with or without attachments, recorded as JSON text). It is recorded at its position as a GenAI `blob` part in digest form, `{"type":"blob","mime_type","modality","sha256","size","name"}`, and its bytes are uploaded during export and listed under the record's `hue.blobs` as `<attribute>#<JSON pointer>`; in a `recordMessages()` body it uploads with the body's other media, under `body#<JSON pointer>`. `data` accepts bytes or a base64 string or `data:` URL; `path` is read when the attachment is created; both are limited to 25 MiB. Uploads follow `captureContent`, setup credentials, `redact`, the upload budget and fallback counting of other media; a part nested more than 10 levels deep keeps its digest without an upload. An invalid attachment is recorded as `null` and counted as an instrumentation failure; an invalid name alone is omitted and counted.
+- **Wire** `EvaluationClient.media.fetch({ traceId, sha256, spanId? })` reads one recorded file back by digest through `GET /api/v1/traces/{traceId}/blobs/{sha256}` (`{ snapshotId, sha256 }` reads a trace snapshot's pinned copy), downloads the short-lived link without the project key and refuses bytes whose SHA-256 is not the digest. It returns `{ bytes, sha256, size, contentType, fileName }` and throws `MediaFetchError` with a `reason` (`not_found`, `missing`, `unavailable`, `forbidden`, `too_large`, `digest_mismatch`, `failed`); an unavailable answer is asked once more after its `Retry-After` of up to 10 seconds, as is a request whose connection fails or times out; an answer over 64 KiB fails at once, even when its connection then fails; a redirect fails with its status, a plain HTTP link is taken only to a host written `localhost`, `127.0.0.1` or `[::1]`, and the download times out only when no byte arrives within its timeout. A trace's files need a Read or Read and write key, a snapshot's a Read and write key. This is the counterpart of Braintrust's `ReadonlyAttachment` and Langfuse's media fetch.
+- `EvaluationClient.media.resolve(value, { traceId | snapshotId, spanId?, as?, blobs? })` writes the bytes of every digest part in a recorded value back into the part's own field, as a `data:` URL or the bare base64 its convention requires (`as: "dataUrl"`, the default; a GenAI `blob` or Vertex `media` part receives base64 for every media type) or as a `Uint8Array` (`as: "bytes"`), downloading each distinct digest once with bounded concurrency; `blobs`, the record's `hue.blobs` entries in any form Hue reads (JSON strings, objects, or one string holding the JSON array), gives a part that declares no media type its entry's type (a snapshot's copy carries none). It returns a new value with the parts it could not read listed in `failures`, like Langfuse's `resolveMediaReferences`; a part holding only the first 16 KiB of a text file over 64 KiB, its content field named by an entry, is never written and is listed as `prefix_only` with the entry's SHA-256, whose whole file `media.fetch({ traceId, sha256 })` returns. Parts inside JSON-encoded strings, such as tool-call arguments, are left as they are.
+- `rehydrateMedia(inputs, files)` writes a case's local files back into the digest parts of its inputs by SHA-256, so a target can send a recorded model call again with the real image, document or audio.
+- **Wire** `CaseWrite.files` pins up to 32 input files on `addCase` and `addEvalSetCase`: `{ artifactId, role }` references, or files given as `bytes` or a `path` that the client checks against the artifact policy (content type, a name of 1 to 255 UTF-16 code units, 1 byte to 25 MiB) and uploads as verified artifacts under keys that make a repeated write reuse them and a corrected name or content type reserve a new one. The whole case is checked before the first upload, each artifact is pinned once per role, and an `artifactId` given with file fields, or a `path` that cannot be read, is refused with a `TypeError`.
+
+#### Changed
+
+- A direct case's evaluator-only input files are removed when the case ends, so no later case's target can read them; the agent's own files still stay for inspection.
+- A case that fails after its target finished (fetching the scorers' files, uploading the target's files) saves the count of spans it ended with its outcome, so a resume completes it under required trace evidence once the trace's receipt holds them, instead of refusing for want of the count. The target is never run again.
+
 ### [0.17.0] - 2026-10-10
 
 #### Breaking
@@ -1474,6 +1679,111 @@ No registry release is claimed until publication and registry acceptance complet
   `Hue.extract(headers)` in another process. `input` and a decorated function's result follow
   `capture_content` as `input.value` / `output.value`; errors are recorded as in `span()`.
 
+### [0.13.3] - 2026-10-20
+
+#### Added
+
+- `verify_trace` adds `project` (a `Project` or `None`, default `None`) to `TraceVerificationResult` once Hue reports the trace missing: the project the key searched, so a key for another project is told apart from a trace that is not stored yet. `verified` and `receipt` are unchanged.
+
+### [0.13.2] - 2026-10-18
+
+#### Added
+
+- `agent_environment` strips `hue_it_` import authorizations from an agent child's environment like
+  the other Hue control-plane credentials (`HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES`).
+
+### [0.13.1] - 2026-10-18
+
+#### Added
+
+- World model results and errors expose optional typed processing and preparation progress.
+
+#### Fixed
+
+- World model errors retain only validated progress fields from at most 16 KiB of response data.
+  Insufficient-evidence and processing-limit diagnostics stop unchanged retries. Ordinary transient
+  failures keep their existing retry behavior.
+
+### [0.13.0] - 2026-10-18
+
+#### Changed
+
+- **Breaking** World materialization, instance creation and reproduction now wait up to 120 seconds
+  when Hue explicitly reports `world_preparing`, separately from the ordinary `max_attempts` limit.
+  Retries preserve the request body and idempotency identity. Migration: pass a `threading.Event`
+  through `cancel_event` to cancel a preparation wait or active HTTP read. Other failures retain
+  the configured attempt limit.
+
+#### Added
+
+- The World client names, `WorldModelClient` and instance methods use the canonical World,
+  World model and instance routes. The environment module
+  and its HTTP paths remain supported. The handoff's legacy `worldId` still identifies an instance.
+
+
+### [0.12.1] - 2026-10-16
+
+#### Changed
+
+- **Wire** An attribute Hue reads as JSON whose whole text is a `data:` URL instead is read as that file, as Hue's reader reads it: it uploads in the background and becomes a digest-form `blob` part keyed `<attribute>#`, as in the TypeScript SDK. Before, the base64 was exported inline. Other text that is not JSON stays as recorded.
+- **Wire** Raw 16-bit PCM keeps the format its media type declares. A file typed `audio/pcm`, `audio/x-pcm` or `audio/L16` with a `rate` from 8000 to 192000 and 1 or 2 `channels` (a `data:` URL's header or a part's declared type) is reserved and listed as `audio/pcm;rate=<rate>;channels=<n>` (`audio/L16;…` for big-endian samples), and OpenAI `pcm16` audio as `audio/pcm;rate=24000;channels=1`, so Hue plays the stored file; the part's own fields stay as recorded. Before, the parameters were dropped and the file could only be downloaded.
+
+### [0.12.0] - 2026-10-16
+
+#### Changed
+
+- **Breaking** **Wire** File and large-value uploads no longer hold up export, as with Langfuse and Braintrust. The export thread hashes each value, writes its reference into the record (the digest part, or the 16 KiB prefix with `hue.truncated`, and its `hue.blobs` entry) and sends the record; the bytes upload on up to four background `hue-upload` threads. A slow, rate-limited or failing upload never delays, holds or drops a span or log record, and a later `force_flush` sends its own records without waiting for earlier uploads. Hue shows the file once its bytes land; until then it reads the entry as not uploaded. A value refused when its record is exported (uploads closed, a receiver without the upload route, over 1 GB, 1,024 uploads already pending, or the held budget full) keeps the earlier fallback form.
+- **Breaking** Uploads no longer share an export's 60-second rate-limit hold or upload budget, and the 30-second upload pause after a failure is removed. Reservation, PUT and completion are each tried up to three times on no answer, 408, 429 or 5xx, waiting `Retry-After` (up to 60 s) or a jittered backoff; a failed completion never fails the upload. The 128 MiB held budget stays charged until a record's uploads settle.
+- **Breaking** `force_flush()` and `shutdown()` (and a borrowed provider's flush through Hue's processors) send records first, then wait for uploads already queued within the same deadline; shutdown gives pending uploads up to 30 s. `export_status.uploaded_values` counts an upload when it completes; an upload that fails after export counts in `export_status.upload_fallbacks` under the `not_uploaded` warning.
+- **Wire** A `hue.blobs` entry's `content_type` is the type its own reference declared, and a receiver without the upload route is remembered for the life of the client.
+
+### [0.11.2] - 2026-10-13
+
+#### Added
+
+- `Attachment(path=...)` and `span.record_file(path=...)` take a regular file over 25 MiB, up to Hue's 1 GB upload limit, as in the TypeScript SDK 0.18.2: the file is hashed a 1 MiB slice at a time when it is recorded and read again from disk when it is uploaded, so it is never held in memory and does not count against the 128 MiB held for values awaiting upload. Each slice is hashed as it is sent and the last is sent only once the file ended at the size and SHA-256 it was recorded with; a file that changed, is gone or is no longer a regular file by then is not uploaded, without waiting on a named pipe in its place (the request ends before its body is complete, and Hue's upload URL signs the size and SHA-256, so the store refuses other bytes) and counts in `export_status.upload_fallbacks`, its part or event keeping the digest it was recorded with. `record_file` takes `path` in place of `data` (not both); a file up to 25 MiB given by path is read when it is recorded, as `data` is. Bytes given in memory (`data`) keep their 25 MiB limit, since they are held until export. Uploads follow `capture_content`, setup keys, the redactor and fallback counting as before. All uploads of one export share its upload budget, six export timeouts (60 seconds at the default `export_timeout_seconds` of 10), so a 1 GB file needs about 17 MB/s at the defaults; raise `export_timeout_seconds` for slower links.
+
+#### Fixed
+
+- **Wire** Inline media in a span's own attribute past the media inspection bounds (8 Mi UTF-16 code units for one attribute, 16 Mi for a record) is uploaded as files, as in the TypeScript SDK 0.18.2: 0.11.1 uploaded such a value whole as JSON text, its first 16 KiB inline, so a model call's 10 MB base64 audio part reached Hue inside that text instead of as an audio file. An attribute held whole for upload past the bounds (it is over the value limit) now has its media read in place when it is exported: each string in it longer than 16 Ki code units and written without escapes as strict base64 or a base64 `data:` URL is decoded, hashed and uploaded a 1 MiB window at a time from the recorded text, never parsed or copied out of it, up to Hue's 1 GB upload limit, and the value is placed exactly as one within the bounds: the same digest form, `hue.blobs` entries and fallbacks, every other byte of the recorded text kept. No step of the scan holds the interpreter for more than a window; at 300 MB of audio the longest pause another thread saw during the flush was about 60 ms, and the flush held about 2.4 MB beside the value. A long string no file replaced is uploaded or kept from its place without a second copy. The JSON around those strings, files written with escapes or inside a JSON-encoded string included, is parsed within the 8 Mi bound; a value past it, or one whose long file is a percent-escaped `data:` URL, still uploads whole. Admission parses nothing more on the application's thread; each such value's JSON is read within the 8 Mi bound on its own, apart from the record's 16 Mi allowance, while the value stays held within the 128 MiB for values awaiting upload, and fallback counting and the exporter's request limits are unchanged. Log records keep the bounds. The shared corpus gains cases with files of 6.3 MB in both SDKs.
+- **Wire** Text with a lone surrogate is hashed, uploaded and cut as the TypeScript SDK encodes it, each lone surrogate as U+FFFD (`EF BF BD`): 0.11.1 failed to encode such a value, so its fallback went uncounted and an upload over the value limit was cut instead. A shared corpus section, `placements`, pins both outcomes in both SDKs.
+- Placing many files in one value no longer takes time quadratic in them: 20,000 edited parts took about 90 seconds and now take well under one.
+- A path that is not a regular file, such as a named pipe or a device, no longer blocks the application: `Attachment(path=...)` and `span.record_file(path=...)` open it without waiting and refuse it, an invalid attachment recorded as `None` and a refused file omitted, each counted as an instrumentation failure, as in the TypeScript SDK 0.18.2. A named pipe given by path used to block the caller until something wrote to it.
+- **Wire** The media type a `data:` URL names is trimmed of the whitespace JavaScript trims, as the TypeScript SDK reads it: a type followed by another Unicode space character (such as U+0085) is no valid type, and the file uploads as `application/octet-stream` in both SDKs, where 0.11.1 trimmed the character and uploaded the declared type. The shared corpus pins the case.
+
+### [0.11.1] - 2026-10-12
+
+A limitation that 0.11.0 already had and that this release keeps: an `Attachment` in a value that is still over the value limit with its files as digest parts is uploaded and listed under `hue.blobs` at `<attribute>#<pointer>`. Its bytes are stored, and `client.media.fetch(trace_id=..., sha256=...)` and Hue's span read reach them by digest. The value itself uploads whole and keeps only its first 16 KiB inline, so readers do not place the file at its position in the value.
+
+#### Fixed
+
+- **Wire** A text file that a GenAI `blob`, Vertex `media` or AI SDK `file` or `image` part holds as bare base64 is read as Hue reads it, as in the TypeScript SDK 0.18.1: its decoded bytes are measured against the 64 KiB inline limit, uploaded and placed in the digest form, keyed at the part. Base64 is the encoding the GenAI conventions give `blob` content, and what `client.media.resolve` and `rehydrate_media` write back into a `blob` or `media` part for every media type; 0.11.0 read such content as the text itself whenever its media type was textual, so recording a resolved 72,000-byte text file again uploaded its base64 text and kept that text's first 16 KiB. Content that does not read as base64 (a length divisible by four, base64 characters only) is still the file's own text and keeps the 16 KiB prefix form; a `data:` URL and a field its convention declares base64 are read as before.
+- A refused `client.media.fetch` of a snapshot's copy (`MediaFetchError` reason `forbidden`) says that a snapshot's files need a Read and write key; its message named a Read or Read and write key, which is what a trace's files need. `MediaFetchError` takes a keyword-only `snapshot` argument that selects this message.
+- `add_case(files=...)` and `add_eval_set_case(files=...)` no longer hold every file given as a `path` in memory at once: each file is hashed in 1 MiB slices when the case is checked and read again when it is uploaded, one file at a time, so 32 files of 25 MiB no longer peak at about 850 MiB. Only bytes that match the checked size and SHA-256 are sent, as in 0.11.0 only the checked bytes were; a file that changed after its check, or can no longer be read, sends nothing: the write raises `ValueError` (`Case file N changed after it was checked.`, or `could not be read.`) and the case is not written. The upload's requests, `Content-Length`, reservation keys and checks are unchanged; `data` given in memory is used as before.
+- A span with large inline media in `input.value`, or in any other attribute the SDK inspects, no longer leaves about three copies of the value for Python's cycle collector: the media walk, the JSON locator and the JSON editor each kept the value's parse, its decoded files and its text alive through a reference cycle after they returned. Strict base64 is decoded without an extra ASCII copy, and uploads read bytes through views. Exported attributes, `hue.blobs` entries, upload bodies and the held-value budget are unchanged. Spans exported one at a time, each with a 576 KiB image in `input.value`, peak at about 4.6 MiB of Python allocations, as with 0.10.0 (4.4 MiB), instead of 27.5 MiB; 280 such spans queued at once peak at about 190 MiB RSS instead of 207–220 MiB, most of it the 128 MiB budget for values awaiting upload. 0.10.0 dropped most of those spans from its queue instead.
+
+### [0.11.0] - 2026-10-12
+
+#### Breaking
+
+- **Wire** Inline media is found and uploaded beyond the three recorded message attributes, as in the TypeScript SDK 0.18.0: `ai.prompt`, `input.value` and `output.value` (what `span()` records), `traceloop.entity.input`/`output`, Langfuse observation and trace inputs and outputs, tool arguments and results (`gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `ai.toolCall.args`, `ai.toolCall.result`, `tool.parameters`, `tool_arguments`, `tool_response`), metadata (`metadata`, `langfuse.observation.metadata[.<key>]`, `langfuse.trace.metadata[.<key>]`, `ai.telemetry.metadata.<key>`), OpenLLMetry's `gen_ai.prompt.<n>.content` and `gen_ai.completion.<n>.content` parts lists, and OpenInference's flattened image URLs. An uploaded file takes the digest form in place, listed in `hue.blobs` under `<attribute>#<JSON pointer>`. A file in one of these attributes that is not uploaded keeps its bytes inline, as in 0.10.0. Files are read only where Hue's reader reads them: no deeper than ten levels below a value's root, not in attribute JSON Hue keeps as text (nested past 32 levels, or holding an integer past 2^53), and not in an OpenInference `input.value` or `output.value` declared `text/plain`. The same holds for the recorded message attributes: a message attribute holding an integer past 2^53 (or nested past 32 levels), or a part more than ten levels deep, now keeps its media inline where 0.10.0 uploaded it or replaced it by its digest, because Hue keeps such JSON as text and never reads those files. Migration: a reader of these attributes finds `sha256` and `size` where inline bytes were and resolves the bytes through the entry (or `client.media`); Hue reads every form.
+- **Wire** Placing a file changes only its own value (a whole `data:` URL string) or the members of the part that held it; every other byte of the recorded JSON text, its key order, number spellings, escapes and spacing included, is kept, in the recorded messages too, so both SDKs write the same bytes. 0.10.0 wrote a message attribute's JSON again with Python's `json.dumps`. Migration: none for a JSON reader.
+- **Wire** A whole `data:` URL string declaring a media type is uploaded and replaced by a GenAI `blob` part keyed at its pointer (a metadata value that is entirely one becomes the part's JSON text, keyed `<attribute>#`); text data URLs up to 64 KiB stay inline. OpenAI Chat assistant `audio` and Responses `computer_screenshot` upload; files inside JSON-encoded tool arguments and results upload and take the digest form inside the string, the rest of the string kept byte for byte. The shared corpus pins byte-identical entries and values with the TypeScript SDK.
+- **Wire** Log records correlated with a span upload their media: `log_inference`'s `gen_ai.client.inference.operation.details` record and any `gen_ai.*` event with a structured body, under the log record's trace, listed in its own `hue.blobs` with keys `body#<JSON pointer>` or `<attribute>#<JSON pointer>`; its inline media take the 64 places before the attachments in its body. In 0.10.0, a log record's media up to 64 KiB stayed inline and larger media became its digest without an upload. A log file that is not uploaded is placed as in 0.10.0: a file over 64 KiB in a recorded message attribute becomes its digest and anything else keeps its bytes; text over the value limit is still cut inline. `log_inference` records a field over the value limit when, with its files as their digest, it fits the limit while uploads are available; 0.10.0 omitted the field. Migration: a log reader that takes a body's inline bytes reads the digest form and the entry instead.
+
+#### Added
+
+- **Wire** `hue_sdk.Attachment` places a file anywhere in a recorded value, the equivalent of Langfuse's `LangfuseMedia` and Braintrust's `Attachment`: `Attachment(data, path=..., content_type=..., name=...)` in a `span()` input or output, `model()` messages, a tool's arguments or result, `log_inference()` messages, or a span attribute passed to `span(attributes=...)` or `set_attribute` (an attachment, a dict or a list OpenTelemetry cannot hold, with or without attachments, recorded as JSON text). It is recorded at its position as a GenAI `blob` part in digest form, `{"type":"blob","mime_type","modality","sha256","size","name"}`, and its bytes are uploaded during export and listed under the record's `hue.blobs` as `<attribute>#<JSON pointer>`; in a `log_inference()` body it uploads with the body's other media, under `body#<JSON pointer>`. `data` accepts bytes or a base64 string or `data:` URL; `path` is read when the attachment is created; both are limited to 25 MiB. Uploads follow `capture_content`, setup keys, the redactor, the upload budget and fallback counting of other media; a part nested more than 10 levels deep keeps its digest without an upload. An invalid attachment is recorded as `None` and counted as an instrumentation issue; an invalid name alone is omitted and counted.
+- **Wire** `EvaluationClient.media.fetch(trace_id=..., sha256=..., span_id=None)` reads one recorded file back by digest through `GET /api/v1/traces/{traceId}/blobs/{sha256}` (`snapshot_id=` reads a trace snapshot's pinned copy), downloads the short-lived link without the project key and refuses bytes whose SHA-256 is not the digest. It returns a `MediaFile` (`data`, `sha256`, `size`, `content_type`, `file_name`) and raises `MediaFetchError` with a `reason` (`not_found`, `missing`, `unavailable`, `forbidden`, `too_large`, `digest_mismatch`, `failed`); an unavailable answer is asked once more after its `Retry-After` of up to 10 seconds, as is a request whose connection fails or times out; an answer over 64 KiB fails at once, even when its connection then fails; a redirect fails with its status. A trace's files need a Read or Read and write key, a snapshot's a Read and write key. This is the counterpart of Braintrust's `ReadonlyAttachment` and Langfuse's media fetch.
+- `EvaluationClient.media.resolve(value, trace_id=..., span_id=None, as_="data_url", blobs=None)` writes the bytes of every digest part in a recorded value back into the part's own field, as a `data:` URL or the bare base64 its convention requires (a GenAI `blob` or Vertex `media` part receives base64 for every media type), or as `bytes` (`as_="bytes"`), downloading each distinct digest once with bounded concurrency; `blobs`, the record's `hue.blobs` entries in any form Hue reads (JSON strings, dicts, or one string holding the JSON array), gives a part that declares no media type its entry's type (a snapshot's copy carries none); a part holding only the first 16 KiB of a text file over 64 KiB, its content field named by an entry, is never written and is listed in `failures` as `prefix_only` with the entry's SHA-256, whose whole file `media.fetch(trace_id=..., sha256=...)` returns. It returns a `ResolvedMedia` whose new `value` leaves the parts it could not read unchanged and lists them in `failures`, like Langfuse's `resolve_media_references`. Parts inside JSON-encoded strings, such as tool-call arguments, are left as they are.
+- `rehydrate_media(inputs, files)` writes a case's local files back into the digest parts of its inputs by SHA-256, so a target can send a recorded model call again with the real image, document or audio.
+- **Wire** `add_case(files=...)` and `add_eval_set_case(files=...)` pin up to 32 input files: `CaseFileWrite(role=..., artifact_id=...)` references, or files given as `data` or a `path` that the client checks against the artifact policy (content type, a name of 1 to 255 UTF-16 code units, 1 byte to 25 MiB) and uploads as verified artifacts under keys that make a repeated write reuse them and a corrected name or content type reserve a new one. The whole case is checked before the first upload, each artifact is pinned once per role, and a `path` that cannot be read is refused with a `ValueError`. The client gains the artifact methods it uses: `reserve_artifact`, `request_artifact_upload`, `upload_artifact_bytes`, `complete_artifact`, `get_artifact` and `download_artifact` (`ArtifactSizeError`).
+- `run_experiment` downloads a case's pinned input files under `files_directory` (default `<checkpoint_directory>/files`) and checks them against the manifest before the execution starts, as the TypeScript runner does: targets receive the agent-visible ones as `TargetContext.files` (`LocalFile`); evaluator-only files are checked then but written for local code scorers only after the target finishes, never on disk while it runs, and removed when the case ends; scorers receive every file as `ScoreContext["files"]`. The target's outcome is saved before those files are fetched, with the count of spans the case ended, so a failure there resumes and completes without running the target again, as in TypeScript. A mismatch raises `CaseFileError` without spending the execution. `rescore` passes a subject's frozen files to local code scorers the same way.
+
+#### Fixed
+
+- A `hue.blobs` key's 256 limit is counted in UTF-16 code units, as Hue and the TypeScript SDK count it: a key of astral characters past the limit was reserved and refused by Hue. Such a file now stays inline and is counted in `export_status.upload_fallbacks`.
+
 ### [0.10.0] - 2026-10-10
 
 #### Breaking
@@ -2028,6 +2338,26 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.14 (2026-10-20): the Python installation commands pin `hue-run==0.13.3`.
+- 0.8.13 (2026-10-19): the integration table routes an application whose framework owns the agent loop or the root span (LangChain, LangGraph) to the LangChain and LangGraph integration page and the OpenTelemetry root-span section.
+- 0.8.12 (2026-10-19): the file is formatted with Prettier's defaults (table cell alignment), so `prettier --check` passes in repositories that vendor it. No wording changes.
+- 0.8.11 (2026-10-19): **Verify delivery** gives the running-server pattern (log or return the request span's `traceId`, verify from a diagnostic client), names the receipt fields once and says what a `null` receipt means.
+- 0.8.10 (2026-10-19): the TypeScript installation command pins `@hue-run/sdk@0.20.8`.
+- 0.8.9 (2026-10-19): the other-workflows table routes importing existing traces from OTLP JSON, Langfuse or ATIF exports to the bulk import guide (`load_hue_guide` with `import` returns the same guide).
+- 0.8.8 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.7`.
+- 0.8.7 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.6`.
+- 0.8.6 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.5`.
+- 0.8.5 (2026-10-18): the rule for other workflows no longer asks before every write to a Hue project, matching the Hue MCP server, which dropped its blanket write confirmation; its other rules are unchanged. The TypeScript installation command pins `@hue-run/sdk@0.20.4`.
+- 0.8.4 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.3`.
+- 0.8.3 (2026-10-18): the installation commands pin `@hue-run/sdk@0.20.2` and `hue-run==0.13.2`.
+- 0.8.2 (2026-10-18): the rule for other workflows names the evaluation-only values production configuration must not hold (mirror URLs, world tokens, `HUE_MCP_*` values and the development **Read and write** key) instead of all Hue URLs and keys, which contradicted the **Tracing only** key a production server uses.
+- 0.8.1 (2026-10-18): pin current install commands to TypeScript `@hue-run/sdk@0.20.1` and Python `hue-run==0.13.1`; retain the tracing guidance and documentation routing from 0.8.0.
+- 0.8.0 (2026-10-18): the skill centers on SDK work: choosing the integration, preserving the application's provider, framework, prompts, behavior, exporters and redaction, instrumenting request, model and tool spans with real content and streaming lifetimes, content and media capture, and verifying stored spans and content with a separate check for uploaded media. Production investigation, MCP setup, classifiers, cases from traces, Worlds and evaluations become routing links to their docs.hue.run pages, which own those procedures; the duplicated case, eval-ready and evaluation procedures, case tiers and the mirrors' release-state note are removed. The key section tells an agent arriving from the agent setup page to return there after **Verify delivery** instead of starting it again and tells a user without an account that one is required, with no contact address or booking link, the install commands pin `@hue-run/sdk@0.20.0` (saved exactly) and `hue-run==0.13.0`, and setup test runs added AI SDK 6 `consumeStream()` and Python `GeneratorExit` streaming guidance, redaction notes for wrapping processors, user and session IDs and file bytes, and where verification's span IDs come from.
+- 0.7.8 (2026-10-18): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.20.0`. The registry availability check before installation is unchanged.
+- 0.7.7 (2026-10-16): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.19.1` instead of 0.19.0. The registry availability check before installation is unchanged.
+- 0.7.6 (2026-10-16): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.19.0` instead of 0.18.2. The registry availability check before installation is unchanged.
+- 0.7.5 (2026-10-14): the key steps name the settings page by its current label, **Settings → API keys**, instead of **Settings → Integrations & API keys**.
+- 0.7.2 (2026-10-12): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.18.0` instead of 0.17.0. The registry availability check before installation is unchanged.
 - 0.7.1 (2026-10-11): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.17.0` instead of 0.16.0. The registry availability check before installation is unchanged.
 - 0.7.0 (2026-10-08): evals run through `hue eval` with SDK 0.16.0: `--check` first, one command is one run, never a custom harness or tool stand-ins; an interrupted run stays open and the identical command resumes it.
 - 0.6.9 (2026-10-08): link the skill and SDK guides to the consolidated Quickstart, production setup, and MCP recipes pages.

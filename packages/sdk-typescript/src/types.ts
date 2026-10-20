@@ -6,7 +6,9 @@ import type {
   Tracer,
   TracerProvider,
 } from "@opentelemetry/api";
+import type { AttributeValue } from "@opentelemetry/api";
 import type { LoggerProvider } from "@opentelemetry/api-logs";
+import type { Attachment } from "./attachment.js";
 
 /**
  * JSON-compatible data: the shape content has on the wire after the helpers encode it. Helpers
@@ -20,6 +22,16 @@ export type JsonValue =
   | string
   | JsonValue[]
   | { [key: string]: JsonValue };
+/**
+ * JSON data that may hold an {@link Attachment} anywhere: what a span attribute passed to a helper
+ * may be besides an OpenTelemetry attribute value. Such a value is recorded as JSON text with each
+ * attachment as its digest part.
+ */
+export type AttachmentJson =
+  | Attachment
+  | JsonValue
+  | AttachmentJson[]
+  | { [key: string]: AttachmentJson };
 /** Telemetry signal named by export reports, issues and processors. */
 export type Signal = "traces" | "logs";
 
@@ -142,11 +154,15 @@ export interface ExportReport {
   pendingBytes: number;
   /** Helper capture or instrumentation failures that omitted telemetry while preserving application results. */
   instrumentationFailures: number;
-  /** Whole span attributes, inline media, and opted-in file helper uploads stored apart from
-   * their spans (or already held by Hue), each listed under the span's `hue.blobs`. */
+  /** Whole span attributes, inline media, attachments and opted-in file helper uploads stored
+   * apart from their records (or already held by Hue), each listed under the record's
+   * `hue.blobs`; counted when the upload completes, which can be after the export that listed
+   * it. */
   uploadedValues: number;
-  /** Whole-attribute, inline-media, and opted-in file helper uploads that could not be attached.
-   * Content falls back to truncation, media digests, or file metadata, with a warning issue. */
+  /** Whole-attribute, inline-media, attachment and opted-in file helper uploads that could not be
+   * attached, each with a warning issue: values exported in their fallback form (truncation,
+   * media digests, or file metadata), and values whose upload failed after their record was
+   * exported (their `hue.blobs` entries stay). */
   uploadFallbacks: number;
 }
 
@@ -170,8 +186,13 @@ export interface SafeLifecycleResult {
 export interface SpanOptions {
   /** OpenTelemetry span kind; `INTERNAL` by default. */
   kind?: SpanKind;
-  /** Attributes set when the span starts. */
-  attributes?: Attributes;
+  /**
+   * Attributes set when the span starts. A value that is a JSON object, an array OpenTelemetry
+   * cannot hold (not of one primitive type) or an {@link Attachment} is recorded as JSON text, with
+   * each attachment as its digest part and its bytes uploaded; put files under `metadata` for Hue to
+   * list them as the span's metadata files.
+   */
+  attributes?: { [key: string]: AttributeValue | AttachmentJson | undefined };
   /** Recorded as `gen_ai.conversation.id` on this span and inherited by nested helper spans. */
   sessionId?: string;
   /** Recorded as `user.id` on this span and inherited by nested helper spans. */
@@ -203,11 +224,22 @@ export interface McpServerInfo {
   surface?: string;
 }
 
-/**
- * Options for {@link HueClient.tool}. `callId` is the provider-issued tool-call
- * id; `mcp` is the MCP server that handled the call.
- */
+/** Explicit routing evidence for {@link HueClient.tool}; values come from the application. */
+export interface ToolEndpoint {
+  /** Actual HTTP(S) URL used by the tool. Never synthesize it from a tool or server label. */
+  url: string;
+  /** Where the URL was observed. Recorded as `hue.tool.endpoint.source`. */
+  source: "request" | "client_config" | "receipt";
+  /** Actual HTTP method, when known; the SDK supplies no default. */
+  method?: string;
+  /** Non-secret query names to retain, including every occurrence. All others are removed. */
+  captureQueryParameters?: readonly string[];
+}
+
+/** Options for {@link HueClient.tool}, including call identity and opt-in routing evidence. */
 export interface ToolOptions extends Pick<SpanOptions, "parentContext"> {
+  /** Opt-in routing evidence. Only captured with content enabled, through existing redaction. */
+  endpoint?: ToolEndpoint;
   /** Provider-issued identifier of this tool call, recorded as `gen_ai.tool.call.id`. */
   callId?: string;
   /**
@@ -264,11 +296,19 @@ export interface FileRecord {
   mediaType: string;
   /** Hex SHA-256 of the file's bytes; computed from `data` when omitted. */
   sha256?: string;
-  /** Upload supplied bytes on this span when content capture is enabled. Defaults to false. */
+  /** Upload the file's bytes (`data`, or the file at `path`) on this span when content capture is
+   * enabled. Defaults to false. */
   upload?: boolean;
   /** The file's bytes, hashed and measured locally by default; a string is hashed as UTF-8.
-   * Data larger than 25 MiB is omitted and counted as an instrumentation failure. */
+   * Data larger than 25 MiB, which would be held in memory until it is uploaded, is omitted and
+   * counted as an instrumentation failure. Give `data` or `path`, not both. */
   data?: Uint8Array | string;
+  /** A file to hash and measure locally (Node.js file system) instead of `data`. Up to 25 MiB it is
+   * read now, as `data` is. A larger regular file, up to Hue's 1 GB upload limit, is hashed now a
+   * slice at a time and, with `upload: true`, read again from disk when it is uploaded: it must
+   * stay unchanged until the client flushes, and is uploaded only if it still has the size and
+   * SHA-256 it was recorded with (otherwise it counts as an upload fallback). */
+  path?: string;
   /** Size in bytes; computed from `data` when omitted. */
   byteSize?: number;
   /** File name, recorded as `hue.file.name` only when `captureContent` is true. */
@@ -396,4 +436,9 @@ export interface TraceVerification {
   verified: boolean;
   /** Latest receipt observed, or `null` when the trace was never found. */
   receipt: TraceReceipt | null;
+  /**
+   * The project the key searched, looked up when no receipt arrived: a trace missing there was
+   * sent with a different key or is not stored yet. Absent when that lookup failed.
+   */
+  project?: ProjectConnection;
 }

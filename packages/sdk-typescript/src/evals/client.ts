@@ -1,6 +1,7 @@
 import { isLoopbackHost, validateOptions } from "../config.js";
 import type { ProjectConnection } from "../types.js";
 import { json, uuid, valueBounds } from "./json.js";
+import { MediaClient } from "./media.js";
 import {
   attemptBindingRead,
   parsePrepareAttemptResultV2,
@@ -16,6 +17,7 @@ import type {
   ArtifactUpload,
   CaseConversion,
   CaseConversionSummary,
+  CaseFileReference,
   CaseWrite,
   CompleteExecution,
   Completion,
@@ -228,6 +230,48 @@ function productRunFields<T>(value: unknown, kind: "run" | "scoring" | "result")
     result.scoring = result.evaluation;
   return result as T;
 }
+/** The bounds of a request body as a whole: 1 MiB, with each value's node and depth bounds. */
+const REQUEST_BOUNDS = { ...valueBounds, bytes: 1024 * 1024 };
+/** A request body as it is sent: checked as JSON within `bounds`. Optional top-level fields are
+ * omitted intentionally; nested undefined remains invalid. */
+function payloadOf(body: object, bounds: typeof REQUEST_BOUNDS): string {
+  return JSON.stringify(
+    json(
+      Object.fromEntries(Object.entries(body).filter(([, value]) => value !== undefined)),
+      bounds,
+    ),
+  );
+}
+/**
+ * Checks what a case write's fields can be checked for here, as Hue checks them: a positive
+ * integer `expectedRevision`, an `externalKey` of 1–200 UTF-16 code units of well-formed text
+ * without NUL, `inputs`, `expected` and an object `metadata` within one value's JSON bounds, and an
+ * `environmentVersionId` that is a UUID or null.
+ */
+function checkCaseWrite(input: CaseWrite): void {
+  if (!input || typeof input !== "object") throw new TypeError("A case write must be an object");
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1)
+    throw new TypeError("expectedRevision must be a positive integer");
+  const key: unknown = input.externalKey;
+  if (
+    typeof key !== "string" ||
+    !key.length ||
+    key.length > 200 ||
+    !key.isWellFormed() ||
+    key.includes("\u0000")
+  )
+    throw new TypeError("externalKey must be 1–200 UTF-16 code units of well-formed text");
+  json(input.inputs, valueBounds);
+  if (input.expected !== undefined) json(input.expected, valueBounds);
+  if (input.metadata !== undefined) {
+    if (!input.metadata || typeof input.metadata !== "object" || Array.isArray(input.metadata))
+      throw new TypeError("metadata must be an object");
+    json(input.metadata, valueBounds);
+  }
+  if (input.environmentVersionId !== undefined && input.environmentVersionId !== null)
+    uuid(input.environmentVersionId);
+}
+
 /** Times a refused request is sent again before its refusal is the caller's error. */
 const REFUSAL_RETRIES = 4;
 /** A refusal asking for a longer wait fails at once rather than holding the caller. */
@@ -261,6 +305,9 @@ function refusalRetryAfter(response: Response): number | undefined {
 export class EvaluationClient {
   /** Validated Hue origin. */
   readonly baseUrl: string;
+  /** Recorded media read back by digest: one file (`fetch`) or every digest part of a recorded
+   * value (`resolve`). Needs a key that may read recorded content (Read, or Read and write). */
+  readonly media: MediaClient;
   readonly #apiKey: string;
   private readonly timeoutMillis: number;
   private readonly maxAttempts: number;
@@ -277,6 +324,11 @@ export class EvaluationClient {
     if (!Number.isInteger(attempts) || attempts < 1 || attempts > 10)
       throw new RangeError("maxAttempts must be 1–10");
     this.maxAttempts = attempts;
+    this.media = new MediaClient({
+      baseUrl: this.baseUrl,
+      apiKey: validated.apiKey,
+      timeoutMillis: this.timeoutMillis,
+    });
   }
   /** Sends one request to Hue, again after the wait while Hue refuses it with a short
    * `Retry-After`. `init` runs for every attempt, so each has its own timeout; `signal` also ends
@@ -317,25 +369,14 @@ export class EvaluationClient {
     method: string,
     path: string,
     body?: unknown,
-    bounds = { ...valueBounds, bytes: 1024 * 1024 },
+    bounds = REQUEST_BOUNDS,
     signal?: AbortSignal,
     /** Overrides the retry decision `retryable` takes from the method and body. */
     idempotent?: boolean,
   ): Promise<T> {
     // Serialized once, outside the attempts: a body this client cannot encode is a caller error
-    // no attempt fixes. Optional top-level fields are omitted intentionally; nested undefined
-    // remains invalid.
-    const payload =
-      body === undefined
-        ? undefined
-        : JSON.stringify(
-            json(
-              Object.fromEntries(
-                Object.entries(body as object).filter(([, value]) => value !== undefined),
-              ),
-              bounds,
-            ),
-          );
+    // no attempt fixes.
+    const payload = body === undefined ? undefined : payloadOf(body as object, bounds);
     const attempts = retryable(method, body, idempotent) ? this.maxAttempts : 1;
     for (let attempt = 1; ; attempt++) {
       try {
@@ -453,20 +494,41 @@ export class EvaluationClient {
     }
   }
   /** Stage bytes at the storage capability Hue issued. The Hue key is never sent to storage. */
-  async uploadArtifactBytes(
+  uploadArtifactBytes(
     upload: ArtifactUpload,
     bytes: Uint8Array,
     contentType: string,
   ): Promise<void> {
+    return this.putArtifact(upload, contentType, bytes as Uint8Array<ArrayBuffer>);
+  }
+  /** @internal Stage `byteSize` bytes read from `body` a slice at a time, without the copy a
+   * byte body is given; the request declares their length, as it does for bytes. */
+  uploadArtifactStream(
+    upload: ArtifactUpload,
+    body: ReadableStream<Uint8Array>,
+    byteSize: number,
+    contentType: string,
+  ): Promise<void> {
+    return this.putArtifact(upload, contentType, body, byteSize);
+  }
+  private async putArtifact(
+    upload: ArtifactUpload,
+    contentType: string,
+    body: Uint8Array<ArrayBuffer> | ReadableStream<Uint8Array>,
+    byteSize?: number,
+  ): Promise<void> {
     const uploadUrl = signedUploadUrl(upload.uploadUrl);
     if (upload.method !== "PUT") throw new HueApiError();
     const headers = signedUploadHeaders(upload.headers, contentType);
+    // Storage refuses a body of unknown length, which a stream would otherwise be sent as.
+    if (byteSize !== undefined) headers["content-length"] = String(byteSize);
     let response: Response;
     try {
       response = await fetch(uploadUrl, {
         method: "PUT",
         headers,
-        body: bytes as Uint8Array<ArrayBuffer>,
+        body,
+        ...(byteSize !== undefined ? { duplex: "half" } : {}),
         redirect: "error",
         signal: AbortSignal.timeout(Math.max(this.timeoutMillis, 120_000)),
       });
@@ -538,14 +600,42 @@ export class EvaluationClient {
       `/dataset-versions/${uuid(id)}/cases${this.page(page)}`,
     );
   }
-  /** Adds a case to a draft version using optimistic concurrency on `expectedRevision`. */
-  addCase(id: string, input: CaseWrite) {
+  /**
+   * Adds a case to a draft version using optimistic concurrency on `expectedRevision`. Each of
+   * `files` given as bytes or a path is checked against the artifact policy and uploaded as a
+   * verified artifact first, under a key derived from the version, the case's `externalKey`, the
+   * role and the bytes, so sending the same case again reuses the artifact. Every file and the
+   * case itself are checked before the first upload. A file given by `path` is hashed a slice at
+   * a time when it is checked and read again when it is uploaded, one file at a time, so no more
+   * than one file is held in memory; only bytes that match the checked SHA-256 are sent.
+   *
+   * @throws TypeError or RangeError for `files` outside the artifact policy, or a case Hue would
+   * refuse for its fields or size, before any request. TypeError when a file given by `path`
+   * changed after it was checked, or can no longer be read, before any of its bytes are sent: it
+   * is not staged and the case is not written.
+   */
+  async addCase(id: string, input: CaseWrite) {
+    // The canonical spelling: the reservation keys of uploaded files name the version.
+    const versionId = uuid(id).toLowerCase();
+    checkCaseWrite(input);
+    let body: CaseWrite | (Omit<CaseWrite, "files"> & { files: CaseFileReference[] }) = input;
+    if (input.files !== undefined) {
+      // Loaded on use: the artifact helpers import this client.
+      const { caseFileReferences } = await import("./files.js");
+      body = {
+        ...input,
+        // The case is checked as it will be sent, with a stand-in for each upload's artifact.
+        files: await caseFileReferences(this, versionId, input, (files) =>
+          payloadOf({ ...input, files }, REQUEST_BOUNDS),
+        ),
+      };
+    }
     return this.request<{
       /** The stored case. */
       item: DatasetCase;
       /** The version with its new revision. */
       version: DatasetVersion;
-    }>("POST", `/dataset-versions/${uuid(id)}/cases`, input);
+    }>("POST", `/dataset-versions/${versionId}/cases`, body);
   }
   /** Freezes a draft version at the given revision; frozen versions are immutable. */
   freezeDatasetVersion(id: string, expectedRevision: number) {
@@ -742,7 +832,7 @@ export class EvaluationClient {
     const query = new URLSearchParams();
     if (page.after !== undefined) query.set("after", String(page.after));
     if (page.limit !== undefined) query.set("limit", String(page.limit));
-    return this.request<import("../environment/types.js").StepPage>(
+    return this.request<import("../world/types.js").StepPage>(
       "GET",
       `/experiment-executions/${uuid(executionId)}/environment/steps${query.size ? `?${query}` : ""}`,
     );
@@ -1028,7 +1118,8 @@ export class EvaluationClient {
   async getScoringResult(id: string): Promise<StoredScoringResult> {
     return productRunFields(await this.getResult(id), "result");
   }
-  /** Dispatches hosted judge jobs for `llm_judge` pins; check {@link getJudgeBudget} first. */
+  /** Dispatches hosted judge jobs for `llm_judge` pins. Hue checks admission for new requests;
+   * replay an interrupted request with its original key and body even if the budget changed. */
   createJudgeJobs(
     id: string,
     input: {

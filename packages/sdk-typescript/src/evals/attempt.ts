@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod/v4";
-import type { CoverageGap } from "../environment/types.js";
+import type { CoverageGap } from "../world/types.js";
 import type { JsonValue, SimulationMcpCapability } from "./types.js";
 import { json, valueBounds } from "./json.js";
 

@@ -9,7 +9,7 @@ The SDK packages use the MIT license. A workflow file or a passing build does no
 1. Merge the reviewed version, changelog, package metadata and lockfile changes into `main`. For TypeScript, run `bun run build` in `packages/sdk-typescript` after changing `version` so the generated `src/version.ts` is committed alongside it (CI fails when they disagree). For Python, change `__version__` in `packages/sdk-python/src/hue_sdk/_version.py` together with `version` in `pyproject.toml`; the test suite fails when they disagree. The changelog must contain a `### [X.Y.Z]` entry under the package's section; the workflow refuses to prepare a version without one. Approve the actual license text before packaging; the archive gate rejects missing licenses and `UNLICENSED` metadata.
 2. Run **Release SDK** (`.github/workflows/release.yml`) from `main`, selecting the language and exact committed stable version. Leave **publish** unchecked to prepare downloadable artifacts without publishing. The workflow always checks out its immutable triggering commit; it cannot publish a feature branch.
 3. Preparation builds once, tests installed packages, inspects the distribution inventory, and records `release-manifest.json` plus `SHA256SUMS`. TypeScript runs both supported AI SDK/OTel patch pairs and the Node reference chatbot. Python installs the same wheel using both pip and uv on Python 3.10 and 3.14, exercising tracing, logs, evaluation, privacy, acknowledgements and cloud configuration against synthetic loopback services.
-4. After registry setup, select **publish** to prepare, verify and publish. Only the isolated publishing jobs receive `id-token: write`. They download the verified artifacts, check hashes and publish unchanged bytes; they do not check out source or rebuild packages. The npm job disables lifecycle scripts. Ordinary TypeScript releases retain the default `latest` tag; an activation-gated release selects the closed `hue-onboarding-candidate` tag instead. TypeScript `0.4.0` additionally requires `prepared_run_id` identifying its accepted, successful `publish=false` run on the same immutable main commit; publication downloads and rechecks that archive without rebuilding it. Reuse requires exactly three regular, non-symlink files: the named tarball, its manifest and matching `SHA256SUMS`. The GitHub evidence-read token is scoped to identity verification; installed-package tests run separately without it.
+4. After registry setup, select **publish** to prepare, verify and publish. Only the isolated publishing jobs receive `id-token: write`. They download the verified artifacts, check hashes and publish unchanged bytes; they do not check out source or rebuild packages (the `hue-run` npm alias, below, is the exception). The npm job disables lifecycle scripts. Ordinary TypeScript releases retain the default `latest` tag; an activation-gated release selects the closed `hue-onboarding-candidate` tag instead. TypeScript `0.4.0` additionally requires `prepared_run_id` identifying its accepted, successful `publish=false` run on the same immutable main commit; publication downloads and rechecks that archive without rebuilding it. Reuse requires exactly three regular, non-symlink files: the named tarball, its manifest and matching `SHA256SUMS`. The GitHub evidence-read token is scoped to identity verification; installed-package tests run separately without it.
 5. Public registry acceptance first waits, for up to 10 minutes, until the registry serves the version to its runner (`scripts/wait-for-registry.py`: npm's version and install documents with the dist-tag, or PyPI's simple index with pip's headers and its version document), since both registries answer from caches that lag a publish. It then fetches the published archives and verifies their SHA-256 against the tested artifacts. For npm it also requires provenance attestations on the published version. Fresh consumers then install by package name and exact version, without GitHub credentials or local archive overrides, and rerun behavioral checks.
 6. After registry acceptance, the workflow creates or updates the language-specific GitHub release (for example `typescript-v0.1.2` and `python-v0.1.0`) from the changelog entry, attaching the archive, `release-manifest.json` and `SHA256SUMS`. Update public availability statements only after registry acceptance succeeds.
 
@@ -201,22 +201,29 @@ All integration checks use synthetic services. No paid model API or production H
 
 ## Registry aliases
 
-`packages/aliases/npm-hue-run` and `packages/aliases/pypi-hue-sdk` are thin alias packages: `hue-run`
-on npm re-exports `@hue-run/sdk`, and `hue-sdk` on PyPI depends on `hue-run`. Published, they make the
-sibling name on each registry resolve to the real SDK instead of an unrelated or squatted package (the
-Python import module is `hue_sdk`). Only the npm alias's early `0.2.x` versions have been published, so
-`npm install hue-run` installs `@hue-run/sdk` `0.2.x`, and `hue-sdk` is not on PyPI, so
-`pip install hue-sdk` does not install Hue's SDK; use `@hue-run/sdk` and `hue-run`. The aliases are
-not part of the verified release workflow above.
+`packages/aliases/npm-hue-run` is a thin alias package: `hue-run` on npm re-exports `@hue-run/sdk`.
+Published, it makes the Python distribution's name resolve on npm to the real SDK instead of an
+unrelated or squatted package. Bump it to the same version as `@hue-run/sdk` with every release, with
+its pinned dependency.
 
-For the first publication, and again whenever a package releases afterwards, bump the alias to the
-same version and its pinned dependency, then publish it by hand with the authorized account (npm
-requires a manual first publication before a trusted publisher can be registered):
+**npm.** The release workflow publishes `hue-run` through npm trusted publishing (owner `hue-run`,
+repository `hue-sdk`, workflow `release.yml`, environment `npm`), with provenance and no token. After
+`accept-npm` accepts an ordinary `latest` TypeScript release, `publish-npm-alias` publishes
+`packages/aliases/npm-hue-run` when its version equals the released version and it pins exactly that
+`@hue-run/sdk`; `accept-npm-alias` then waits until npm serves it under `latest` and checks its
+provenance and pin. `verify-package.mjs` already refuses a release whose alias is at another
+version or pins another SDK, and installs the packed alias beside the tested archive. The alias is
+packed from its static files at the release commit, the one exception to publishing only prepared
+archives, and its publishing job runs no repository script. An activation candidate never publishes
+it, and a version npm already holds is not published again.
 
-```bash
-(cd packages/aliases/npm-hue-run && npm publish --access public --ignore-scripts)
-(cd packages/aliases/pypi-hue-sdk && uvx --from build pyproject-build . && uvx --from twine==7.0.0 twine upload dist/*)
-```
+A dispatch for a TypeScript version npm already holds publishes nothing new to npm: `publish-npm`
+skips the publish, `accept-npm` still checks the held bytes against the archive the run rebuilt and
+tested from its own commit (the build is reproducible, so an unchanged package matches), and an
+existing GitHub release is left as the publishing run recorded it. Dispatching the same version again
+from a later `main` commit whose package is unchanged therefore ships an alias that missed its
+release without republishing the SDK. Python has no such path: PyPI refuses a second upload of a
+version.
 
-Register trusted publishers for both aliases once they exist so later bumps can move into
-`release.yml`.
+**PyPI.** PyPI blocks `hue-sdk` as too similar to the unrelated `huesdk`, so there is no PyPI alias;
+the Python package is `hue-run`.

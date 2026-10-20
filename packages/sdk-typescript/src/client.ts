@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
-import { isMediaName } from "./inline-files.js";
+import { digestFormBytes, INLINE_FILE_TEXT_PER_RECORD, isMediaName } from "./inline-files.js";
 import {
   context,
   isSpanContextValid,
@@ -17,7 +17,7 @@ import {
 } from "@opentelemetry/api";
 import { defaultTextMapGetter, defaultTextMapSetter } from "@opentelemetry/api";
 import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
-import { W3CTraceContextPropagator } from "@opentelemetry/core";
+import { isAttributeValue, W3CTraceContextPropagator } from "@opentelemetry/core";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider, type ReadableSpan } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
@@ -29,6 +29,7 @@ import {
   providerErrorDescription,
 } from "./provider-tools.js";
 import { toolCatalogSummary } from "./tool-definitions.js";
+import { toolEndpointAttributes } from "./tool-endpoint.js";
 import {
   contentLimitsOf,
   encodeBoundedContent,
@@ -37,9 +38,20 @@ import {
   safeSpan,
   spanSource,
   type EncodeLimits,
+  type PlaceAttachment,
 } from "./safety.js";
 import { TRUNCATED_KEY, withTruncatedKeys } from "./privacy.js";
-import { MAX_BLOB_BYTES } from "./blobs.js";
+import { countFallback, MAX_BLOB_BYTES, newTally, sizeOf, type MediaAttachment } from "./blobs.js";
+import {
+  attachmentPart,
+  attachmentState,
+  fileSource,
+  holdsAttachment,
+  MAX_ATTACHMENT_DEPTH,
+  readPath,
+  type PathFile,
+  type PlacedAttachment,
+} from "./attachment.js";
 import {
   createHueTransport,
   exportBudgetMillis,
@@ -270,6 +282,17 @@ const OWNED_SPAN_LIMITS = {
  * 65,536 values, as the Python SDK's content snapshot. */
 const catalogLimits: EncodeLimits = { bytes: MAX_BODY_BYTES, nodes: 65_536, depth: 64 };
 
+/** Whether a span attribute passed to a helper is recorded as JSON text: an attachment, a value
+ * holding one, or JSON data OpenTelemetry cannot hold as an attribute (a plain object, or an array
+ * that is not of one primitive type). */
+function recordedAsJson(value: unknown): boolean {
+  if (holdsAttachment(value)) return true;
+  if (value === null || typeof value !== "object" || isAttributeValue(value)) return false;
+  if (Array.isArray(value)) return true;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 /**
  * Hue tracing client. Helpers create spans through a private tracer and local async context, never
  * through global OpenTelemetry registration, and they fail open: capture problems are counted in
@@ -304,8 +327,13 @@ export class HueClient {
   private ownedProviders?: { tracer: TracerProvider; logger: LoggerProvider };
   private closed = false;
   private shutdownPromise?: Promise<ExportReport>;
-  private flushPromise?: Promise<ExportReport>;
-  private safeFlushPromise?: Promise<SafeLifecycleResult>;
+  /** The latest flush while it still sends its records (`sent`, which the next flush's send
+   * follows), and the safe result that joined it. */
+  private sending?: {
+    work: Promise<ExportReport>;
+    sent: Promise<unknown>;
+    safe?: Promise<SafeLifecycleResult>;
+  };
   private safeShutdownPromise?: Promise<SafeLifecycleResult>;
 
   constructor(options: HueOptions | ExistingHueProviders) {
@@ -368,9 +396,13 @@ export class HueClient {
    * @throws HueTraceVerificationError for authentication, unsupported endpoint, transport or invalid response failures.
    * @throws TypeError for an invalid trace ID or options.
    */
-  verifyTrace(traceId: string, options: VerifyTraceOptions = {}): Promise<TraceVerification> {
-    if (!this.enabled) return Promise.reject(new HueConnectionError("Hue telemetry is disabled"));
-    return verifyTrace(this.transport.options, traceId, options);
+  async verifyTrace(traceId: string, options: VerifyTraceOptions = {}): Promise<TraceVerification> {
+    if (!this.enabled) throw new HueConnectionError("Hue telemetry is disabled");
+    // Once Hue reports the trace missing, name the project this key searched so a wrong key reads
+    // differently from a trace that is not stored yet.
+    return verifyTrace(this.transport.options, traceId, options, () =>
+      this.checkConnection().catch(() => undefined),
+    );
   }
 
   /** The helper's current context: the innermost active Hue span, else the OpenTelemetry active context. */
@@ -404,13 +436,16 @@ export class HueClient {
           workspaceId: identifier(options.workspaceId ?? inherited?.workspaceId),
           model: inherited?.model,
         };
+        const { attributes, placed } = this.attributeValues(options.attributes);
         span = this.storage.run(active, () =>
           this.tracer.startSpan(
             name,
-            { kind: options.kind ?? SpanKind.INTERNAL, attributes: options.attributes },
+            { kind: options.kind ?? SpanKind.INTERNAL, attributes },
             active.context,
           ),
         );
+        for (const [key, found] of placed)
+          this.stageAttachments(span, key, found, this.captureContent);
       } catch {
         this.instrumentationFailed();
       }
@@ -491,6 +526,14 @@ export class HueClient {
     stamp("mcp.server.version", options.mcp?.version);
     stamp("hue.mcp.provider", options.mcp?.provider);
     stamp("hue.mcp.surface", options.mcp?.surface);
+    if (this.enabled && !this.closed && this.captureContent) {
+      try {
+        if (options.endpoint !== undefined)
+          Object.assign(attributes, toolEndpointAttributes(options.endpoint));
+      } catch {
+        this.instrumentationFailed();
+      }
+    }
     return this.withSpan(
       `execute_tool ${name}`,
       async ({ span }) => {
@@ -732,16 +775,142 @@ export class HueClient {
       stamp("gen_ai.provider.name", messages.provider, enclosing?.model?.provider);
       stamp("gen_ai.request.model", messages.model, enclosing?.model?.requestModel);
       stamp("gen_ai.conversation.id", undefined, enclosing?.sessionId);
-      this.logger.emit({
-        context: active,
-        severityNumber: SeverityNumber.INFO,
-        eventName: "gen_ai.client.inference.operation.details",
-        attributes,
-        body: JSON.parse(encodeContent(body, this.contentLimits())),
-      });
+      // While media may be uploaded, the body may hold files past the value cap: it is emitted
+      // when it fits the cap with each file as its digest, and export uploads the files (under
+      // `body#<pointer>` keys) or cuts the body as before. Otherwise a body over the cap is
+      // refused, as before. Each attachment is written as its digest part.
+      const limits = this.contentLimits();
+      const placed: PlacedAttachment[] = [];
+      const place = this.placer(placed, true);
+      let text: string;
+      if (this.transport.holdsValues()) {
+        text = encodeContent(
+          body,
+          { ...limits, bytes: limits.bytes + INLINE_FILE_TEXT_PER_RECORD },
+          place,
+        );
+        if (
+          Buffer.byteLength(text) > limits.bytes &&
+          digestFormBytes(JSON.parse(text)) > limits.bytes
+        )
+          throw new RangeError("Content limit exceeded");
+      } else text = encodeContent(body, limits, place);
+      const recorded: object = JSON.parse(text);
+      // Attachments in the body are staged with the body until this transport admits the record;
+      // export uploads them with the media the body holds.
+      const traceId = trace.getSpanContext(active)!.traceId;
+      const files = this.attachmentFiles(placed, true, "logs", traceId, false);
+      if (files.length) this.transport.stageLogParts(recorded, traceId, files);
+      try {
+        this.logger.emit({
+          context: active,
+          severityNumber: SeverityNumber.INFO,
+          eventName: "gen_ai.client.inference.operation.details",
+          attributes,
+          body: recorded as Record<string, never>,
+        });
+      } finally {
+        this.transport.unstageLogParts(recorded);
+      }
     } catch {
       this.instrumentationFailed("logs");
     }
+  }
+
+  /** Writes each attachment as its digest part, `null` for an invalid one, collecting them. */
+  private placer(placed: PlacedAttachment[], captureContent: boolean): PlaceAttachment {
+    return (attachment, pointer, depth) => {
+      const state = attachmentState(attachment)!;
+      const part = attachmentPart(state, captureContent);
+      placed.push({ state, ...(part ? { part } : {}), pointer, depth });
+      return part ?? null;
+    };
+  }
+
+  /**
+   * The files of the attachments a value placed that are uploaded: an invalid attachment, and
+   * an invalid name with content capture, count as instrumentation failures; nothing is uploaded
+   * without content capture or with setup credentials; a value that was `cut`, or a part deeper
+   * than Hue reads, keeps its digest part and counts as not uploaded.
+   */
+  private attachmentFiles(
+    placed: readonly PlacedAttachment[],
+    captureContent: boolean,
+    signal: Signal,
+    traceId: string,
+    cut: boolean,
+  ): MediaAttachment[] {
+    const files: MediaAttachment[] = [];
+    const tally = newTally();
+    for (const { state, part, depth } of placed) {
+      if (!part || state.size === undefined || !state.sha256) {
+        this.instrumentationFailed(signal);
+        continue;
+      }
+      if (state.invalidName && captureContent) this.instrumentationFailed(signal);
+      if (!this.transport.offloadsValues() || !state.size) continue;
+      if (cut || depth > MAX_ATTACHMENT_DEPTH) {
+        countFallback(tally, "budget", traceId);
+        continue;
+      }
+      files.push({
+        // A file given by path over 25 MiB is read again from disk when it is uploaded.
+        bytes: state.file ? fileSource(state.file) : state.bytes!,
+        digest: { sha256: state.sha256, size: state.size },
+        contentType: state.contentType,
+        ...(state.name === undefined ? {} : { name: state.name }),
+      });
+    }
+    if (tally.fallbacks.size) this.transport.reportOffload(tally, signal);
+    return files;
+  }
+
+  /** Stages the attachments a span's `attribute` now holds, replacing its earlier ones. */
+  private stageAttachments(
+    span: Span,
+    attribute: string,
+    placed: readonly PlacedAttachment[],
+    captureContent: boolean,
+    cut = false,
+  ): void {
+    const traceId = span.spanContext().traceId;
+    const files = this.attachmentFiles(placed, captureContent, "traces", traceId, cut);
+    if (span.isRecording()) this.transport.stageParts(span, attribute, files);
+  }
+
+  /**
+   * Span attributes as recorded: a value that is an {@link Attachment}, an object or array holding
+   * one, or JSON data OpenTelemetry cannot hold as an attribute (an object, or an array that is not
+   * of one primitive type), becomes its JSON text with each attachment as its digest part (an
+   * invalid attachment alone is omitted); every other value is left to OpenTelemetry as given.
+   */
+  private attributeValues(input: SpanOptions["attributes"]): {
+    attributes: Attributes | undefined;
+    placed: [string, PlacedAttachment[]][];
+  } {
+    const placed: [string, PlacedAttachment[]][] = [];
+    if (!input || typeof input !== "object") return { attributes: input as undefined, placed };
+    let attributes: Attributes | undefined;
+    for (const [key, value] of Object.entries(input)) {
+      if (!recordedAsJson(value)) continue;
+      attributes ??= { ...input } as Attributes;
+      const found: PlacedAttachment[] = [];
+      try {
+        const text = encodeContent(
+          value,
+          this.contentLimits(),
+          this.placer(found, this.captureContent),
+        );
+        if (text === "null") delete attributes[key];
+        else attributes[key] = text;
+      } catch {
+        delete attributes[key];
+        this.instrumentationFailed();
+        continue;
+      }
+      placed.push([key, found]);
+    }
+    return { attributes: attributes ?? (input as Attributes), placed };
   }
 
   /**
@@ -863,10 +1032,15 @@ export class HueClient {
   /**
    * Adds a `hue.file` event to the active (or given) span for a file the work read, received or
    * produced: `hue.file.sha256`, `hue.file.role`, `hue.file.media_type`, `hue.file.size` when known
-   * and, when `captureContent` is true, `hue.file.name`. `data` is hashed and measured locally and
-   * uploaded only with `upload: true`. The event is metadata, so it is recorded in both capture modes. An invalid
-   * record, or one without an active span, is omitted and counted, never thrown; an invalid name
-   * alone is omitted and counted while the rest is recorded.
+   * and, when `captureContent` is true, `hue.file.name`. `data` or the file at `path` is hashed and
+   * measured locally and uploaded only with `upload: true`: `data` and a file up to 25 MiB are
+   * held in memory until then, while a larger regular file, up to Hue's 1 GB upload limit, is
+   * hashed a slice at a time and read again from disk when it is uploaded, and is uploaded only if
+   * it still has the size and SHA-256 it was recorded with; a `path` that is no regular file, such
+   * as a named pipe, is refused without waiting on it. The event is metadata, so it is
+   * recorded in both capture modes. An invalid record, or one without an active span, is omitted
+   * and counted, never thrown; an invalid name alone is omitted and counted while the rest is
+   * recorded.
    */
   recordFile(file: FileRecord, explicitContext?: Context): void {
     if (!this.enabled || this.closed) return;
@@ -875,14 +1049,37 @@ export class HueClient {
         explicitContext ?? this.storage.getStore()?.context ?? context.active(),
       );
       if (!span?.isRecording()) throw new Error("File records require an active span");
-      const { role, mediaType, data, name } = file;
+      const { role, mediaType, data, name, path } = file;
       if (role !== "input" && role !== "attachment" && role !== "output")
         throw new TypeError("Invalid file role");
       if (!isLabel(mediaType)) throw new TypeError("Invalid media type");
       let sha256 = typeof file.sha256 === "string" ? file.sha256.toLowerCase() : file.sha256;
       let byteSize = file.byteSize;
       let bytes: Uint8Array | undefined;
-      if (data !== undefined) {
+      // A file given by path over 25 MiB: hashed now and read again from disk when it is uploaded.
+      let onDisk: PathFile | undefined;
+      let given = data;
+      if (path !== undefined) {
+        if (data !== undefined) throw new TypeError("A file takes data or a path, not both");
+        if (typeof path !== "string" || !path) throw new TypeError("Invalid file path");
+        const read = readPath(path);
+        if (!read)
+          throw new RangeError("File must be a regular file within Hue's 1 GB upload limit");
+        if ("bytes" in read) given = read.bytes;
+        else {
+          onDisk = read.file;
+          // A caller-supplied digest or size must describe the same bytes.
+          if (
+            (sha256 !== undefined && sha256 !== onDisk.sha256) ||
+            (byteSize !== undefined && byteSize !== onDisk.size)
+          )
+            throw new TypeError("File digest or size does not match its data");
+          sha256 = onDisk.sha256;
+          byteSize = onDisk.size;
+        }
+      }
+      if (given !== undefined) {
+        const data = given;
         bytes =
           typeof data === "string"
             ? (() => {
@@ -963,13 +1160,14 @@ export class HueClient {
       }
       if (eventTime) this.fileEventTimes.set(source, eventTime);
       if (file.upload === true && this.transport.offloadsValues()) {
+        const upload = bytes ?? (onDisk ? fileSource(onDisk) : undefined);
         if (
           !this.transport.stageMedia(
             span,
-            bytes && eventTime
+            upload && eventTime
               ? {
-                  bytes,
-                  digest: { sha256, size: bytes.byteLength },
+                  bytes: upload,
+                  digest: { sha256, size: sizeOf(upload) },
                   contentType: mediaType,
                   eventTime,
                   ...(isMediaName(name) ? { name } : {}),
@@ -1007,10 +1205,17 @@ export class HueClient {
   private setContent(span: Span, key: string, value: unknown): void {
     if (!this.enabled || this.closed || !this.captureContent) return;
     try {
-      let encoded: { text: string; truncated: boolean } | undefined;
+      const encode = (limits: EncodeLimits) => {
+        const placed: PlacedAttachment[] = [];
+        return {
+          ...encodeBoundedContent(value, limits, true, this.placer(placed, true)),
+          placed,
+        };
+      };
+      let encoded: ReturnType<typeof encode> | undefined;
       if (this.transport.holdsValues())
         try {
-          encoded = encodeBoundedContent(value, {
+          encoded = encode({
             ...this.contentLimits(),
             bytes: MAX_BLOB_BYTES,
             nodes: MAX_RECORD_NODES,
@@ -1018,8 +1223,10 @@ export class HueClient {
         } catch {
           // Past the runtime's longest string, or its memory: cut to the cap instead.
         }
-      const { text, truncated } = encoded ?? encodeBoundedContent(value, this.contentLimits());
+      const { text, truncated, placed } = encoded ?? encode(this.contentLimits());
       span.setAttribute(key, text);
+      // The attachments the value holds are staged for upload in place of any it held before.
+      this.stageAttachments(span, key, placed, true, truncated);
       // The span's list as it stands: the application's own entries (read from the SDK span,
       // which carries its attributes; the API alone shows none) and this helper's earlier ones.
       const listed = withTruncatedKeys(
@@ -1105,24 +1312,24 @@ export class HueClient {
 
   /** Production lifecycle path: never rejects; timeouts do not cancel borrowed provider work. */
   flushSafe(options: SafeLifecycleOptions = {}): Promise<SafeLifecycleResult> {
-    if (this.safeFlushPromise) return this.safeFlushPromise;
-    const work = this.flushPromise ?? this.flush();
+    // A flush still sending its records is joined, so repeated timeouts do not accumulate
+    // promises against a hung borrowed provider. Once it sent them, a new flush sends the
+    // caller's own records instead of waiting on the earlier flush's uploads.
+    if (this.sending?.safe) return this.sending.safe;
+    const work = this.sending?.work ?? this.flush();
+    // An invalid budget returns before the result awaits the flush: its failure is still handled.
+    void work.catch(() => {});
     const result = this.safeLifecycle(() => work, options);
-    this.safeFlushPromise = result;
-    const clear = () => {
-      this.safeFlushPromise = undefined;
-    };
-    // Retain the timed-out result until its underlying drain settles. Repeated
-    // timeouts must not accumulate promises against a hung borrowed provider.
-    void work.then(clear, clear);
+    if (this.sending?.work === work) this.sending.safe = result;
     return result;
   }
 
   /**
    * Safe for finally blocks; preserves the application's result or original exception. When its
    * budget runs out while the client's own transport holds records for a receiver that limited
-   * the rate, the hold ends: those records are reported lost to the rate limit, and the hold no
-   * longer keeps the process running.
+   * the rate, or still uploads values its records listed, the hold and the uploads end: those
+   * records are reported lost to the rate limit, the uploads counted as failed (their records keep
+   * their entries), and neither keeps the process running.
    */
   shutdownSafe(options: SafeLifecycleOptions = {}): Promise<SafeLifecycleResult> {
     if (this.safeShutdownPromise) return this.safeShutdownPromise;
@@ -1172,8 +1379,9 @@ export class HueClient {
   }
 
   /**
-   * Drains the trace and log providers and waits for Hue's acknowledgements. Each caller gets a
-   * fresh serialized drain that includes records emitted before its call.
+   * Drains the trace and log providers and waits for Hue's acknowledgements, then for the uploads
+   * queued so far. Each caller gets a fresh drain that includes records emitted before its call;
+   * its records are sent after an earlier drain's records, never after that drain's uploads.
    *
    * @throws HueExportError when this drain observed a new rejection, delivery failure, drop or
    * invalid record; its `issues` and `report` are sanitized counts, never server text.
@@ -1181,28 +1389,34 @@ export class HueClient {
   flush(): Promise<ExportReport> {
     // Each caller needs a drain after its own preceding span/log emissions.
     // Joining an earlier drain can acknowledge records that were not in its batch.
+    // Only the sends are serialized: each flush then waits on its own for the uploads queued so
+    // far, so a later flush's records never wait behind an earlier flush's uploads.
     const from = this.transport.getFailureSequence();
-    const drain = async () => {
-      const report = await this.flushOnce();
-      if (this.transport.getFailureSequence() !== from)
-        throw new HueExportError(
-          this.transport
-            .getIssues()
-            .filter((issue) => issue.sequence > from && issue.kind !== "warning"),
-          report,
-        );
-      return report;
-    };
-    const next = (this.flushPromise ?? Promise.resolve()).then(drain, drain);
-    this.flushPromise = next;
+    const start = () => this.transport.flushRecords(() => this.flushProviders());
+    const flushing = (this.sending?.sent ?? Promise.resolve()).then(start, start);
+    const sent = flushing.then(({ sent }) => sent);
+    const next = flushing
+      .then(({ report }) => report)
+      .then((report) => {
+        if (this.transport.getFailureSequence() !== from)
+          throw new HueExportError(
+            this.transport
+              .getIssues()
+              .filter((issue) => issue.sequence > from && issue.kind !== "warning"),
+            report,
+          );
+        return report;
+      });
+    const sending = { work: next, sent };
+    this.sending = sending;
     const clear = () => {
-      if (this.flushPromise === next) this.flushPromise = undefined;
+      if (this.sending === sending) this.sending = undefined;
     };
-    void next.then(clear, clear);
+    void sent.then(clear, clear);
     return next;
   }
 
-  private async flushOnce(): Promise<ExportReport> {
+  private async flushProviders(): Promise<void> {
     // Providers this client owns wait as long as an export may take, a rate-limit hold included,
     // instead of OpenTelemetry's 30 s; borrowed providers keep their own budget.
     const owned = this.ownedProviders;
@@ -1223,11 +1437,11 @@ export class HueClient {
           0,
           "OpenTelemetry provider flush failed",
         );
-    return this.transport.flush();
   }
 
   /**
    * Flushes, then shuts down the providers this client owns; borrowed providers are left running.
+   * Like {@link flush}, it waits for queued uploads after the records are sent.
    * Idempotent: later calls return the same promise, and later helper calls only run their callbacks.
    *
    * @throws HueExportError when the final flush observed new failures; owned providers are still released.

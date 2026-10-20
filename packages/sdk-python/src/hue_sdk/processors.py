@@ -26,7 +26,13 @@ from ._blobs import Tally, Uploads, held_of
 from ._limits import AdvertisedLimits
 from ._otel_compat import export_context, instrumentation_suppressed
 from .snapshots import Hold, snapshot_log, snapshot_pending_span, snapshot_span
-from .transport import BATCH_TARGET_BYTES, MAX_BATCH_BYTES, DroppedRecords, PendingSpan
+from .transport import (
+    BATCH_TARGET_BYTES,
+    MAX_BATCH_BYTES,
+    DroppedRecords,
+    PendingSpan,
+    _record_trace_id,
+)
 
 # The instrumentation scope of ``Hue.tracer``; its spans are always announced while open.
 HUE_TRACER_SCOPE = "hue-run"
@@ -47,6 +53,8 @@ MAX_REMEMBERED_TRACES = 10_000
 class _BoundedProcessor:
     # Copies a record for the queue: ``(record, capture_content, record_bytes, value_bytes)``.
     _copy: Callable[..., Any]
+    # The client's uploads, shared by both signals; a flush waits for them.
+    _uploads: Uploads | None = None
 
     def __init__(
         self,
@@ -297,16 +305,40 @@ class _BoundedProcessor:
             next_export = monotonic() + 1
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        """Exports every record queued so far, then waits for every upload accepted so far,
+        within one deadline, and no longer once none of those pending can be stored before it
+        (each waits out a Retry-After past it), so a provider's processors after this one keep
+        the rest of a shared deadline. False on a timeout or a recorded drop or export failure;
+        an upload that fails is a warning."""
         if self._pid != os.getpid():
             return False
         deadline = monotonic() + timeout_millis / 1000
+        ok = self._flush_records(deadline)
+        if ok is None:
+            return False
+        uploads = self._uploads
+        if uploads is not None and not uploads.uploader.wait_idle(deadline):
+            return False
+        return ok
+
+    def flush_records(self, timeout_millis: int = 30_000) -> bool:
+        """Exports every record queued so far without waiting for any upload: a client's drain,
+        which later flushes wait behind, so they never wait behind an upload. False on a timeout
+        or a recorded drop or export failure."""
+        if self._pid != os.getpid():
+            return False
+        return bool(self._flush_records(monotonic() + timeout_millis / 1000))
+
+    def _flush_records(self, deadline: float) -> bool | None:
+        """Exports every record queued so far: None when ``deadline`` came first, otherwise
+        whether no drop or export failure is recorded."""
         with self._condition:
             self._flush_requested = True
             self._condition.notify_all()
             while self._pending_records or self._admissions:
                 remaining = deadline - monotonic()
                 if remaining <= 0:
-                    return False
+                    return None
                 self._condition.wait(remaining)
             self._flush_requested = False
             return not self._dropped and not self._exporter.failures
@@ -321,6 +353,9 @@ class _BoundedProcessor:
         if self._pid != os.getpid():
             return
         self.stop_accepting()
+        # The records are sent; pending uploads are not waited for here. A provider shuts its
+        # processors down one after another, so a wait here would hold every processor after
+        # this one: the client's own shutdown gives them their grace once its processors stop.
         self._worker.join(timeout=30)
 
 
@@ -528,6 +563,70 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
 
 class BoundedLogProcessor(_BoundedProcessor, LogRecordProcessor):
     _copy = staticmethod(snapshot_log)
+
+    def __init__(
+        self,
+        exporter: Any,
+        encode: Callable[[Any], Any],
+        max_records: int,
+        max_bytes: int,
+        capture_content: bool = True,
+        *,
+        limits: AdvertisedLimits | None = None,
+        dropped_records: DroppedRecords | None = None,
+        uploads: Uploads | None = None,
+    ) -> None:
+        # Set before the worker starts; admission reads it.
+        self._uploads = uploads
+        super().__init__(
+            exporter,
+            encode,
+            max_records,
+            max_bytes,
+            capture_content,
+            limits=limits,
+            dropped_records=dropped_records,
+        )
+
+    def _hold(self, value_bytes: int) -> Hold | None:
+        """A correlated log record's media are held for upload like a span's, with the
+        attachments ``log_inference`` staged for it."""
+        uploads = self._uploads
+        if uploads is None:
+            return None
+        return Hold(uploads.held, value_bytes, uploads.holds(), uploads)
+
+    def _discard(self, *items: Any) -> None:
+        """A dropped record's held media are released, and the attachments ``log_inference``
+        staged for it are counted as not uploaded."""
+        uploads = self._uploads
+        if uploads is None:
+            return
+        tally = Tally()
+        for item in items:
+            held = held_of(item)
+            record = getattr(item, "log_record", None)
+            trace_id = _record_trace_id(item) or ""
+            # A record lost before its copy was made still holds what log_inference staged; a
+            # copy lists the attachments the held-value budget refused under ``cut``.
+            dropped = (
+                len(held.files) + len(held.cut)
+                if held is not None
+                else uploads.drop_log(record.body)
+                if record is not None
+                else 0
+            )
+            for _ in range(dropped):
+                tally.fallback("budget", trace_id)
+            if held is not None:
+                held.values.clear()
+                held.body_values.clear()
+                held.files.clear()
+                held.cut.clear()
+                held.release()
+        report = getattr(self._exporter, "_report_uploads", None)
+        if tally.fallbacks and report is not None:
+            report(tally)
 
     def on_emit(self, log_record: ReadWriteLogRecord) -> None:
         self._enqueue(log_record)

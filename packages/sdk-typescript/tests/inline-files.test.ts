@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import corpus from "./fixtures/media-parts/cases.json" with { type: "json" };
+import digests from "./fixtures/inline-file-digests.json" with { type: "json" };
+import { applyJsonEdits } from "../src/json-edits.js";
 import {
   hashInlineFiles,
   hashNestedInlineFiles,
@@ -8,6 +10,7 @@ import {
   MAX_INLINE_FILE_TEXT,
   isMediaName,
   MediaDigestMemo,
+  pcmMediaType,
 } from "../src/inline-files.js";
 
 test("nested legacy media preserves empty and boundary-size binary verbatim", () => {
@@ -71,12 +74,55 @@ test("nested legacy inspection uses the UTF-16 MAX guard", () => {
   expect(hashNestedInlineFiles("gen_ai.input.messages", `${value} `)).toBe(`${value} `);
 });
 
-for (const item of corpus.fixtures)
+for (const item of corpus.fixtures as {
+  id: string;
+  attribute: string;
+  messages?: unknown;
+  value?: string;
+  failure: { messages?: unknown; value?: string };
+}[])
   test(`media digest fallback: ${item.id}`, () => {
-    expect(
-      JSON.parse(hashInlineFiles(item.attribute, JSON.stringify(item.messages)) as string),
-    ).toEqual(item.failure.messages);
+    const placed = hashInlineFiles(item.attribute, item.value ?? JSON.stringify(item.messages));
+    if (item.value === undefined)
+      expect(JSON.parse(placed as string)).toEqual(item.failure.messages);
+    else expect(placed).toBe(item.failure.value!);
   });
+
+// The Python suite reads the same file; each digest is of the bytes the case was built from.
+// Content that reads as base64 is the file's base64 whatever the part's media type, as Hue's
+// reader reads it: a text file's bytes, not the base64 text.
+for (const item of digests.cases as {
+  name: string;
+  part: Record<string, unknown>;
+  key: string;
+  content: { prefix: string; unit: string; times: number; suffix: string };
+  expected: { sha256: string; size: number } | null;
+}[])
+  test(`inline file digest: ${item.name}`, () => {
+    const { prefix, unit, times, suffix } = item.content;
+    const part = { ...item.part, [item.key]: `${prefix}${unit.repeat(times)}${suffix}` };
+    const file = item.part.type === "file";
+    const value = JSON.stringify([
+      file ? { role: "user", content: [part] } : { role: "user", parts: [part] },
+    ]);
+    const result = hashInlineFiles(file ? "ai.prompt.messages" : "gen_ai.input.messages", value);
+    let expected = item.expected;
+    // Binary media takes its digest at every size in a recorded message since 0.17.0.
+    if (expected === null && prefix.startsWith("data:application/octet-stream")) {
+      const bytes = Buffer.from(suffix.slice(";base64,".length), "base64");
+      expected = { sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length };
+    }
+    if (expected === null) {
+      expect(result).toBe(value);
+      return;
+    }
+    const [exported] = JSON.parse(result as string) as Record<string, unknown[]>[];
+    expect((file ? exported!.content : exported!.parts)![0]).toEqual({ ...item.part, ...expected });
+  });
+
+test("the shared digest fixture uses the SDK's inline file limit", () => {
+  expect(digests.limit).toBe(INLINE_FILE_LIMIT);
+});
 
 test("media names use UTF-16 limits and reject invalid labels", () => {
   expect(INLINE_FILE_LIMIT).toBe(65536);
@@ -145,4 +191,51 @@ test("a data: URL with millions of parameters is still decoded by its own encodi
     sha256: createHash("sha256").update(bytes).digest("hex"),
     size: 70_000,
   });
+});
+
+test("JSON edits to many members are rendered in time linear in them", () => {
+  const count = 20_000;
+  const text = JSON.stringify(
+    Array.from({ length: count }, (_, index) => ({ type: "blob", content: `c${index}`, keep: 1 })),
+  );
+  const edits = Array.from({ length: count }, (_, index) => ({
+    pointer: `/${index}`,
+    remove: "content",
+    set: [["size", String(index)]] as [string, string][],
+  }));
+  const started = performance.now();
+  const placed = applyJsonEdits(text, edits);
+  // 20,000 edited parts render in well under a second; visiting every piece for every member
+  // took tens of seconds.
+  expect(performance.now() - started).toBeLessThan(2000);
+  expect(JSON.parse(placed)).toEqual(
+    Array.from({ length: count }, (_, index) => ({ type: "blob", keep: 1, size: index })),
+  );
+});
+
+test("raw PCM types that declare a format Hue plays are named as Hue's reader names them", () => {
+  for (const [declared, canonical] of [
+    ["audio/pcm;rate=24000", "audio/pcm;rate=24000;channels=1"],
+    ["audio/L16;rate=16000", "audio/L16;rate=16000;channels=1"],
+    ["audio/x-pcm;rate=8000;channels=2", "audio/pcm;rate=8000;channels=2"],
+    ['Audio/l16 ; Rate="44100" ;CHANNELS=2;', "audio/L16;rate=44100;channels=2"],
+    ["audio/pcm;rate=192000;channels=1", "audio/pcm;rate=192000;channels=1"],
+  ] as const)
+    expect(pcmMediaType(declared)).toBe(canonical);
+  // No rate, any other parameter, a value out of range, a parameter named twice, a malformed one
+  // or another type: no format Hue plays, so the type is not rewritten.
+  for (const declared of [
+    "audio/pcm",
+    "audio/pcm;channels=2",
+    "audio/pcm;rate=24000;bits=16",
+    "audio/pcm;rate=7999",
+    "audio/pcm;rate=192001",
+    "audio/pcm;rate=24000.0",
+    "audio/pcm;rate=24000;channels=3",
+    "audio/pcm;rate=24000;rate=24000",
+    "audio/pcm;rate",
+    "audio/wav;rate=24000",
+    `audio/pcm;rate=24000;${" ".repeat(240)}`,
+  ])
+    expect(pcmMediaType(declared)).toBeUndefined();
 });

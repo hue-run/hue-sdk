@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import learn_no_upload_route
 from opentelemetry import trace
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import (
     ExportLogsServiceRequest,
@@ -177,6 +178,8 @@ def test_tool_result_over_the_cap_is_cut_and_listed_not_omitted(receiver):
     # recorded prefix reaches Hue with the call, instead of the whole value being omitted.
     large = {"body": "\u00e9" * (640 * 1024), "pages": 3}
     with Hue(receiver.url, KEY, capture_content=True) as hue:
+        # A receiver without the upload route (the loopback receiver) gets the value cut.
+        learn_no_upload_route(hue)
         with hue.tool("read_document") as call:
             call.set_input({"id": "doc_1"})
             call.set_output(large)
@@ -805,6 +808,87 @@ def test_subagent_nests_under_the_tool_that_started_it_and_its_work_under_it(rec
     assert "input.value" not in attrs(checker)
 
 
+@pytest.mark.parametrize("completion_order", [(0, 1), (1, 0)])
+def test_subagent_shared_between_tasks_restores_each_parent(receiver, completion_order, caplog):
+    with Hue(receiver.url, KEY, live_spans=False) as hue:
+        helper = hue.subagent("shared")
+
+        async def overlap():
+            entered = [asyncio.Event(), asyncio.Event()]
+            release = [asyncio.Event(), asyncio.Event()]
+
+            async def work(index):
+                with hue.span(f"request {index}"):
+                    with helper:
+                        entered[index].set()
+                        await release[index].wait()
+                        with hue.tool(f"inside {index}"):
+                            pass
+                    with hue.tool(f"after {index}"):
+                        pass
+
+            tasks = [asyncio.create_task(work(index)) for index in range(2)]
+            await asyncio.gather(*(event.wait() for event in entered))
+            for index in completion_order:
+                release[index].set()
+                await tasks[index]
+
+        asyncio.run(overlap())
+        assert hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 0
+    spans = receiver.spans()
+    by_name = {span.name: span for span in spans if span.name != "invoke_agent shared"}
+    agents = [span for span in spans if span.name == "invoke_agent shared"]
+    assert len(agents) == 2
+    for index in range(2):
+        parent = by_name[f"request {index}"]
+        agent = next(span for span in agents if span.parent_span_id == parent.span_id)
+        assert by_name[f"execute_tool inside {index}"].parent_span_id == agent.span_id
+        assert by_name[f"execute_tool after {index}"].parent_span_id == parent.span_id
+    assert "Failed to detach context" not in caplog.text
+
+
+def test_subagent_reuse_in_nested_and_inherited_contexts(receiver):
+    with Hue(receiver.url, KEY, live_spans=False) as hue:
+        helper = hue.subagent("shared")
+
+        async def child():
+            with helper:
+                await asyncio.sleep(0)
+                with hue.tool("child"):
+                    pass
+
+        async def parent():
+            with hue.span("request"):
+                with helper:
+                    with helper:
+                        with hue.tool("nested"):
+                            pass
+                    await asyncio.create_task(child())
+                    with hue.tool("parent"):
+                        pass
+                with hue.tool("after"):
+                    pass
+
+        asyncio.run(parent())
+        assert hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 0
+    spans = receiver.spans()
+    by_name = {span.name: span for span in spans if span.name != "invoke_agent shared"}
+    agents = [span for span in spans if span.name == "invoke_agent shared"]
+    outer = next(span for span in agents if span.parent_span_id == by_name["request"].span_id)
+    inner = [span for span in agents if span.parent_span_id == outer.span_id]
+    assert len(inner) == 2
+    assert by_name["execute_tool nested"].parent_span_id in {span.span_id for span in inner}
+    assert by_name["execute_tool child"].parent_span_id in {span.span_id for span in inner}
+    assert (
+        by_name["execute_tool nested"].parent_span_id
+        != by_name["execute_tool child"].parent_span_id
+    )
+    assert by_name["execute_tool parent"].parent_span_id == outer.span_id
+    assert by_name["execute_tool after"].parent_span_id == by_name["request"].span_id
+
+
 def test_subagent_records_errors_and_omits_content_in_metadata_only_mode(receiver):
     class SubagentFailed(Exception):
         pass
@@ -1065,6 +1149,8 @@ def test_invalid_capture_choice_and_json_are_rejected(receiver):
     with pytest.raises(TypeError):
         Hue(receiver.url, KEY, capture_content="yes")
     with Hue(receiver.url, KEY, capture_content=True) as hue:
+        # A receiver without the upload route (the loopback receiver) gets the value cut.
+        learn_no_upload_route(hue)
         with hue.span("invalid") as span:
             span.set_input(float("nan"))
             span.set_output("x" * MAX_CONTENT_BYTES)
@@ -1073,7 +1159,8 @@ def test_invalid_capture_choice_and_json_are_rejected(receiver):
         assert not hue.force_flush()
         # The NaN input and the two usages are failures; the output over the cap is cut.
         assert hue.export_status.instrumentation_failures == 3
-    stored = attrs(receiver.spans()[0])
+    (invalid,) = [span for span in receiver.spans() if span.name == "invalid"]
+    stored = attrs(invalid)
     assert set(stored) == {"output.value", TRUNCATED_KEY}
     assert len(stored["output.value"].string_value.encode("utf-8")) == MAX_CONTENT_BYTES
 
@@ -1250,6 +1337,9 @@ def test_large_inline_files_in_messages_export_as_their_digest(receiver):
     text = "line\n" * 20000 + "end"
     provider = TracerProvider()
     with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        # A receiver without the upload route (the loopback receiver) keeps files as recorded,
+        # a message's as their digest.
+        learn_no_upload_route(hue)
         span = provider.get_tracer("third-party").start_span("external")
         span.set_attribute(
             "gen_ai.input.messages",
@@ -1297,7 +1387,7 @@ def test_large_inline_files_in_messages_export_as_their_digest(receiver):
         )
         span.end()
         assert hue.force_flush()
-    (exported,) = receiver.spans()
+    (exported,) = [span for span in receiver.spans() if span.name == "external"]
     values = attrs(exported)
     (message,) = json.loads(values["gen_ai.input.messages"].string_value)
     assert message["parts"] == [
@@ -1423,6 +1513,8 @@ def test_export_replaces_hosted_tool_credentials_in_tool_definitions(receiver):
 def test_oversized_tool_request_is_scrubbed_whole_before_it_is_cut(receiver):
     provider = TracerProvider()
     with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        # A receiver without the upload route (the loopback receiver) gets the value cut.
+        learn_no_upload_route(hue)
         tracer = provider.get_tracer("third-party")
         oversized = tracer.start_span("oversized")
         # Over the value cap: its credentials are removed from the whole request before it is
@@ -1434,7 +1526,7 @@ def test_oversized_tool_request_is_scrubbed_whole_before_it_is_cut(receiver):
         oversized.set_attribute("input.value", json.dumps(request))
         oversized.end()
         assert hue.force_flush()
-    (span,) = receiver.spans()
+    (span,) = [span for span in receiver.spans() if span.name == "oversized"]
     stored = attrs(span)
     value = stored["input.value"].string_value
     assert len(value.encode("utf-8")) == MAX_CONTENT_BYTES
