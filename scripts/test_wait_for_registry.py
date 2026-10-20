@@ -31,7 +31,8 @@ def scripted(states):
 
     def fetch(url, headers):
         state = states[min(poll["index"], len(states) - 1)]
-        return state.get(url)
+        # A state may answer one Accept header apart, as the registry's caches do.
+        return state.get((url, headers.get("Accept")), state.get(url))
 
     return fetch, poll
 
@@ -57,11 +58,42 @@ class WaitTests(unittest.TestCase):
         fetch, poll = scripted([stale, untagged, PUBLISHED])
         self.assertEqual(
             registry.npm_missing("0.10.0", "latest", fetch),
-            ["the full version document", "the version in the install document"],
+            [
+                "the full version document",
+                "the version in the install document",
+                "the version in the document npm view reads",
+            ],
         )
         poll["index"] = 1
         self.assertEqual(registry.npm_missing("0.10.0", "latest", fetch), ["the latest dist-tag"])
         poll["index"] = 2
+        self.assertEqual(registry.npm_missing("0.10.0", "latest", fetch), [])
+
+    def test_npm_alias_is_read_from_its_own_documents(self):
+        alias = {
+            "https://registry.npmjs.org/hue-run/0.10.0": PUBLISHED[FULL],
+            "https://registry.npmjs.org/hue-run": PUBLISHED[ABBREVIATED],
+        }
+        # The SDK's documents say nothing about the alias, and the alias's nothing about the SDK.
+        fetch, _ = scripted([PUBLISHED])
+        self.assertEqual(len(registry.npm_missing("0.10.0", "latest", fetch, "hue-run")), 3)
+        fetch, _ = scripted([alias])
+        self.assertEqual(registry.npm_missing("0.10.0", "latest", fetch, "hue-run"), [])
+        self.assertEqual(len(registry.npm_missing("0.10.0", "latest", fetch)), 3)
+
+    def test_npm_waits_for_the_document_npm_view_reads(self):
+        # The install document already lists the version while `npm view`'s full document lags,
+        # as it did after a 0.20.7 publish: `npm view @hue-run/sdk@0.20.7` answered 404.
+        lagging = {
+            **PUBLISHED,
+            (ABBREVIATED, "application/json"): {"versions": {"0.9.0": {}}},
+        }
+        fetch, poll = scripted([lagging, PUBLISHED])
+        self.assertEqual(
+            registry.npm_missing("0.10.0", "latest", fetch),
+            ["the version in the document npm view reads"],
+        )
+        poll["index"] = 1
         self.assertEqual(registry.npm_missing("0.10.0", "latest", fetch), [])
 
     def test_pypi_waits_for_both_files_in_the_index_and_the_version_document(self):

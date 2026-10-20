@@ -7,6 +7,7 @@
 - `npm-inventory` ships exactly the intended `dist/` files, docs and license.
 - `npm-exports` resolves every `exports` entry under ESM, `require(esm)` and TypeScript.
 - `npm-consumer` installs the tarball into a fresh Node or Bun project and runs it.
+- `npm-bundle-safe` keeps every module reachable from `.` and `./ai-sdk` free of computed `import()` specifiers, so a bundling framework (Next.js) can resolve them; the verifier prints `bundle safety: N runtime modules`.
 
 ## How to get to it (user POV)
 

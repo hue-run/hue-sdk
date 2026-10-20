@@ -2,8 +2,9 @@
 
 npm and PyPI answer from caches that lag a publish by seconds to minutes, so an acceptance job
 that reads them at once can see the previous state. This polls, from the job's own runner, the
-same documents those tools request: npm's full version document and the abbreviated package
-document `npm install` reads (with the dist-tag), and PyPI's simple index with pip's headers and
+same documents those tools request: npm's full version document, the abbreviated package
+document `npm install` reads (with the dist-tag) and the full package document `npm view` reads,
+each cached apart, and PyPI's simple index with pip's headers and
 the version document the release check reads. It never writes to a registry.
 """
 
@@ -19,7 +20,7 @@ from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-NPM_PACKAGE = "@hue-run%2fsdk"
+NPM_PACKAGES = ("@hue-run/sdk", "hue-run")  # the SDK and its unscoped alias
 PYPI_PROJECT = "hue-run"
 # The Accept headers npm and pip send, so the caches answer these polls as they answer the tools.
 NPM_INSTALL_ACCEPT = "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*"
@@ -53,22 +54,31 @@ def fetch_json(url: str, headers: dict[str, str]) -> dict | None:
         return {"html": body.decode("utf-8", "replace")}
 
 
-def npm_missing(version: str, dist_tag: str, fetch: Fetch) -> list[str]:
+def npm_missing(
+    version: str, dist_tag: str, fetch: Fetch, package: str = NPM_PACKAGES[0]
+) -> list[str]:
+    name = package.replace("/", "%2f")
     missing = []
     full = fetch(
-        f"https://registry.npmjs.org/{NPM_PACKAGE}/{version}",
+        f"https://registry.npmjs.org/{name}/{version}",
         {"Accept": "application/json", "Cache-Control": "no-cache"},
     )
     if not full or full.get("version") != version or not full.get("dist", {}).get("integrity"):
         missing.append("the full version document")
     abbreviated = fetch(
-        f"https://registry.npmjs.org/{NPM_PACKAGE}",
+        f"https://registry.npmjs.org/{name}",
         {"Accept": NPM_INSTALL_ACCEPT, "Cache-Control": "no-cache"},
     )
     if not abbreviated or version not in abbreviated.get("versions", {}):
         missing.append("the version in the install document")
     elif abbreviated.get("dist-tags", {}).get(dist_tag) != version:
         missing.append(f"the {dist_tag} dist-tag")
+    packument = fetch(
+        f"https://registry.npmjs.org/{name}",
+        {"Accept": "application/json", "Cache-Control": "no-cache"},
+    )
+    if not packument or version not in packument.get("versions", {}):
+        missing.append("the version in the document npm view reads")
     return missing
 
 
@@ -123,13 +133,14 @@ def main() -> int:
     parser.add_argument("language", choices=("typescript", "python"))
     parser.add_argument("version")
     parser.add_argument("--dist-tag", default="latest")
+    parser.add_argument("--npm-package", choices=NPM_PACKAGES, default=NPM_PACKAGES[0])
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--interval", type=float, default=15)
     args = parser.parse_args()
 
     def missing() -> list[str]:
         if args.language == "typescript":
-            return npm_missing(args.version, args.dist_tag, fetch_json)
+            return npm_missing(args.version, args.dist_tag, fetch_json, args.npm_package)
         return pypi_missing(args.version, fetch_json)
 
     try:
@@ -137,7 +148,8 @@ def main() -> int:
     except TimeoutError as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1
-    print(f"The registry serves {args.language} {args.version} (after {polls} polls)")
+    served = args.npm_package if args.language == "typescript" else "hue-run on PyPI"
+    print(f"The registry serves {served} {args.version} (after {polls} polls)")
     return 0
 
 

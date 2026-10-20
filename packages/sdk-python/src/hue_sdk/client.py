@@ -52,6 +52,7 @@ from ._provider_tools import (
     provider_error_description,
 )
 from ._tool_definitions import tool_catalog_summary
+from ._tool_endpoint import ToolEndpoint, tool_endpoint_attributes
 from ._version import __version__
 from .processors import HUE_TRACER_SCOPE, BoundedLogProcessor, BoundedSpanProcessor
 from .receipts import TraceReceiptField, TraceVerificationResult, verify_trace
@@ -1329,6 +1330,7 @@ class Hue:
         *,
         call_id: str | None = None,
         mcp: Mapping[str, Any] | None = None,
+        endpoint: ToolEndpoint | None = None,
     ) -> Iterator[HueSpan]:
         name = self._metadata_string(name, "unknown")
         attributes: dict[str, AttributeValue] = {
@@ -1353,6 +1355,15 @@ class Hue:
                     elif self._active:
                         self._record_issue()
             elif self._active:
+                self._record_issue()
+        if self._active and self.capture_content and endpoint is not None:
+            try:
+                evidence = tool_endpoint_attributes(endpoint)
+                for key, value in evidence.items():
+                    redacted = self._text_content(key, value)
+                    if redacted is not None:
+                        attributes[key] = redacted
+            except Exception:
                 self._record_issue()
         with self.span(f"execute_tool {name}", attributes=attributes, _category="tool") as span:
             yield span
@@ -1463,6 +1474,15 @@ class Hue:
         network read may finish in the background after timeout.
         """
         self._ensure_open()
+
+        def project_or_none() -> Project | None:
+            try:
+                return self.validate_project()
+            except ProjectValidationError:
+                return None
+
+        # Once Hue reports the trace missing, name the project this key searched so a wrong key
+        # reads differently from a trace that is not stored yet.
         return verify_trace(
             self.base_url,
             self._headers,
@@ -1472,6 +1492,7 @@ class Hue:
             timeout_millis=timeout_millis,
             request_timeout=self._timeout,
             poll_lock=self._receipt_lock,
+            on_missing=project_or_none,
         )
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:

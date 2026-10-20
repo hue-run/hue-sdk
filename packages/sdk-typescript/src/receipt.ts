@@ -1,4 +1,5 @@
 import type {
+  ProjectConnection,
   HueOptions,
   TraceReceipt,
   TraceReceiptField,
@@ -176,8 +177,9 @@ export async function verifyTrace(
   connection: Pick<HueOptions, "apiKey"> & { baseUrl: string },
   traceId: string,
   options: VerifyTraceOptions = {},
+  onMissing?: () => Promise<ProjectConnection | undefined>,
 ): Promise<TraceVerification> {
-  return verifyTraceAtPath(connection, traceId, options, false, fetch);
+  return verifyTraceAtPath(connection, traceId, options, false, fetch, undefined, onMissing);
 }
 
 /** @internal Dedicated receipt path for setup credentials; ordinary clients stay unchanged. */
@@ -198,6 +200,8 @@ async function verifyTraceAtPath(
   setup: boolean,
   fetcher: typeof globalThis.fetch,
   signal?: AbortSignal,
+  /** Looks up the project the key searched once Hue has reported the trace missing. */
+  onMissing?: () => Promise<ProjectConnection | undefined>,
 ): Promise<TraceVerification> {
   if (!validId(traceId, 32))
     throw new TypeError("traceId must be a nonzero lowercase 32-character OpenTelemetry trace ID");
@@ -238,6 +242,8 @@ async function verifyTraceAtPath(
   const timer = setTimeout(() => controller.abort(), timeout);
   const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   let receipt: TraceReceipt | null = null;
+  let missing = false;
+  let lookup: Promise<ProjectConnection | undefined> | undefined;
   let delay = 250;
   try {
     while (!requestSignal.aborted && performance.now() < deadline) {
@@ -266,6 +272,7 @@ async function verifyTraceAtPath(
             "This Hue server does not support trace receipts. Check the server version and baseUrl.",
             404,
           );
+        missing = true;
       } else {
         await response.body?.cancel();
         if (response.status === 429 || response.status === 503) {
@@ -287,6 +294,12 @@ async function verifyTraceAtPath(
       const remaining = deadline - performance.now();
       if (remaining <= 0) break;
       const wait = Math.max(delay, retryAfter);
+      // Once the backoff would outlast the budget, the rest of it names the project the key
+      // searched instead of sleeping.
+      if (wait >= remaining && missing && onMissing) {
+        lookup = onMissing();
+        break;
+      }
       await pause(Math.min(wait, remaining), requestSignal);
       // A truncated backoff exhausts this call even if a timer wakes just early.
       if (wait >= remaining) break;
@@ -303,6 +316,13 @@ async function verifyTraceAtPath(
     }
   } finally {
     clearTimeout(timer);
+  }
+  if (lookup && !receipt) {
+    const project = await Promise.race([
+      lookup,
+      pause(Math.max(0, deadline - performance.now()), controller.signal),
+    ]);
+    if (project) return { verified: false, receipt, project };
   }
   return { verified: false, receipt };
 }

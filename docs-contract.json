@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:3c376bdb6eea310a9267429ff185b409c53a5555898b4bd5f33a46198f11de51",
+    "sha256": "sha256:712c8bbe0dd0ad4358af0eedb82532d9018c714ea392b9d2ab410e88eeec513d",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -61,6 +61,7 @@
             "Project",
             "ProjectValidationError",
             "Redactor",
+            "ToolEndpoint",
             "TraceReceipt",
             "TraceReceiptField",
             "TraceReceiptFields",
@@ -220,7 +221,7 @@
         }
       },
       "name": "hue-run",
-      "version": "0.13.2"
+      "version": "0.13.3"
     },
     "typescript": {
       "bins": {
@@ -260,6 +261,7 @@
             "Signal",
             "SpanOptions",
             "TokenUsage",
+            "ToolEndpoint",
             "ToolOptions",
             "TraceReceipt",
             "TraceReceiptField",
@@ -750,10 +752,10 @@
     "description": "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.8.9"
+      "version": "0.8.16"
     },
     "name": "hue",
-    "sha256": "sha256:1ece3a5203065ffcaf840217c40b672d93ff76d666133e5d76e0e33393c88c57",
+    "sha256": "sha256:8f3c47c6541f85d161b865300fc37b515d44be7d0b71ab52076ed425193620b2",
     "source": "skills/hue/SKILL.md"
   }
 }

@@ -53,7 +53,7 @@ def languages_for(name: str, line: str) -> set[str]:
 
     if name.startswith(("packages/sdk-typescript/", "packages/aliases/npm-hue-run/")):
         return {"typescript"}
-    if name.startswith(("packages/sdk-python/", "packages/aliases/pypi-hue-sdk/")):
+    if name.startswith("packages/sdk-python/"):
         return {"python"}
     return set()
 

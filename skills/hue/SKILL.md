@@ -3,7 +3,7 @@ name: hue
 description: "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction."
 metadata:
   author: hue-run
-  version: "0.8.9"
+  version: "0.8.16"
 ---
 
 # Hue
@@ -14,11 +14,12 @@ Help the developer get their application's real requests into Hue as traces: a r
 
 Read the application's repository instructions and inspect its runtime, dependency versions, request and stream lifecycle, and existing OpenTelemetry initialization. Use its package manager and existing secret workflow.
 
-| Application | Path |
-| --- | --- |
-| Node.js 22 or 24, or Bun 1.4 (server-side), without existing OTel setup | [TypeScript SDK](https://docs.hue.run/sdks/typescript) |
-| Python 3.10+ | [Python SDK](https://docs.hue.run/sdks/python) |
-| Existing OTel provider, Langfuse, or framework instrumentation | [OpenTelemetry integration](https://docs.hue.run/integrations/opentelemetry); keep the provider and its other exporters |
+| Application                                                             | Path                                                                                                                                                                                                                                              |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Node.js 22 or 24, or Bun 1.4 (server-side), without existing OTel setup | [TypeScript SDK](https://docs.hue.run/sdks/typescript)                                                                                                                                                                                            |
+| Python 3.10+                                                            | [Python SDK](https://docs.hue.run/sdks/python)                                                                                                                                                                                                    |
+| Existing OTel provider, Langfuse, or framework instrumentation          | [OpenTelemetry integration](https://docs.hue.run/integrations/opentelemetry); keep the provider and its other exporters                                                                                                                           |
+| A framework owns the agent loop or the root span                        | [LangChain and LangGraph](https://docs.hue.run/integrations/langchain) for LangChain agents; otherwise [mark the framework's root span](https://docs.hue.run/integrations/opentelemetry#mark-the-root-span) through the OpenTelemetry integration |
 
 Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed package's API before editing. Read only the guides relevant to the application's stack; [Traces and spans](https://docs.hue.run/guides/traces) describes the span structure every path should produce, and the [documentation index](https://docs.hue.run/llms.txt) lists the rest.
 
@@ -61,10 +62,10 @@ npm install --save-exact @hue-run/sdk@0.21.0
 
 ```sh
 # Python: use the application's existing Python environment.
-python -m pip install hue-run==0.13.2
+python -m pip install hue-run==0.13.3
 ```
 
-Adapt the command to the app's package manager, for example `uv add hue-run==0.13.2`. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If a package is unavailable or a credential is missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or release.
+Adapt the command to the app's package manager, for example `uv add hue-run==0.13.3`. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If a package is unavailable or a credential is missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or release.
 
 The development key is a **Read and write** project key in `HUE_API_KEY`, configured through the application's existing secret workflow. Keep it on development machines: before the application runs on a production server, tell the user to create a separate **Tracing only** key for that server's `HUE_API_KEY`, which the code reads unchanged. Read the key from the environment; never put it in browser code, fixtures, committed files or logs.
 
@@ -93,6 +94,47 @@ Follow [Traces and spans](https://docs.hue.run/guides/traces). Instrument every 
 - **Tool spans:** `tool()` around each tool call, with the arguments and the result the agent actually read. When wrapping MCP tools, pass `mcp: client.getServerVersion()` in TypeScript or `mcp=` in Python so the span names the server; do not infer the server from a generic tool name.
 - **Context:** preserve propagated parent context, use `inject` / `extract` across processes, and keep spans from existing instrumentation under the request span.
 
+### HTTP tool endpoint evidence (unreleased SDK checkout)
+
+The `tool()` endpoint option below is available in this source checkout; it is not part of the pinned registry releases above. Use it only when the user has selected a source commit containing `ToolOptions.endpoint` / Python `ToolEndpoint`. Build and install that commit locally, retain its full SHA and this skill's hash, and keep other dependencies unchanged. Do not publish a package or claim a registry version supports it. Without this option, report missing endpoint evidence rather than inventing span attributes or routing identifiers.
+
+For HTTP tools, record the URL from the same request, resolved client config, or receipt that the application uses. Record the source as `request`, `client_config`, or `receipt`. Include the actual HTTP method only when known. Do not derive a URL, server ID, or account/user selector from a tool name, MCP server label, root user ID, or the number of connected accounts.
+
+Inspect every dispatcher branch, including `mcp_read` as well as `mcp_call` and write/action branches. Reuse the already selected client configuration at the execution boundary. If that configuration is only available inside the dispatcher, carry its observed endpoint to the instrumentation there; do not add a second lookup, resolve a different server, initialize another session, unwrap or replace the result, retry the call, or add another tool execution. Keep the original arguments and full result (including a `{kind: "sync", result: ...}` wrapper) on the existing tool span. Preserve the parent trace and original call ID.
+
+With content capture enabled, pass the real URL and explicitly allow only routing query names that the application's data policy permits:
+
+```ts
+await hue.tool(toolName, input, execute, {
+  callId,
+  mcp: serverInfo,
+  endpoint: {
+    url: resolvedClientUrl,
+    source: "client_config",
+    method: requestMethod,
+    captureQueryParameters: ["user_id"],
+  },
+});
+```
+
+```python
+with hue.tool(tool_name, call_id=call_id, mcp=server_info, endpoint={
+    "url": resolved_client_url,
+    "source": "client_config",
+    "method": request_method,
+    "capture_query_parameters": ["user_id"],
+}) as span:
+    span.set_input(arguments)
+    result = execute()
+    span.set_output(result)
+```
+
+The examples assume those variables already exist in the application. Omit unknown options. For Composio's existing per-toolkit MCP endpoint, retain the actual `/v3/mcp/<serverId>/mcp` path and every `user_id` occurrence from that URL. Missing or duplicate values stay missing or duplicate. Direct execute and Tool Router have different URL shapes: record the shape actually used, and keep actual selectors in the original input or receipt; never convert them into a per-toolkit MCP URL. Endpoint capture alone does not establish replay support for every transport.
+
+The SDK removes URL userinfo, fragments and query parameters outside the allowlist, rejects credential query names even if allowlisted, and sends `url.full`, optional `http.request.method` and `hue.tool.endpoint.source` through existing redaction. It emits none of them in metadata-only mode. The URL path and allowed query values may identify an account: preserve existing masking, never exempt selectors from it, and do not pass secret-bearing paths. Redaction can intentionally make an endpoint unusable for replay.
+
+Verify with the application's normal synthetic transport and a loopback collector before live work: inspect the exported `url.full` path/query and source, check missing/duplicate/redacted values stay unavailable or ambiguous, and prove one execution with the exact original result or exception. Do not print real endpoint values or headers. A successful local export proves capture behavior; only an authorized stored capture and rebuild establish server acceptance and replay.
+
 These helpers do not proxy or automatically observe uninstrumented model calls. Keep spans open until streamed work completes or aborts: a returned streaming `Response` is not generation completion. With AI SDK 6, await `result.consumeStream()` inside the request span, not `result.text`, which resolves before the AI SDK ends its own span ([AI SDK recipe](https://docs.hue.run/sdks/typescript#vercel-ai-sdk)). A Python generator that holds the request span across `yield` should `return` on `GeneratorExit`, so a caller that stops reading ends the span without an error ([Traces and spans](https://docs.hue.run/guides/traces#streaming-and-long-work)). Otherwise use the framework's completion or background-lifetime hooks, as in the [Next.js streaming recipe](https://docs.hue.run/integrations/opentelemetry#flush-streamed-responses-in-next-js), and flush with a bounded deadline after the response. Preserve application errors and cancellations while recording their span status. Add short comments where initialization, capture or delivery behavior needs explanation.
 
 ## Capture content and media
@@ -119,7 +161,7 @@ Run the application's relevant checks and exercise the changed request path, inc
 - **Python:** check the booleans `force_flush()` and `shutdown()` return, and `export_status` on failure. Context-manager exit alone does not prove delivery.
 - **Standard OTLP exporter:** inspect export failures and partial-rejection responses, and keep the process alive until its flush completes.
 
-Record the real request's trace ID and its request, model and tool span IDs: the helpers' spans expose `traceId` and `spanId` (`trace_id` and `span_id` in Python), and your own OpenTelemetry spans carry them in their span context. After their owning providers flush, call `hue.verifyTrace(traceId, { expectedSpanIds, requiredFields })` or Python `hue.verify_trace(trace_id, expected_span_ids=..., required_fields=...)`. Require `input` and `output` for a request with content capture enabled; do not require usage the provider omits or content an explicit policy disables. A false result is incomplete verification: report the missing spans or fields. Direct-OTLP apps can use `GET /api/v1/traces/{otelTraceId}/receipt` with repeated `expectedSpanId` parameters, and an app that attached Hue to `NodeSDK` can call `verifyTrace` from a separate diagnostic `createHue({ apiKey, serviceName })` client.
+Record the real request's trace ID and its request, model and tool span IDs: the helpers' spans expose `traceId` and `spanId` (`trace_id` and `span_id` in Python), and your own OpenTelemetry spans carry them in their span context. In a running server, log the request span's `traceId` or return it in a response header during setup, then verify it from a separate diagnostic client: `createHue({ apiKey, serviceName })` in TypeScript, `Hue(api_key=..., service_name=...)` in Python, or `GET /api/v1/traces/{otelTraceId}/receipt` with repeated `expectedSpanId` parameters for a direct-OTLP app. After the owning providers flush, call `hue.verifyTrace(traceId, { expectedSpanIds, requiredFields })` or Python `hue.verify_trace(trace_id, expected_span_ids=..., required_fields=...)`. The field names are `input`, `output`, `model`, `usage` and `session`: require `input` and `output` for a request with content capture enabled; do not require usage the provider omits or content an explicit policy disables. A false result is incomplete verification: report the missing spans or fields. A `null` receipt means no receipt arrived before the deadline: Hue had no trace with that ID in the key's project, or answered 429 or 503 throughout. Check first which `HUE_API_KEY` the application and the diagnostic client loaded, because a variable already set in the shell overrides an env file in both uv and Node.
 
 A receipt confirms stored field presence, not the values. Then inspect the stored trace: with the [Hue MCP server](https://docs.hue.run/agents/mcp-server) connected, `get_trace` and `get_span` with `include_content: true` show the spans and their recorded input, output, messages, arguments and results; otherwise use the receipt's `traceUrl` in **Traces**, or leave content inspection to the user. Check that the model and tool spans sit under the request span (the trace root, unless the request arrived with propagated parent context, which it keeps), the content is the real request and reply, and redaction applied. Missing expected content means setup is incomplete.
 
@@ -133,29 +175,30 @@ Summarize the installed version, changed files, configuration names, capture pol
 
 These pages own their procedures. Read the page with curl, adding `.md` to its URL, and follow it; don't reconstruct its steps from this skill.
 
-| The developer asks to | Follow |
-| --- | --- |
-| Connect a coding agent to the Hue MCP server | [Connect](https://docs.hue.run/agents/mcp-server); [Hue MCP](https://docs.hue.run/agents/overview) lists what it can do |
-| Investigate production: what needs attention, failed or is slow | [Recipes](https://docs.hue.run/agents/mcp-tools#recipes); the MCP's `load_hue_guide` with `production` returns the same guide |
-| Understand findings, intents, request answers or trace checks | [Classifiers](https://docs.hue.run/classifiers/overview) |
-| Turn a trace into a case or eval set | [Create a case](https://docs.hue.run/evaluations/case-from-trace) |
-| Run or regression-test the agent against cases with `hue eval` | [Run your agent](https://docs.hue.run/evaluations/run-your-agent) |
+| The developer asks to                                           | Follow                                                                                                                                                                                       |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Connect a coding agent to the Hue MCP server                    | [Connect](https://docs.hue.run/agents/mcp-server); [Hue MCP](https://docs.hue.run/agents/overview) lists what it can do                                                                      |
+| Investigate production: what needs attention, failed or is slow | [Recipes](https://docs.hue.run/agents/mcp-tools#recipes); the MCP's `load_hue_guide` with `production` returns the same guide                                                                |
+| Understand findings, intents, request answers or trace checks   | [Classifiers](https://docs.hue.run/classifiers/overview)                                                                                                                                     |
+| Turn a trace into a case or eval set                            | [Create a case](https://docs.hue.run/evaluations/case-from-trace)                                                                                                                            |
+| Import existing traces from OTLP JSON, Langfuse or ATIF exports | [Bulk import existing traces](https://docs.hue.run/guides/import-traces); the MCP's `load_hue_guide` with `import` returns the same guide                                                    |
+| Run or regression-test the agent against cases with `hue eval`  | [Run your agent](https://docs.hue.run/evaluations/run-your-agent)                                                                                                                            |
 | Point the agent's own app clients at a World during evaluations | [Connect your agent](https://docs.hue.run/evaluations/eval-ready-agent), with [Worlds](https://docs.hue.run/worlds/overview) and [Simulations](https://docs.hue.run/evaluations/simulations) |
-| Evaluate a function in-process or in CI | [Local evaluations](https://docs.hue.run/evaluations/first-evaluation) |
-| Run the agent from Hue against an HTTPS endpoint | [Managed runs](https://docs.hue.run/evaluations/managed-runs) |
+| Evaluate a function in-process or in CI                         | [Local evaluations](https://docs.hue.run/evaluations/first-evaluation)                                                                                                                       |
+| Run the agent from Hue against an HTTPS endpoint                | [Managed runs](https://docs.hue.run/evaluations/managed-runs)                                                                                                                                |
 
 The same rules apply there: never hand the agent Hue-native tools or tools its production version lacks, and never put evaluation-only values in production configuration: mirror URLs (`HUE_SIM_*`), world tokens (`HUE_WORLD_TOKEN`), `HUE_MCP_*` values or the development **Read and write** key. A production server sends traces with its own **Tracing only** key.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-| --- | --- | --- |
-| `flush()` throws `HueExportError` with `rejected` issues or HTTP 401/403 | Invalid or revoked key, a **Read** key, or a `baseUrl` with a path | Use **Read and write** for development and evaluation, **Tracing only** on a production server; `baseUrl` is an origin only |
-| Receipt reports missing expected spans | The owning provider was not flushed, or the stream had not finished | Await stream completion, flush the borrowed provider, then verify |
-| Receipt `fields.input` / `fields.output` are false | Metadata-only capture, or the request span did not record its input and reply | Expected only for an explicit metadata-only policy; otherwise record them and verify again |
-| A file shows **Not uploaded** or `state: "missing"` | The flush or shutdown budget ended before the upload, or egress blocks Hue's upload URLs | Flush with a longer budget, allow HTTPS `PUT` to the upload URLs, check `uploadFallbacks` / `upload_fallbacks` |
-| `hueTelemetry` throws "requires ai@" | AI SDK 6 in the application | Pass `hueExperimentalTelemetry(hue)` as `experimental_telemetry`, or attach Hue's transport to the app's provider |
-| `droppedSpans` or dropped-record counters grow | Queue budget reached during a collector outage | Expected loss under the bounded-queue contract; check reachability and the queue budget |
+| Symptom                                                                  | Likely cause                                                                             | Fix                                                                                                                         |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `flush()` throws `HueExportError` with `rejected` issues or HTTP 401/403 | Invalid or revoked key, a **Read** key, or a `baseUrl` with a path                       | Use **Read and write** for development and evaluation, **Tracing only** on a production server; `baseUrl` is an origin only |
+| Receipt reports missing expected spans                                   | The owning provider was not flushed, or the stream had not finished                      | Await stream completion, flush the borrowed provider, then verify                                                           |
+| Receipt `fields.input` / `fields.output` are false                       | Metadata-only capture, or the request span did not record its input and reply            | Expected only for an explicit metadata-only policy; otherwise record them and verify again                                  |
+| A file shows **Not uploaded** or `state: "missing"`                      | The flush or shutdown budget ended before the upload, or egress blocks Hue's upload URLs | Flush with a longer budget, allow HTTPS `PUT` to the upload URLs, check `uploadFallbacks` / `upload_fallbacks`              |
+| `hueTelemetry` throws "requires ai@"                                     | AI SDK 6 in the application                                                              | Pass `hueExperimentalTelemetry(hue)` as `experimental_telemetry`, or attach Hue's transport to the app's provider           |
+| `droppedSpans` or dropped-record counters grow                           | Queue budget reached during a collector outage                                           | Expected loss under the bounded-queue contract; check reachability and the queue budget                                     |
 
 See [troubleshooting](https://docs.hue.run/guides/troubleshooting) for delivery diagnostics.
 

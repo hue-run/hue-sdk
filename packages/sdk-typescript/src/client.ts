@@ -29,6 +29,7 @@ import {
   providerErrorDescription,
 } from "./provider-tools.js";
 import { toolCatalogSummary } from "./tool-definitions.js";
+import { toolEndpointAttributes } from "./tool-endpoint.js";
 import {
   contentLimitsOf,
   encodeBoundedContent,
@@ -395,9 +396,13 @@ export class HueClient {
    * @throws HueTraceVerificationError for authentication, unsupported endpoint, transport or invalid response failures.
    * @throws TypeError for an invalid trace ID or options.
    */
-  verifyTrace(traceId: string, options: VerifyTraceOptions = {}): Promise<TraceVerification> {
-    if (!this.enabled) return Promise.reject(new HueConnectionError("Hue telemetry is disabled"));
-    return verifyTrace(this.transport.options, traceId, options);
+  async verifyTrace(traceId: string, options: VerifyTraceOptions = {}): Promise<TraceVerification> {
+    if (!this.enabled) throw new HueConnectionError("Hue telemetry is disabled");
+    // Once Hue reports the trace missing, name the project this key searched so a wrong key reads
+    // differently from a trace that is not stored yet.
+    return verifyTrace(this.transport.options, traceId, options, () =>
+      this.checkConnection().catch(() => undefined),
+    );
   }
 
   /** The helper's current context: the innermost active Hue span, else the OpenTelemetry active context. */
@@ -521,6 +526,14 @@ export class HueClient {
     stamp("mcp.server.version", options.mcp?.version);
     stamp("hue.mcp.provider", options.mcp?.provider);
     stamp("hue.mcp.surface", options.mcp?.surface);
+    if (this.enabled && !this.closed && this.captureContent) {
+      try {
+        if (options.endpoint !== undefined)
+          Object.assign(attributes, toolEndpointAttributes(options.endpoint));
+      } catch {
+        this.instrumentationFailed();
+      }
+    }
     return this.withSpan(
       `execute_tool ${name}`,
       async ({ span }) => {

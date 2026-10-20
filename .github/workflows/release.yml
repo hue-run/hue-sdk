@@ -166,6 +166,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      already-published: ${{ steps.registry.outputs.already-published }}
     steps:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -176,6 +178,20 @@ jobs:
           name: release-typescript-${{ github.sha }}
           path: .artifacts
       - run: cd .artifacts && sha256sum --check SHA256SUMS
+      # A dispatch for a version npm already holds publishes nothing: the registry never takes other
+      # bytes under a version, and accept-npm still checks the held bytes against this run's tested
+      # archive, so a later job (the alias) can ship for a published version without republishing.
+      - name: Check whether npm already holds this version
+        id: registry
+        run: |
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header 'Cache-Control: no-cache' "https://registry.npmjs.org/@hue-run%2fsdk/${RELEASE_VERSION}")"
+          case "$status" in
+            200) echo "already-published=true" >> "$GITHUB_OUTPUT"
+                 echo "::notice::@hue-run/sdk@${RELEASE_VERSION} is already on npm; it is not published again" ;;
+            404) echo "already-published=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::npm answered ${status} for @hue-run/sdk@${RELEASE_VERSION}"; exit 1 ;;
+          esac
       # Trusted publishing needs npm >= 11.5.1; the version is exact-pinned and scripts are disabled.
       - run: npm install --global npm@11.15.0 --ignore-scripts --registry=https://registry.npmjs.org # zizmor: ignore[adhoc-packages]
       # OIDC trusted publishing is configured on the npm package. npm generates provenance
@@ -191,6 +207,7 @@ jobs:
             exit 1
           fi
       - name: Publish the exact archive under the selected closed dist-tag
+        if: steps.registry.outputs.already-published == 'false'
         run: npm publish ".artifacts/hue-run-sdk-${RELEASE_VERSION}.tgz" --tag "$NPM_DIST_TAG" --access public --ignore-scripts --registry=https://registry.npmjs.org
 
   publish-pypi:
@@ -254,6 +271,94 @@ jobs:
           test "$tagged" = "$RELEASE_VERSION"
       - run: node packages/sdk-typescript/scripts/verify-package.mjs --registry-version "$RELEASE_VERSION"
 
+  publish-npm-alias:
+    # `hue-run` on npm re-exports @hue-run/sdk. It ships once the SDK version it pins is accepted
+    # on npm, for ordinary `latest` releases only, so an activation candidate never reaches it.
+    if: inputs.publish && inputs.language == 'typescript' && inputs.npm_dist_tag == 'latest'
+    needs: accept-npm
+    # npm Trusted Publishing requires GitHub-hosted runners.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      accept: ${{ steps.alias.outputs.accept }}
+    steps:
+      # The alias is a handful of static re-export files: this job packs them from the release
+      # commit and runs no repository script while it holds the publishing identity.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Require the alias at the released version, pinning exactly that SDK
+        id: alias
+        working-directory: packages/aliases/npm-hue-run
+        run: |
+          # verify-package.mjs already refused a release whose alias differs and tested the packed
+          # alias against the archive; this rechecks the files this job packs.
+          version="$(node -p 'require("./package.json").version')"
+          pinned="$(node -p 'require("./package.json").dependencies["@hue-run/sdk"]')"
+          if [ "$version" != "$RELEASE_VERSION" ] || [ "$pinned" != "$RELEASE_VERSION" ]; then
+            echo "::error::hue-run ${version} pins @hue-run/sdk ${pinned}, not ${RELEASE_VERSION}"
+            exit 1
+          fi
+          echo "accept=true" >> "$GITHUB_OUTPUT"
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header 'Cache-Control: no-cache' "https://registry.npmjs.org/hue-run/${RELEASE_VERSION}")"
+          case "$status" in
+            200) echo "publish=false" >> "$GITHUB_OUTPUT"
+                 echo "::notice::hue-run@${RELEASE_VERSION} is already on npm; it is not published again" ;;
+            404) echo "publish=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::npm answered ${status} for hue-run@${RELEASE_VERSION}"; exit 1 ;;
+          esac
+      # Trusted publishing needs npm >= 11.5.1; the version is exact-pinned and scripts are disabled.
+      - if: steps.alias.outputs.publish == 'true'
+        run: npm install --global npm@11.15.0 --ignore-scripts --registry=https://registry.npmjs.org # zizmor: ignore[adhoc-packages]
+      - name: Require a public source repository for npm provenance
+        if: steps.alias.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          visibility="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .visibility)"
+          if [ "$visibility" != "public" ]; then
+            echo "::error::npm provenance requires a public source repository (visibility: ${visibility})"
+            exit 1
+          fi
+      - name: Publish the alias through trusted publishing
+        if: steps.alias.outputs.publish == 'true'
+        working-directory: packages/aliases/npm-hue-run
+        run: npm publish --access public --ignore-scripts --registry=https://registry.npmjs.org
+
+  accept-npm-alias:
+    if: needs.publish-npm-alias.outputs.accept == 'true'
+    needs: publish-npm-alias
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Wait until npm serves the alias and its latest tag to this runner
+        run: python3 scripts/wait-for-registry.py typescript "$RELEASE_VERSION" --npm-package hue-run
+      - name: Verify the alias carries provenance and pins the released SDK
+        run: |
+          url="$(npm view "hue-run@${RELEASE_VERSION}" dist.attestations.url --registry=https://registry.npmjs.org)"
+          if [ -z "$url" ]; then echo "::error::hue-run@${RELEASE_VERSION} carries no provenance attestations"; exit 1; fi
+          echo "attestations: $url"
+          pinned="$(npm view "hue-run@${RELEASE_VERSION}" "dependencies.@hue-run/sdk" --registry=https://registry.npmjs.org)"
+          if [ "$pinned" != "$RELEASE_VERSION" ]; then echo "::error::hue-run@${RELEASE_VERSION} pins @hue-run/sdk ${pinned}"; exit 1; fi
+
   accept-pypi:
     needs: [prepare, publish-pypi]
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -285,7 +390,7 @@ jobs:
   github-release:
     # Runs after whichever registry acceptance job applies to the selected language.
     if: ${{ !cancelled() && inputs.publish && (needs.accept-npm.result == 'success' || needs.accept-pypi.result == 'success') }}
-    needs: [prepare, accept-npm, accept-pypi]
+    needs: [prepare, publish-npm, accept-npm, accept-pypi]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -304,8 +409,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_LANGUAGE: ${{ inputs.language }}
+          ALREADY_PUBLISHED: ${{ needs.publish-npm.outputs.already-published }}
         run: |
           tag="${RELEASE_LANGUAGE}-v${RELEASE_VERSION}"
+          # A dispatch for a version npm already held keeps the release the publishing run recorded.
+          if [ "$ALREADY_PUBLISHED" = true ] && gh release view "$tag" > /dev/null 2>&1; then
+            echo "::notice::${tag} already records the run that published ${RELEASE_VERSION}; left unchanged"
+            exit 0
+          fi
           if [ "$RELEASE_LANGUAGE" = typescript ]; then title="TypeScript SDK ${RELEASE_VERSION}"; else title="Python SDK ${RELEASE_VERSION}"; fi
           prerelease=""
           if [ "$RELEASE_LANGUAGE" = typescript ] && [ "$NPM_DIST_TAG" = hue-onboarding-candidate ]; then

@@ -106,6 +106,23 @@ if (!values.archive && !values["registry-version"]) {
     if (new RegExp(`^\\s+${member}\\(`, "m").test(transportTypes))
       throw new Error(`dist/transport.d.ts exposes internal member ${member}()`);
   }
+  // Serving frameworks bundle the SDK (Next.js Turbopack and webpack): a dynamic import whose
+  // specifier is an expression is replaced with a throw there, so every export would fail.
+  const bundled = new Set();
+  const pendingModules = ["dist/index.js", "dist/ai-sdk.js"];
+  while (pendingModules.length) {
+    const file = pendingModules.pop();
+    if (bundled.has(file)) continue;
+    bundled.add(file);
+    const code = readFileSync(join(staging, file), "utf8");
+    for (const match of code.matchAll(/\bimport\s*\(\s*([^)]*)\)/gu)) {
+      if (!/^["'][^"']+["']$/u.test(match[1].trim()))
+        throw new Error(`${file} imports a computed specifier: import(${match[1]})`);
+    }
+    for (const match of code.matchAll(/(?:from|import)\s*\(?\s*["'](\.\.?\/[^"']+)["']/gu))
+      pendingModules.push(join(file, "..", match[1]));
+  }
+  console.log(`bundle safety: ${bundled.size} runtime modules import literal specifiers only`);
   run("npm", ["pack", "--ignore-scripts", "--pack-destination", destination], staging);
   // Bun's packer must agree with npm's file inventory; the release artifact stays npm pack.
   const bunPack = spawnSync("bun", ["--no-env-file", "pm", "pack", "--dry-run"], {
@@ -912,6 +929,7 @@ run(
 );
 const installedPackageTests = [
   "sdk.test.ts",
+  "tool-endpoint.test.ts",
   "live-spans.test.ts",
   "evals.test.ts",
   "scorer-publication.test.ts",
