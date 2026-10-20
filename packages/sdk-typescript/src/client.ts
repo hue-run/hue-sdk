@@ -550,6 +550,53 @@ export class HueClient {
   }
 
   /**
+   * Runs `callback` as a sub-agent: inside an `invoke_agent {name}` span carrying
+   * `gen_ai.operation.name` `invoke_agent`, `gen_ai.agent.name` and `hue.agent.role` `subagent`.
+   * The span nests under the active span, normally the `tool()` span of the call that started
+   * the sub-agent, or under `options.parentContext`, for example `hue.extract(headers)` in
+   * another process. The sub-agent's own model and tool spans nest under it, and session, user
+   * and workspace identifiers are inherited unless `options` sets them. `options.input` and a
+   * defined result are recorded as `input.value` / `output.value` when `captureContent` is true;
+   * a callback that calls `setOutput` keeps its own output. Errors are recorded and rethrown as
+   * in `withSpan`. A blank or non-string name is recorded as `unknown` and counted.
+   */
+  async subagent<T>(
+    name: string,
+    callback: (span: HueSpan) => Promise<T> | T,
+    options: SpanOptions = {},
+  ): Promise<T> {
+    let agent = name;
+    if (!isLabel(name)) {
+      agent = "unknown";
+      if (this.enabled && !this.closed) this.instrumentationFailed();
+    }
+    return this.withSpan(
+      `invoke_agent ${agent}`,
+      async (span) => {
+        let outputSet = false;
+        const result = await callback({
+          ...span,
+          setOutput: (value) => {
+            outputSet = true;
+            span.setOutput(value);
+          },
+        });
+        if (result !== undefined && !outputSet) span.setOutput(result);
+        return result;
+      },
+      {
+        ...options,
+        attributes: {
+          ...options.attributes,
+          "gen_ai.operation.name": "invoke_agent",
+          "gen_ai.agent.name": agent,
+          "hue.agent.role": "subagent",
+        },
+      },
+    );
+  }
+
+  /**
    * Runs `callback` inside a GenAI client span for one direct provider call, named
    * `{operation} {model}` unless `options.name` is given and carrying `gen_ai.operation.name`,
    * `gen_ai.request.model` and `gen_ai.provider.name`. The argument order matches `withSpan`. The

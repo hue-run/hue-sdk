@@ -2113,6 +2113,185 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test("subagent nests an invoke_agent span under the tool that started it, and its own work under it", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "subagents",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      liveSpans: false,
+    });
+    try {
+      const answer = await hue.withSpan(
+        "invoke_agent planner",
+        () =>
+          hue.tool("delegate", { task: "research" }, () =>
+            hue.subagent(
+              "researcher",
+              async () => {
+                await hue.model("synthetic-model", () => "draft", { provider: "synthetic" });
+                await hue.tool("search", "query", () => "hits");
+                return hue.tool("verify", "draft", () =>
+                  hue.subagent("checker", () => "checked", { input: "draft" }),
+                );
+              },
+              { input: "research the topic" },
+            ),
+          ),
+        {
+          sessionId: "parent-session",
+          attributes: {
+            "gen_ai.operation.name": "invoke_agent",
+            "gen_ai.agent.name": "planner",
+            "hue.agent.role": "orchestrator",
+          },
+        },
+      );
+      expect(answer).toBe("checked");
+      await hue.flush();
+      const spans = endpoint.requests.flatMap((request) => request.records);
+      expect(spans).toHaveLength(7);
+      const named = (name: string) => spans.find((span) => span.name === name)!;
+      const planner = named("invoke_agent planner");
+      const delegate = named("execute_tool delegate");
+      const researcher = named("invoke_agent researcher");
+      const verify = named("execute_tool verify");
+      const checker = named("invoke_agent checker");
+      expect(attr(planner, "hue.agent.role")?.stringValue).toBe("orchestrator");
+      for (const [span, agent] of [
+        [researcher, "researcher"],
+        [checker, "checker"],
+      ] as const) {
+        expect(attr(span, "gen_ai.operation.name")?.stringValue).toBe("invoke_agent");
+        expect(attr(span, "gen_ai.agent.name")?.stringValue).toBe(agent);
+        expect(attr(span, "hue.agent.role")?.stringValue).toBe("subagent");
+        // In-process sub-agents are INTERNAL spans, as the GenAI agent conventions specify.
+        expect((span as { kind?: number }).kind).toBe(1);
+        expect(attr(span, "gen_ai.conversation.id")?.stringValue).toBe("parent-session");
+        expect(span.traceId).toBe(planner.traceId);
+      }
+      expect(delegate.parentSpanId).toBe(planner.spanId);
+      expect(researcher.parentSpanId).toBe(delegate.spanId);
+      for (const child of ["chat synthetic-model", "execute_tool search", "execute_tool verify"])
+        expect(named(child).parentSpanId).toBe(researcher.spanId);
+      expect(checker.parentSpanId).toBe(verify.spanId);
+      expect(attr(researcher, "input.value")?.stringValue).toBe('"research the topic"');
+      expect(attr(researcher, "output.value")?.stringValue).toBe('"checked"');
+      expect(attr(checker, "input.value")?.stringValue).toBe('"draft"');
+      expect(attr(checker, "output.value")?.stringValue).toBe('"checked"');
+      expect(hue.transport.getReport().instrumentationFailures).toBe(0);
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("subagent records errors, keeps an explicit output and omits content in metadata-only mode", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "subagent-errors",
+      captureContent: false,
+      baseUrl: endpoint.url,
+      liveSpans: false,
+    });
+    const strict = createHue({
+      apiKey,
+      serviceName: "subagent-output",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      liveSpans: false,
+    });
+    try {
+      class SubagentFailed extends Error {
+        override name = "SubagentFailed";
+      }
+      const failure = new SubagentFailed("synthetic-secret failure");
+      await expect(
+        hue.subagent(
+          "failing",
+          () => {
+            throw failure;
+          },
+          { input: "synthetic-secret input" },
+        ),
+      ).rejects.toBe(failure);
+      expect(
+        await strict.subagent("summarizer", (span) => {
+          span.setOutput("summary");
+          return { internal: "run state" };
+        }),
+      ).toEqual({ internal: "run state" });
+      expect(await strict.subagent("  ", () => "unnamed")).toBe("unnamed");
+      await hue.flush();
+      // The unusable name is a counted instrumentation failure, which a strict flush reports.
+      await expect(strict.flush()).rejects.toBeInstanceOf(HueExportError);
+      const spans = endpoint.requests.flatMap((request) => request.records);
+      const failing = spans.find((span) => span.name === "invoke_agent failing")!;
+      expect(failing.status?.code).toBe(2);
+      expect(failing.status?.message ?? "").toBe("");
+      expect(attr(failing, "error.type")?.stringValue).toBe("SubagentFailed");
+      expect(attr(failing, "gen_ai.agent.name")?.stringValue).toBe("failing");
+      expect(attr(failing, "hue.agent.role")?.stringValue).toBe("subagent");
+      expect(attr(failing, "input.value")).toBeUndefined();
+      const summarizer = spans.find((span) => span.name === "invoke_agent summarizer")!;
+      expect(attr(summarizer, "output.value")?.stringValue).toBe('"summary"');
+      const unnamed = spans.find((span) => span.name === "invoke_agent unknown")!;
+      expect(attr(unnamed, "gen_ai.agent.name")?.stringValue).toBe("unknown");
+      expect(strict.transport.getReport().instrumentationFailures).toBe(1);
+      expect(JSON.stringify(endpoint.requests.map((request) => request.raw))).not.toContain(
+        "synthetic-secret",
+      );
+    } finally {
+      await hue.shutdown();
+      await strict.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("a subagent in another process continues the trace from W3C headers", async () => {
+    const endpoint = receiver();
+    const options = { apiKey, captureContent: true, baseUrl: endpoint.url, liveSpans: false };
+    const caller = createHue({ ...options, serviceName: "orchestrator-process" });
+    const worker = createHue({ ...options, serviceName: "subagent-process" });
+    try {
+      const headers: Record<string, string> = {};
+      let traceId = "";
+      await caller.withSpan("request", () =>
+        caller.tool("delegate", "task", () => {
+          caller.inject(headers);
+          return "sent";
+        }),
+      );
+      expect(Object.keys(headers)).toEqual(["traceparent"]);
+      // The receiving process: only the headers cross the boundary.
+      await worker.subagent(
+        "remote-researcher",
+        async (span) => {
+          traceId = span.traceId;
+          await worker.tool("search", "query", () => "hits");
+        },
+        { parentContext: worker.extract(headers), sessionId: "remote-session" },
+      );
+      await caller.flush();
+      await worker.flush();
+      const spans = endpoint.requests.flatMap((request) => request.records);
+      const named = (name: string) => spans.find((span) => span.name === name)!;
+      const delegate = named("execute_tool delegate");
+      const remote = named("invoke_agent remote-researcher");
+      const toolSpanId = Buffer.from(delegate.spanId, "base64").toString("hex");
+      expect(headers.traceparent).toContain(toolSpanId);
+      expect(remote.traceId).toBe(delegate.traceId);
+      expect(Buffer.from(remote.traceId, "base64").toString("hex")).toBe(traceId);
+      expect(remote.parentSpanId).toBe(delegate.spanId);
+      expect(attr(remote, "hue.agent.role")?.stringValue).toBe("subagent");
+      expect(attr(remote, "gen_ai.conversation.id")?.stringValue).toBe("remote-session");
+      expect(named("execute_tool search").parentSpanId).toBe(remote.spanId);
+    } finally {
+      await caller.shutdown();
+      await worker.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test("contentPrefixes lists every recognized content key, identical to the Python SDK", () => {
     expect(contentPrefixes).toEqual([
       "gen_ai.input.messages",
