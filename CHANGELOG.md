@@ -1655,7 +1655,9 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### [Unreleased]
+### [0.13.3] - 2026-10-20
+
+#### Added
 
 - `verify_trace` adds `project` (a `Project` or `None`, default `None`) to `TraceVerificationResult` once Hue reports the trace missing: the project the key searched, so a key for another project is told apart from a trace that is not stored yet. `verified` and `receipt` are unchanged.
 
@@ -2312,6 +2314,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.14 (2026-10-20): the Python installation commands pin `hue-run==0.13.3`.
 - 0.8.13 (2026-10-19): the integration table routes an application whose framework owns the agent loop or the root span (LangChain, LangGraph) to the LangChain and LangGraph integration page and the OpenTelemetry root-span section.
 - 0.8.12 (2026-10-19): the file is formatted with Prettier's defaults (table cell alignment), so `prettier --check` passes in repositories that vendor it. No wording changes.
 - 0.8.11 (2026-10-19): **Verify delivery** gives the running-server pattern (log or return the request span's `traceId`, verify from a diagnostic client), names the receipt fields once and says what a `null` receipt means.
