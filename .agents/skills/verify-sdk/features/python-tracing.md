@@ -78,3 +78,7 @@ uv run --frozen --all-groups pytest tests/test_attachments.py -q
 ```
 
 Expected: `27 passed`. `tests/test_wheel.py` runs the same file against the built wheel.
+
+## Opt-in tool endpoint evidence
+
+Use `uv run --frozen --all-groups pytest tests/test_tool_endpoint.py` against the loopback receiver. Check actual URL/source/method, query allowlisting without deduplication, credentials and fragment removal, metadata-only omission, existing redaction, invalid evidence and unchanged single execution/result/error. Repeat the file against the installed archive before shipping a new endpoint API. These checks make no live provider requests.
