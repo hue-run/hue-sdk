@@ -202,9 +202,9 @@ helpers (`setInput`, `setOutput`, `tool` arguments and results, `recordMessages`
 that is not JSON, such as a `Date` or a class instance, is omitted with an instrumentation failure
 while the callback result is returned unchanged.
 
-### Tool endpoint evidence (unreleased)
+### Tool endpoint evidence
 
-This checkout adds optional `ToolOptions.endpoint`: `{ url, source, method?, captureQueryParameters? }`.
+TypeScript `0.21.0` adds optional `ToolOptions.endpoint`: `{ url, source, method?, captureQueryParameters? }`.
 Use the actual HTTP(S) request URL, client config URL or receipt URL; set `source` to `request`,
 `client_config` or `receipt`. Supply `method` only when known. With content capture enabled,
 Hue records `url.full`, `hue.tool.endpoint.source` and optional `http.request.method` through the
@@ -741,8 +741,8 @@ in `finally`. Shut down a shared server client only when the application stops.
 
 The integration creates real Vercel provider, streaming and tool spans and passes
 `recordInputs` and `recordOutputs` explicitly. The installed-package verification
-tests the matching 7.0.99/1.0.99 and
-7.0.100/1.0.100 pairs. Compatible-major ranges do not mean every later release
+tests the matching 7.0.99/1.0.99, 7.0.100/1.0.100, 7.0.137/1.0.137 and
+7.0.138/1.0.138 pairs. Compatible-major ranges do not mean every later release
 has been verified. Other OTel
 instrumentations can use `hue.tracer` directly or explicitly attach the processors
 below. Instrumentations that only use a global provider need your application's

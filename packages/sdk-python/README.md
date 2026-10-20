@@ -92,7 +92,7 @@ Before redaction, helpers copy supported content into detached built-in containe
 
 To store a file your work reads or produces, see [Record a file](#record-a-file).
 
-This checkout adds an **unreleased** `endpoint=` option to `tool()`, typed as `ToolEndpoint`:
+Python `0.13.4` adds an `endpoint=` option to `tool()`, typed as `ToolEndpoint`:
 `{"url": actual_url, "source": "client_config", "method": actual_method, "capture_query_parameters": ["user_id"]}`.
 Use a URL from the actual `request`, `client_config` or `receipt`, and name that `source`. Omit
 unknown methods. With content capture enabled it emits `url.full`, `hue.tool.endpoint.source`

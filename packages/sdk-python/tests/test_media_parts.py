@@ -1439,10 +1439,10 @@ def test_helpers_across_spans_upload_in_the_background_four_at_a_time(hue_store,
             peak = max(peak, active)
         try:
             time.sleep(put_delay_seconds)
-            return original_headers(handler)
         finally:
             with lock:
                 active -= 1
+        return original_headers(handler)
 
     monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", delayed_headers)
     files = [helper(f"concurrent helper {index}".encode()) for index in range(9)]
@@ -1522,10 +1522,10 @@ def test_repeated_helpers_share_one_upload_without_holding_new_files_back(hue_st
             peak = max(peak, active)
         try:
             time.sleep(0.3)
-            return original_headers(handler)
         finally:
             with lock:
                 active -= 1
+        return original_headers(handler)
 
     monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", delayed_headers)
     data = [f"repeated helper {index}".encode() for index in range(8)]
