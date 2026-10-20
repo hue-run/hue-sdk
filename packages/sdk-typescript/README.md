@@ -604,6 +604,79 @@ npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authoriza
 See [Import a bundle of existing traces](CLI.md#import-a-bundle-of-existing-traces) for the
 formats, the report, what Hue refuses and the exit codes.
 
+## Sub-agents
+
+Run a sub-agent with `hue.subagent(name, callback, options)`, inside the tool call that starts it:
+
+```ts
+const findings = await hue.tool("research", { topic }, () =>
+  hue.subagent(
+    "researcher",
+    async () => {
+      const notes = await hue.model("gpt-5-mini", () => callModel(topic), { provider: "openai" });
+      return hue.tool("summarize", notes, () => summarize(notes));
+    },
+    { input: topic },
+  ),
+);
+```
+
+The sub-agent runs inside one `invoke_agent researcher` span with `gen_ai.operation.name`
+`invoke_agent`, `gen_ai.agent.name` `researcher` and `hue.agent.role` `subagent`. That span is a
+child of the active span, here the `execute_tool research` span, and the sub-agent's own model and
+tool spans are its children, so Hue scopes them to the sub-agent. Sub-agents nest: a sub-agent's
+tool can start another. The span is `INTERNAL` unless `options.kind` says otherwise; session, user
+and workspace identifiers are inherited unless `options` sets them. `options.input` and the
+callback's defined result are recorded as `input.value` and `output.value` when `captureContent`
+is true (a callback that calls `setOutput` keeps its own output), and errors are recorded and
+rethrown as in `withSpan`.
+
+The calling agent's role is not set for you: Hue reads roles only from the spans that state them,
+and the span a sub-agent starts under is usually a tool call, not the agent. To label the calling
+agent, give its own span the role:
+
+```ts
+await hue.withSpan("invoke_agent planner", () => runPlanner(), {
+  attributes: {
+    "gen_ai.operation.name": "invoke_agent",
+    "gen_ai.agent.name": "planner",
+    "hue.agent.role": "orchestrator",
+  },
+});
+```
+
+When the sub-agent runs in another process, send the caller's trace context with the request and
+start the sub-agent under it:
+
+```ts
+// The calling process, inside the tool call that hands the task over.
+await hue.tool("research", { topic }, async () => {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  hue.inject(headers); // adds `traceparent` only
+  const response = await fetch(researcherUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ topic, sessionId }),
+  });
+  return response.json();
+});
+
+// The sub-agent's process, for example an Express handler.
+const { topic, sessionId } = req.body;
+const findings = await hue.subagent("researcher", () => research(topic), {
+  parentContext: hue.extract(req.headers),
+  sessionId,
+});
+```
+
+The `invoke_agent researcher` span then belongs to the caller's trace, with the caller's
+`execute_tool research` span as its parent. `hue.extract()` reads a plain header object such as
+Node's `req.headers`; pass `Object.fromEntries(request.headers)` for a Fetch `Request`. Only
+`traceparent` crosses the boundary, never the API key, baggage or the session, so pass the
+session identifier yourself as above. Accept `traceparent` only from your own services: whoever
+sets it chooses the trace the sub-agent's spans join. On an endpoint that also serves other
+callers, extract it only from authenticated internal requests and start a new trace otherwise.
+
 ## Vercel AI SDK 6
 
 AI SDK 6 accepts a per-call tracer through `experimental_telemetry`. Pass
@@ -798,7 +871,8 @@ and similar attributes on your own providers.
 
 For external parent context pass `parentContext` to `withSpan`. Across processes, use
 `hue.inject(carrier)` inside the producing span and `hue.extract(carrier)` in the worker; both
-speak W3C `traceparent` only and never include the API key or baggage. Hue registers no global
+speak W3C `traceparent` only and never include the API key or baggage. Extract it only from
+trusted internal callers, as described under [Sub-agents](#sub-agents). Hue registers no global
 propagator, so `propagation.inject()` from `@opentelemetry/api` is a no-op unless your
 application configured one. `getContext()` exposes the helper's current context for APIs taking
 an explicit context. Session, user and workspace identifiers (`sessionId` as

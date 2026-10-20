@@ -752,6 +752,198 @@ def test_context_is_task_local_and_w3c_context_propagates(receiver):
     assert "gen_ai.conversation.id" not in attrs(spans["outside"])
 
 
+def test_subagent_nests_under_the_tool_that_started_it_and_its_work_under_it(receiver):
+    with Hue(receiver.url, KEY, live_spans=False) as hue:
+
+        @hue.subagent("checker")
+        async def check(draft):
+            await asyncio.sleep(0)
+            return "checked"
+
+        async def research():
+            with hue.subagent("researcher", input="research the topic") as agent:
+                with hue.model("synthetic-model", provider="synthetic"):
+                    pass
+                with hue.tool("search") as search:
+                    search.set_output("hits")
+                with hue.tool("verify"):
+                    answer = await check("draft")
+                agent.set_output(answer)
+                return answer
+
+        with hue.context(session_id="parent-session"):
+            with hue.span(
+                "invoke_agent planner",
+                attributes={
+                    "gen_ai.operation.name": "invoke_agent",
+                    "gen_ai.agent.name": "planner",
+                    "hue.agent.role": "orchestrator",
+                },
+            ):
+                with hue.tool("delegate"):
+                    assert asyncio.run(research()) == "checked"
+        assert hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 0
+    spans = {span.name: span for span in receiver.spans()}
+    assert len(receiver.spans()) == 7
+    planner = spans["invoke_agent planner"]
+    researcher = spans["invoke_agent researcher"]
+    checker = spans["invoke_agent checker"]
+    assert attrs(planner)["hue.agent.role"].string_value == "orchestrator"
+    for span, agent in ((researcher, "researcher"), (checker, "checker")):
+        assert attrs(span)["gen_ai.operation.name"].string_value == "invoke_agent"
+        assert attrs(span)["gen_ai.agent.name"].string_value == agent
+        assert attrs(span)["hue.agent.role"].string_value == "subagent"
+        assert span.kind == trace.SpanKind.INTERNAL.value + 1  # OTLP numbers kinds from 1
+        assert attrs(span)["gen_ai.conversation.id"].string_value == "parent-session"
+        assert span.trace_id == planner.trace_id
+    assert spans["execute_tool delegate"].parent_span_id == planner.span_id
+    assert researcher.parent_span_id == spans["execute_tool delegate"].span_id
+    for child in ("chat synthetic-model", "execute_tool search", "execute_tool verify"):
+        assert spans[child].parent_span_id == researcher.span_id
+    assert checker.parent_span_id == spans["execute_tool verify"].span_id
+    assert attrs(researcher)["input.value"].string_value == '"research the topic"'
+    assert attrs(researcher)["output.value"].string_value == '"checked"'
+    assert attrs(checker)["output.value"].string_value == '"checked"'
+    assert "input.value" not in attrs(checker)
+
+
+@pytest.mark.parametrize("completion_order", [(0, 1), (1, 0)])
+def test_subagent_shared_between_tasks_restores_each_parent(receiver, completion_order, caplog):
+    with Hue(receiver.url, KEY, live_spans=False) as hue:
+        helper = hue.subagent("shared")
+
+        async def overlap():
+            entered = [asyncio.Event(), asyncio.Event()]
+            release = [asyncio.Event(), asyncio.Event()]
+
+            async def work(index):
+                with hue.span(f"request {index}"):
+                    with helper:
+                        entered[index].set()
+                        await release[index].wait()
+                        with hue.tool(f"inside {index}"):
+                            pass
+                    with hue.tool(f"after {index}"):
+                        pass
+
+            tasks = [asyncio.create_task(work(index)) for index in range(2)]
+            await asyncio.gather(*(event.wait() for event in entered))
+            for index in completion_order:
+                release[index].set()
+                await tasks[index]
+
+        asyncio.run(overlap())
+        assert hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 0
+    spans = receiver.spans()
+    by_name = {span.name: span for span in spans if span.name != "invoke_agent shared"}
+    agents = [span for span in spans if span.name == "invoke_agent shared"]
+    assert len(agents) == 2
+    for index in range(2):
+        parent = by_name[f"request {index}"]
+        agent = next(span for span in agents if span.parent_span_id == parent.span_id)
+        assert by_name[f"execute_tool inside {index}"].parent_span_id == agent.span_id
+        assert by_name[f"execute_tool after {index}"].parent_span_id == parent.span_id
+    assert "Failed to detach context" not in caplog.text
+
+
+def test_subagent_reuse_in_nested_and_inherited_contexts(receiver):
+    with Hue(receiver.url, KEY, live_spans=False) as hue:
+        helper = hue.subagent("shared")
+
+        async def child():
+            with helper:
+                await asyncio.sleep(0)
+                with hue.tool("child"):
+                    pass
+
+        async def parent():
+            with hue.span("request"):
+                with helper:
+                    with helper:
+                        with hue.tool("nested"):
+                            pass
+                    await asyncio.create_task(child())
+                    with hue.tool("parent"):
+                        pass
+                with hue.tool("after"):
+                    pass
+
+        asyncio.run(parent())
+        assert hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 0
+    spans = receiver.spans()
+    by_name = {span.name: span for span in spans if span.name != "invoke_agent shared"}
+    agents = [span for span in spans if span.name == "invoke_agent shared"]
+    outer = next(span for span in agents if span.parent_span_id == by_name["request"].span_id)
+    inner = [span for span in agents if span.parent_span_id == outer.span_id]
+    assert len(inner) == 2
+    assert by_name["execute_tool nested"].parent_span_id in {span.span_id for span in inner}
+    assert by_name["execute_tool child"].parent_span_id in {span.span_id for span in inner}
+    assert (
+        by_name["execute_tool nested"].parent_span_id
+        != by_name["execute_tool child"].parent_span_id
+    )
+    assert by_name["execute_tool parent"].parent_span_id == outer.span_id
+    assert by_name["execute_tool after"].parent_span_id == by_name["request"].span_id
+
+
+def test_subagent_records_errors_and_omits_content_in_metadata_only_mode(receiver):
+    class SubagentFailed(Exception):
+        pass
+
+    with Hue(receiver.url, KEY, capture_content=False, live_spans=False) as hue:
+
+        @hue.subagent("summarizer")
+        def summarize(text):
+            return f"summary of {text}"
+
+        with pytest.raises(SubagentFailed):
+            with hue.subagent("failing", input="synthetic-secret input"):
+                raise SubagentFailed("synthetic-secret failure")
+        assert summarize("synthetic-secret document") == "summary of synthetic-secret document"
+        assert summarize.__name__ == "summarize"
+        with hue.subagent("  "):
+            pass
+        assert not hue.force_flush()  # the unusable name is a counted instrumentation failure
+        assert hue.export_status.instrumentation_failures == 1
+    spans = {span.name: span for span in receiver.spans()}
+    failing = spans["invoke_agent failing"]
+    assert failing.status.code == 2 and not failing.status.message
+    assert attrs(failing)["error.type"].string_value.endswith("SubagentFailed")
+    assert attrs(failing)["hue.agent.role"].string_value == "subagent"
+    assert "input.value" not in attrs(failing)
+    assert "output.value" not in attrs(spans["invoke_agent summarizer"])
+    assert attrs(spans["invoke_agent unknown"])["gen_ai.agent.name"].string_value == "unknown"
+    assert all(b"synthetic-secret" not in body for _, _, body in receiver.requests)
+
+
+def test_subagent_in_another_process_continues_the_trace_from_w3c_headers(receiver):
+    headers: dict[str, str] = {}
+    with Hue(receiver.url, KEY, service_name="orchestrator", live_spans=False) as caller:
+        with caller.span("request"), caller.tool("delegate") as delegate:
+            Hue.inject(headers)
+            tool_span_id = delegate.span_id
+        assert caller.force_flush()
+    assert list(headers) == ["traceparent"] and tool_span_id in headers["traceparent"]
+    # The receiving process: only the headers cross the boundary.
+    with Hue(receiver.url, KEY, service_name="subagent", live_spans=False) as worker:
+        with worker.context(session_id="remote-session"):
+            with worker.subagent("remote-researcher", parent_context=Hue.extract(headers)):
+                with worker.tool("search"):
+                    pass
+        assert worker.force_flush()
+    spans = {span.name: span for span in receiver.spans()}
+    delegate_span = spans["execute_tool delegate"]
+    remote = spans["invoke_agent remote-researcher"]
+    assert remote.trace_id == delegate_span.trace_id
+    assert remote.parent_span_id == delegate_span.span_id
+    assert attrs(remote)["hue.agent.role"].string_value == "subagent"
+    assert attrs(remote)["gen_ai.conversation.id"].string_value == "remote-session"
+    assert spans["execute_tool search"].parent_span_id == remote.span_id
+
+
 def test_borrowed_provider_and_existing_processors_survive_shutdown(receiver):
     global_provider = trace.get_tracer_provider()
     provider = TracerProvider(shutdown_on_exit=False)
