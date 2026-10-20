@@ -91,6 +91,18 @@ Before redaction, helpers copy supported content into detached built-in containe
 
 To store a file your work reads or produces, see [Record a file](#record-a-file).
 
+This checkout adds an **unreleased** `endpoint=` option to `tool()`, typed as `ToolEndpoint`:
+`{"url": actual_url, "source": "client_config", "method": actual_method, "capture_query_parameters": ["user_id"]}`.
+Use a URL from the actual `request`, `client_config` or `receipt`, and name that `source`. Omit
+unknown methods. With content capture enabled it emits `url.full`, `hue.tool.endpoint.source`
+and optional `http.request.method`, through the existing `redactor` (field `url.full` for the URL).
+Userinfo, fragments and unlisted query parameters are removed; credential query names are rejected
+even if listed. Every allowed occurrence, including duplicate and empty values, is retained.
+Metadata-only mode omits all endpoint evidence. Invalid evidence is omitted and counted without
+changing execution, results or exceptions. Do not supply secret-bearing paths or bypass existing
+masking. The helper never observes requests or infers identities automatically; see the
+[setup skill](../../skills/hue/SKILL.md#http-tool-endpoint-evidence-unreleased-sdk-checkout) for source checkout and dispatcher integration.
+
 Tool/model metadata accepts plain strings; invalid values use stable fallback labels and increment instrumentation failures without invoking custom conversion hooks. Disabled tracing skips metadata validation.
 
 Hue helpers implement the model/tool metadata and inference-message subset of the Development GenAI conventions. They accept caller-supplied JSON without full schema validation. For model helpers, pass the message representation produced by your integration. When authoring your own messages, prefer the shape defined by the GenAI semantic conventions' [input messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-input-messages.json) and [output messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-output-messages.json) JSON schemas. Use either span content or correlated logs for a given input/output, avoiding duplicate copies. Call `log_inference` inside `model(..., provider=...)`, or pass `operation=` and `provider=` explicitly, to include the required inference metadata. `log_inference` sends a structured body (an explicit `None` field keeps its key with an empty value, distinct from an absent field) and copies `gen_ai.operation.name`, `gen_ai.provider.name` and `gen_ai.request.model` from the enclosing `model()` block, or from its `operation=`, `provider=` and `model=` keywords, plus `gen_ai.conversation.id` from `context()`, onto the record's attributes when known. A blank or over-long keyword is omitted and counted as an instrumentation failure.

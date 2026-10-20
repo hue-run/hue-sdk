@@ -224,11 +224,22 @@ export interface McpServerInfo {
   surface?: string;
 }
 
-/**
- * Options for {@link HueClient.tool}. `callId` is the provider-issued tool-call
- * id; `mcp` is the MCP server that handled the call.
- */
+/** Explicit routing evidence for {@link HueClient.tool}; values come from the application. */
+export interface ToolEndpoint {
+  /** Actual HTTP(S) URL used by the tool. Never synthesize it from a tool or server label. */
+  url: string;
+  /** Where the URL was observed. Recorded as `hue.tool.endpoint.source`. */
+  source: "request" | "client_config" | "receipt";
+  /** Actual HTTP method, when known; the SDK supplies no default. */
+  method?: string;
+  /** Non-secret query names to retain, including every occurrence. All others are removed. */
+  captureQueryParameters?: readonly string[];
+}
+
+/** Options for {@link HueClient.tool}, including call identity and opt-in routing evidence. */
 export interface ToolOptions extends Pick<SpanOptions, "parentContext"> {
+  /** Opt-in routing evidence. Only captured with content enabled, through existing redaction. */
+  endpoint?: ToolEndpoint;
   /** Provider-issued identifier of this tool call, recorded as `gen_ai.tool.call.id`. */
   callId?: string;
   /**

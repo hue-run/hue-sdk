@@ -96,3 +96,7 @@ bun test tests/blobs.test.ts -t "one upload step"
 ```
 
 Expected: `14 pass` and `3 pass`, `0 fail`. `verify-package.mjs` runs `blobs.test.ts` against the packed tarball.
+
+## Opt-in tool endpoint evidence
+
+Use `bun test tests/tool-endpoint.test.ts` against the loopback receiver. Check actual URL/source/method, query allowlisting without deduplication, credentials and fragment removal, metadata-only omission, existing redaction, invalid evidence and unchanged single execution/result/error. Repeat the file against the installed archive before shipping a new endpoint API. These checks make no live provider requests.
