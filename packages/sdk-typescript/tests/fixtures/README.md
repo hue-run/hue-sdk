@@ -81,3 +81,19 @@ own text, base64 characters before a final newline, `data:` URLs whose data does
 which are hashed as their text, a `data:` URL with millions of parameters, and text and a
 percent-escaped `data:` URL with a lone surrogate, which both SDKs write as U+FFFD. Both suites
 check the file.
+
+# Langfuse export fixture
+
+`langfuse-exports.json` is synthetic: invented ids, users, content and costs in each shape
+Langfuse writes a trace in, built from the response schemas, export columns and serializers in
+Langfuse's open-source server. `traceWithObservations` is a `GET /api/public/traces/{traceId}`
+answer for a trace with two top-level observations (the pattern of Langfuse's SDKs before
+OpenTelemetry); `tracesPage` and `observationsPage` are v1 list pages of another trace, whose
+observations carry no user; `observationsV2Page` is a `GET /api/public/v2/observations` page
+fetched with `core,basic,time,io,metadata,model,usage,trace_context`, its input and output raw JSON
+text, with an app root whose parent was not exported; `blobTraces`, `blobObservations` and
+`blobObservationsV2` are rows of the blob storage export's `traces`, `observations` and
+`observations_v2` tables (snake_case, ClickHouse instants without a zone, 64-bit counts as decimal
+text); `uiTraces`, `uiObservations` and `uiEvents` are rows of the UI's downloads of the traces,
+observations and events tables. `traces-import-langfuse.test.ts` writes each as a file the way
+Langfuse delivers it (a JSON document, a JSON array or JSON Lines, gzip for blob storage).

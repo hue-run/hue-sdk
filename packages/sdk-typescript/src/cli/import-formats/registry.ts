@@ -2,7 +2,7 @@ import { isObject } from "../traces-import-convert.js";
 import type { ImportAdapter } from "./adapter.js";
 import { atif } from "./atif.js";
 import { braintrust } from "./braintrust.js";
-import { langfuseObservations } from "./langfuse.js";
+import { langfuse, langfuseObservations } from "./langfuse.js";
 import { otlpJson } from "./otlp.js";
 
 /**
@@ -37,6 +37,7 @@ import { otlpJson } from "./otlp.js";
 export const importAdapters: readonly ImportAdapter[] = [
   otlpJson,
   langfuseObservations,
+  langfuse,
   atif,
   braintrust,
 ];

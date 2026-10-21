@@ -504,8 +504,8 @@ stopped.
 ## Import a bundle of existing traces
 
 `hue traces import` brings historical traces into Hue from exports you already hold: OTLP/JSON
-trace exports (a `{"resourceSpans": […]}` document, a list of them, or one per line), complete
-Langfuse observation exports (the `data` or native `observations` envelope), text ATIF v1.7 and
+trace exports (a `{"resourceSpans": […]}` document, a list of them, or one per line), Langfuse
+exports (public API answers, UI downloads and blob-storage files), text ATIF v1.7 and
 v1.8 exports, embedded subagents included, and Braintrust span rows (a UI download, the fetch or
 query API's answer, `bt sync pull` JSON Lines or a cloud-storage export). It needs no project key. `prepare` runs on the machine
 that holds the exports and sends nothing; a Hue MCP connection then authorizes the delivery
@@ -531,10 +531,27 @@ created with mode 0700) beside `manifest.json`, which declares each trace's id, 
 is stored as a value of its own and listed in `hue.blobs`, as the exporter lists the values it
 uploads. OTLP spans are kept as recorded; a trace or span id that is not an OpenTelemetry id (an
 exporter's UUID, for example) is mapped to one derived from it by SHA-256, with the original kept
-as `hue.import.original_trace_id` or `hue.import.original_span_id`. A Langfuse observation becomes
-one span keeping its whole record (`hue.import.source_record`) beside the `langfuse.*` and GenAI
-attributes Hue reads; an id that is no OpenTelemetry id is mapped as `hue import langfuse` maps it,
-so an export and a live import of the same trace agree. An ATIF export becomes one trace: an agent
+as `hue.import.original_trace_id` or `hue.import.original_span_id`. In the Langfuse observation list
+Hue documents (a `data` or native `observations` envelope whose observations carry no `projectId`),
+a Langfuse observation becomes one span keeping its whole record (`hue.import.source_record`) beside
+the `langfuse.*` and GenAI attributes Hue reads; an id that is no OpenTelemetry id is mapped as
+`hue import langfuse` maps it, so an export and a live import of the same trace agree. Everything
+Langfuse itself writes is read as rows instead: `GET /api/public/traces/{id}`, v1 trace and
+observation pages, Observations API v2 pages, `GET /api/public/sessions/{id}`, UI downloads of the
+traces, observations and events tables (a JSON array or JSON Lines) and blob-storage files of the
+`traces`, `observations` and `observations_v2` tables (snake_case columns, gzip by default). Records
+are joined by trace across files: a trace record becomes the trace's root span `t-<trace id>` (the
+id Langfuse gives it) with the trace's `userId`, `sessionId`, name and tags, and the observations
+without a parent go under it, so a trace page and an observation page of one trace make one trace.
+An observation whose parent was not exported (an app root) is a root of its trace. A `GENERATION` is
+a model call with its messages, model and token usage (`usageDetails`: input and output as Langfuse
+totals them, cached and reasoning tokens included, with cache reads and reasoning also on their
+own), a `TOOL` a tool call, and `level` `ERROR` an error status. An instant without a zone
+(ClickHouse's `YYYY-MM-DD HH:MM:SS.ffffff`) is UTC; Langfuse's `default` environment names no
+deployment environment, and its experiment and evaluator environments (`sdk-experiment`,
+`langfuse-…`) are declared evaluation traffic. Copies of a record keep the latest `updatedAt`. These
+traces are labelled `hue.import.format` `langfuse` and declared `otlp_json`. CSV and Parquet
+downloads are not read: export JSON or JSON Lines. An ATIF export becomes one trace: an agent
 span for the run, a model span per agent step with the conversation so far, a tool span per call,
 each embedded subagent as its own agent span under the call that spawned it, and the export's
 `extra.user_id` as the trace's `user.id`; its spans carry `hue.import.format` `atif` under the
