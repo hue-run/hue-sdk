@@ -21,12 +21,13 @@ import { crc32, deflateRawSync, gunzipSync, gzipSync } from "node:zlib";
 import { runTracesCommand, TRACES_USAGE, type TracesCommandIo } from "../src/cli/traces-import.js";
 import {
   batchEntries,
-  detectFormat,
   integerQuotient,
   manifestTotals,
   validateManifest,
   type TraceImportManifest,
 } from "../src/cli/traces-import-convert.js";
+import { decodeContainer, parseValues } from "../src/cli/import-formats/containers.js";
+import { adapterFor, unrecognizedReason } from "../src/cli/import-formats/registry.js";
 import { ZipArchive, unsafeZipPath } from "../src/cli/traces-import-zip.js";
 import { Progress } from "../src/cli/traces-import-upload.js";
 import { manifestTooLarge } from "../src/cli/traces-import-prepare.js";
@@ -529,12 +530,14 @@ describe("hue traces import prepare", () => {
       ["exports/batch-2.jsonl", "otlp_json", 2],
       ["langfuse/native.json", "langfuse_observations", 1],
       ["langfuse/page-1.json", "langfuse_observations", 1],
+      // A gzip copy of batch-1.json: the same content, so the same traces and source digest.
+      ["packed.json.gz", "otlp_json", 2],
     ]);
     expect(report.files.unsupported).toEqual([
       { file: "logs.json", reason: "an OTLP logs export; only traces are imported" },
       { file: "notes.txt", reason: "not JSON" },
-      { file: "packed.json.gz", reason: "a gzip file; decompress it first" },
     ]);
+    expect(report.files.skipped).toEqual([]);
     // T2 names an entity, T1 and L1 a user, the ATIF export a user; T3 and L2 name nobody.
     expect(report.traces.without_identity).toBe(2);
     // T1 and T2 share a production resource, L1 says production; T3 is an evaluation's.
@@ -822,14 +825,18 @@ describe("hue traces import prepare", () => {
     const result = await run(["import", "prepare", input, "--json"]);
     expect(result.code).toBe(0);
     const report = JSON.parse(result.stdout) as Record<string, any>;
-    // T1 is refused whole; T2 and T3 are prepared (T3's all-zero span id is an invalid vendor id,
-    // mapped like any other); the span whose end precedes its start is refused and named.
-    expect(report.totals.traces).toBe(2);
+    // T1 is refused whole for its conflicting copies; T3 for its span whose end precedes its start,
+    // named with the file, so no trace is prepared without one of its spans. T2 is prepared.
+    expect(report.totals.traces).toBe(1);
     expect(report.traces.refused).toEqual([
-      { file: "c.json", reason: expect.stringContaining("has no valid end time") },
+      {
+        file: "c.json",
+        trace_id: sha256(`otlp.trace:${T3_UUID}`).slice(0, 32),
+        reason: expect.stringContaining("has no valid end time"),
+      },
       { trace_id: T1, reason: `span ${T1_ROOT} appears with different content` },
     ]);
-    expect(report.traces.remapped).toEqual({ traces: 1, spans: 1 });
+    expect(report.traces.remapped).toEqual({ traces: 0, spans: 0 });
     const empty = join(root, "empty");
     await mkdir(empty);
     const nothing = await run(["import", "prepare", empty]);
@@ -1000,38 +1007,30 @@ describe("hue traces import prepare", () => {
   });
 
   test("detects formats from content", () => {
-    expect(detectFormat(Buffer.from(otlpFile)).format).toBe("otlp_json");
-    expect(detectFormat(Buffer.from(otlpLines)).format).toBe("otlp_json");
-    expect(detectFormat(Buffer.from(JSON.stringify([JSON.parse(otlpFile)]))).format).toBe(
-      "otlp_json",
-    );
-    expect(detectFormat(Buffer.from(JSON.stringify({ resource_spans: [] }))).format).toBe(
-      "otlp_json",
-    );
-    expect(detectFormat(Buffer.from(JSON.stringify(langfuseData))).format).toBe(
-      "langfuse_observations",
-    );
-    expect(detectFormat(Buffer.from(JSON.stringify(langfuseNative))).format).toBe(
-      "langfuse_observations",
-    );
-    expect(detectFormat(Buffer.from(JSON.stringify(atifExport()))).format).toBe("atif");
-    expect(detectFormat(Buffer.from("\uFEFF" + otlpFile)).format).toBe("otlp_json");
-    expect(detectFormat(Buffer.from([0xff, 0xfe, 0x00]))).toEqual({
-      format: "unsupported",
-      reason: "not UTF-8 text",
-    });
-    expect(detectFormat(Buffer.from('{"data": [1]}'))).toEqual({
-      format: "unsupported",
-      reason: "a `data` list that is not Langfuse observations",
-    });
-    expect(detectFormat(Buffer.from("[]"))).toEqual({
-      format: "unsupported",
-      reason: "a JSON array that is not a list of OTLP exports",
-    });
-    expect(detectFormat(new Uint8Array(0))).toEqual({
-      format: "unsupported",
-      reason: "the file is empty",
-    });
+    /** The format of a file's first value (or its first record), or why none claims it. */
+    const formatOf = (bytes: Uint8Array) => {
+      const decoded = decodeContainer(bytes, 64 * 1024 * 1024);
+      if ("unsupported" in decoded) return decoded.unsupported;
+      const parsed = parseValues(decoded.bytes);
+      if ("unsupported" in parsed) return parsed.unsupported;
+      const value = parsed.values[0]!.value;
+      const record = Array.isArray(value) ? value[0] : undefined;
+      return adapterFor(value)?.id ?? adapterFor(record)?.id ?? unrecognizedReason(value);
+    };
+    expect(formatOf(Buffer.from(otlpFile))).toBe("otlp_json");
+    expect(formatOf(Buffer.from(otlpLines))).toBe("otlp_json");
+    expect(formatOf(Buffer.from(JSON.stringify([JSON.parse(otlpFile)])))).toBe("otlp_json");
+    expect(formatOf(Buffer.from(JSON.stringify({ resource_spans: [] })))).toBe("otlp_json");
+    expect(formatOf(Buffer.from(JSON.stringify(langfuseData)))).toBe("langfuse_observations");
+    expect(formatOf(Buffer.from(JSON.stringify(langfuseNative)))).toBe("langfuse_observations");
+    expect(formatOf(Buffer.from(JSON.stringify(atifExport())))).toBe("atif");
+    expect(formatOf(Buffer.from("\uFEFF" + otlpFile))).toBe("otlp_json");
+    expect(formatOf(gzipSync(Buffer.from(otlpFile)))).toBe("otlp_json");
+    expect(formatOf(Buffer.from([0xff, 0xfe, 0x00]))).toBe("not UTF-8 text");
+    expect(formatOf(Buffer.from('{"data": [1]}'))).toBe("a JSON document of no recognized format");
+    expect(formatOf(Buffer.from('{"data": []}'))).toBe("an export page with no records");
+    expect(formatOf(Buffer.from("[]"))).toBe("an empty JSON array");
+    expect(formatOf(new Uint8Array(0))).toBe("the file is empty");
   });
 
   test("lists a trace's large values in digest order, whatever order its sources are read in", async () => {
@@ -1174,8 +1173,8 @@ describe("hue traces import prepare", () => {
       manifest.traces.find((trace) => trace.trace_id === traceId)!.identity;
     expect(identityOf(ids[0]!)).toEqual({ entity: { namespace: "team", id: "billing" } });
     expect(identityOf(ids[1]!)).toEqual({ entity: { namespace: "org", id: "acme" } });
+    // The explicit entity is the owner Hue captures, over the root's user.
     expect(identityOf(ids[2]!)).toEqual({
-      user: "user-7",
       entity: { namespace: "team", id: "support" },
       session: "session-3",
     });

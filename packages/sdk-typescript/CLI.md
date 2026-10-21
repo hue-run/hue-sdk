@@ -505,8 +505,9 @@ stopped.
 
 `hue traces import` brings historical traces into Hue from exports you already hold: OTLP/JSON
 trace exports (a `{"resourceSpans": […]}` document, a list of them, or one per line), complete
-Langfuse observation exports (the `data` or native `observations` envelope) and text ATIF v1.7 and
-v1.8 exports, embedded subagents included. It needs no project key. `prepare` runs on the machine
+Langfuse observation exports (the `data` or native `observations` envelope), text ATIF v1.7 and
+v1.8 exports, embedded subagents included, and Braintrust span rows (a UI download, the fetch or
+query API's answer, `bt sync pull` JSON Lines or a cloud-storage export). It needs no project key. `prepare` runs on the machine
 that holds the exports and sends nothing; a Hue MCP connection then authorizes the delivery
 (`prepare_trace_import`); `upload` delivers the bundle with that authorization, and
 `get_trace_import` reports what arrived.
@@ -518,7 +519,12 @@ npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authoriza
 
 **Prepare.** `prepare <path>` reads a file, a directory tree or a ZIP archive (members are inflated
 in memory; encrypted members, unsafe paths and nested archives are listed, not read) and
-recognizes each file by its content, never by its name. Every trace becomes gzip OTLP/JSON batches
+recognizes each file by its content, never by its name. A file may be gzip or zstd compressed
+(zstd needs Node.js 22.15 or later; at most 64 MiB decompressed) and hold one JSON document, a JSON
+array of records or JSON Lines; each line and each record of an array is recognized on its own, and
+one that cannot be read is reported with its line or position while the rest of the file is read.
+A malformed record refuses its trace, never the file: an OTLP trace with a malformed span is
+refused rather than imported without it. Every trace becomes gzip OTLP/JSON batches
 of at most 3 MiB decoded and 900 KiB on the wire, written to `--out` (default `<path>.hue-import`,
 created with mode 0700) beside `manifest.json`, which declares each trace's id, span count, batches
 (by the SHA-256 of each gzip body), large values, history owner and origin. A text value over 1 MiB
@@ -535,17 +541,51 @@ each embedded subagent as its own agent span under the call that spawned it, and
 instrumentation scope `hue.import.atif`, and the run's agent span is named `invoke_agent
 <agent.name>` from the export's own agent. ATIF records instants, not durations, so model and tool
 spans are points in time, and a tool's result is kept as text with no error status of the
-importer's making. The same trace in two files is one trace when the copies agree and a refusal
+importer's making. A Braintrust row becomes one span of its trace (`root_span_id`) under the
+GenAI conventions Hue reads: an `llm` row a model call with its messages, model, provider and
+token usage, a `tool` row a tool call with its name, call id, arguments and result, the times from
+`metrics` (or `created`), the error as an error status and the whole row as
+`hue.import.source_record`; `log` rows are events of the span they belong to, rows exported more
+than once keep the highest `_xact_id`, and an experiment's rows are declared evaluation traffic.
+Chat content in the common shapes (OpenAI chat messages and choices, OpenAI Responses items,
+Anthropic content blocks, LangChain messages, plain strings) is written as GenAI message parts; any
+other content is kept as `input.value` and `output.value`. These traces are labelled
+`hue.import.format` `braintrust` and declared `otlp_json` in the manifest's `source.formats`, the
+encoding Hue receives. A vendor id that is not an OpenTelemetry id is mapped by SHA-256 with the
+original kept, and a parent the export does not hold leaves the span a root of its trace, the
+original kept as `hue.import.original_parent_span_id`. An instant the source did not record is
+filled in by a fixed rule named on the span (`hue.import.timing`) and counted in the report: a
+span without a start starts at its end, else with its parent, else with the trace's earliest
+instant; one without an end ends with its last child, else at its start; and a trace that records
+no instant at all is placed at 2000-01-01T00:00:00Z, a millisecond per record. The same trace in two files is one trace when the copies agree and a refusal
 when they differ; a trace with more than 100,000 spans, 512 batches or 10,000 values is refused and
 named, and an input of more than 25,000 traces, or whose manifest would exceed 32 MiB (4 MiB
 compressed), is refused whole. Nothing about where a file sat or what it was called reaches a span: a renamed, reordered
 or re-zipped copy of the bundle prepares to byte-identical batches and the same manifest digest.
 
+**History owner.** A trace's owner is read from its spans as Hue reads it: the trace's local roots
+(spans with no parent, or one outside the trace) first, then its other spans, never a tool span or
+anything beneath one, and every span that names one must agree. An explicit
+`hue.world.entity.namespace` and `hue.world.entity.id` wins over a user; a user is the first of
+`user.id`, `enduser.id` and the other attributes and metadata fields Hue reads (OpenTelemetry,
+Vercel AI SDK, OpenLLMetry, Langfuse, LangSmith, Braintrust, Mastra and OpenInference metadata),
+except that `user.id` beside `user.account_uuid` names a Claude Code installation and is passed
+over. For an export whose user sits under a key of its own, `--user-key <key>` names it: a dotted
+key, looked up as an attribute of each span and then in its source record and metadata, or a JSON
+path into the source record (`$.metadata.customer.id` or `/metadata/customer/id`); `--session-key`
+names the conversation the same way. A tool span's key is never read. For a row format such as
+Braintrust the key's value becomes the root's `user.id` (or `gen_ai.conversation.id`). A trace kept
+as recorded (OTLP, Langfuse, ATIF) that names no owner gains one child span of its earliest root,
+`hue.import.user` with the single attribute `user.id` (or `hue.import.session` with
+`gen_ai.conversation.id`), so its recorded spans keep their bytes and a trace also sent live does
+not conflict; an owner the spans already name is kept.
+
 The report (`--json` prints it as one object) names `manifest_digest`, `totals` (traces, batches,
 spans, blobs, bytes) and `source`, which `prepare_trace_import` takes as given; the formats
-recognized and the traces each file held; the files it could not read, with the reason; the traces
-and spans it refused; the traces without a history owner (a root `user.id`, a Langfuse `userId`, an
-ATIF `extra.user_id`, or an explicit `hue.world.entity.namespace` and `hue.world.entity.id`), which
+recognized and the traces each file held; the files it could not read, with the reason; the lines
+and records of a file it read that it could not (`files.skipped`, with `line` or `record`); the
+traces and records it refused, with the file, line and trace where known; the traces whose
+instants a rule supplied, per rule (`traces.timing`); the traces without a history owner, which
 import like any other trace but leave a gap in continuous history; the origin each source recorded
 (`production`, `evaluation`, `simulation` or `unknown`; evaluation and simulation traffic is
 imported and kept out of production history); and the traces whose vendor ids were mapped. An

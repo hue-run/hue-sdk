@@ -4,22 +4,18 @@ import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "nod
 import { basename, join, relative, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 import { sdkVersion } from "../version.js";
+import type { IdentityKeys } from "./import-formats/identity.js";
+import { ImportReader, type ReadResult } from "./import-formats/reader.js";
+import { adapterById } from "./import-formats/registry.js";
 import {
   batchEntries,
   ConversionError,
-  convertAtifExport,
-  detectFormat,
-  LangfuseTraceCollector,
   manifestTotals,
   manifestTraceHasIdentity,
-  OtlpTraceCollector,
-  sha256Hex,
   traceImportFormats,
   traceImportLimits,
   validateManifest,
-  type ConvertedTrace,
   type ManifestTrace,
-  type Refusal,
   type TraceImportFormat,
   type TraceImportManifest,
   type TraceImportOrigin,
@@ -29,9 +25,10 @@ import { isZipSignature, ZipArchive, ZipError } from "./traces-import-zip.js";
 
 /**
  * `hue traces import prepare`: reads a file, a directory or a ZIP archive, converts every trace
- * it recognizes and writes the bundle Hue's import routes take: one gzip OTLP/JSON file per
- * batch, one file per large value, and `manifest.json`, whose digest and totals
- * `prepare_trace_import` is called with. Nothing is sent anywhere.
+ * the format registry (`import-formats/registry.ts`) recognizes and writes the bundle Hue's
+ * import routes take: one gzip OTLP/JSON file per batch, one file per large value, and
+ * `manifest.json`, whose digest and totals `prepare_trace_import` is called with. Nothing is sent
+ * anywhere.
  */
 
 /** Bounds on what one preparation reads. */
@@ -56,19 +53,24 @@ export interface PrepareReport {
   totals: TraceImportTotals;
   source: TraceImportManifest["source"];
   output_directory: string;
-  /** Traces recognized per format. */
-  formats: Record<TraceImportFormat, number>;
+  /** Traces prepared per format id, for the formats that held any. */
+  formats: Record<string, number>;
   files: {
-    supported: { file: string; format: TraceImportFormat; traces: number }[];
-    unsupported: { file: string; reason: string }[];
+    supported: ReadResult["supported"];
+    /** Files of which nothing could be read, and why. */
+    unsupported: ReadResult["unsupported"];
+    /** Records of a read file (a line of JSON Lines, a record of a JSON array) that were not. */
+    skipped: ReadResult["skipped"];
   };
   traces: {
     without_identity: number;
     by_origin: Record<TraceImportOrigin, number>;
     /** Traces whose vendor ids were mapped to OpenTelemetry ids, and the spans so mapped. */
     remapped: { traces: number; spans: number };
-    /** Traces and spans the sources held that could not be converted. */
-    refused: { file?: string; trace_id?: string; reason: string }[];
+    /** Traces a documented rule supplied instants for, per rule (`hue.import.timing`). */
+    timing: Record<string, number>;
+    /** Traces and records the sources held that could not be converted. */
+    refused: ReadResult["refused"];
   };
   blobs: number;
 }
@@ -264,29 +266,10 @@ async function writePrivate(path: string, bytes: Uint8Array | string): Promise<v
   await rename(temporary, path);
 }
 
-/** Merges a converted trace into the collection: the same trace from two sources is one trace
- * when its entries agree, a conflict otherwise. */
-function merge(
-  collected: Map<string, ConvertedTrace>,
-  conflicts: Map<string, string>,
-  trace: ConvertedTrace,
-  sourceDigest: string,
-): void {
-  trace.sourceDigests.add(sourceDigest);
-  const held = collected.get(trace.traceId);
-  if (!held) {
-    collected.set(trace.traceId, trace);
-    return;
-  }
-  if (JSON.stringify(held.entries) !== JSON.stringify(trace.entries)) {
-    conflicts.set(trace.traceId, "the trace appears in two sources with different content");
-    return;
-  }
-  for (const digest of trace.sourceDigests) held.sourceDigests.add(digest);
-}
-
 export interface PrepareOptions {
   out?: string;
+  /** `--user-key` and `--session-key` (`import-formats/identity.ts`). */
+  keys?: IdentityKeys;
 }
 
 /** Prepares the bundle; resolves to the report, or throws a {@link PrepareError}. */
@@ -296,92 +279,39 @@ export async function prepareTraceBundle(
 ): Promise<PrepareReport> {
   const outputDirectory = resolve(options.out ?? defaultOutputDirectory(input));
   const unsupported: PrepareReport["files"]["unsupported"] = [];
-  const supported: PrepareReport["files"]["supported"] = [];
-  const refused: PrepareReport["traces"]["refused"] = [];
-  const otlp = new OtlpTraceCollector();
-  const langfuse = new LangfuseTraceCollector();
-  const whole = new Map<string, ConvertedTrace>();
-  const conflicts = new Map<string, string>();
-  /** The file names each source digest was read under, so the traces an OTLP or Langfuse file
-   * held are counted once the traces are known: a trace may come from several files. */
-  const fileNames = new Map<string, Set<string>>();
-  const tracesPerFile = new Map<string, number>();
-  const nameFile = (digest: string, name: string) => {
-    const names = fileNames.get(digest) ?? new Set<string>();
-    names.add(name);
-    fileNames.set(digest, names);
-  };
+  const reader = new ImportReader({
+    maxFileBytes: PREPARE_LIMITS.fileBytes,
+    unsupported,
+    ...(options.keys ? { keys: options.keys } : {}),
+  });
   let totalBytes = 0;
-  {
-    for await (const source of sourceFiles(input, unsupported)) {
-      totalBytes += source.size;
-      if (totalBytes > PREPARE_LIMITS.totalBytes)
-        throw new PrepareError(`The input holds more than ${PREPARE_LIMITS.totalBytes} bytes`);
-      let bytes: Uint8Array;
-      try {
-        bytes = await source.read();
-      } catch (error) {
-        unsupported.push({
-          file: source.name,
-          reason: error instanceof ZipError ? error.message : "the file could not be read",
-        });
-        continue;
-      }
-      const digest = sha256Hex(bytes);
-      const detected = detectFormat(bytes);
-      if (detected.format === "unsupported") {
-        unsupported.push({ file: source.name, reason: detected.reason });
-        continue;
-      }
-      const note = (problems: Refusal[]) => {
-        for (const problem of problems)
-          refused.push({
-            file: source.name,
-            ...(problem.traceId ? { trace_id: problem.traceId } : {}),
-            reason: problem.reason,
-          });
-      };
-      try {
-        if (detected.format === "otlp_json") {
-          note(otlp.add(detected.envelopes, digest));
-          nameFile(digest, source.name);
-          supported.push({ file: source.name, format: "otlp_json", traces: 0 });
-        } else if (detected.format === "langfuse_observations") {
-          if (detected.unsafeIntegers)
-            throw new ConversionError("Source JSON contains an unsafe number");
-          langfuse.add(detected.observations, detected.envelope, digest);
-          nameFile(digest, source.name);
-          supported.push({ file: source.name, format: "langfuse_observations", traces: 0 });
-        } else {
-          const trace = convertAtifExport(detected, bytes.byteLength);
-          merge(whole, conflicts, trace, digest);
-          supported.push({ file: source.name, format: "atif", traces: 1 });
-        }
-      } catch (error) {
-        if (!(error instanceof ConversionError)) throw error;
-        unsupported.push({ file: source.name, reason: error.message });
-      }
-    }
-  }
-  for (const collector of [otlp, langfuse]) {
-    const finished = collector.finish();
-    for (const problem of finished.refused)
-      refused.push({
-        ...(problem.traceId ? { trace_id: problem.traceId } : {}),
-        reason: problem.reason,
+  const countBytes = (bytes: number) => {
+    totalBytes += bytes;
+    if (totalBytes > PREPARE_LIMITS.totalBytes)
+      throw new PrepareError(`The input holds more than ${PREPARE_LIMITS.totalBytes} bytes`);
+  };
+  for await (const source of sourceFiles(input, unsupported)) {
+    countBytes(source.size);
+    let bytes: Uint8Array;
+    try {
+      bytes = await source.read();
+    } catch (error) {
+      unsupported.push({
+        file: source.name,
+        reason: error instanceof ZipError ? error.message : "the file could not be read",
       });
-    for (const trace of finished.traces) {
-      const first = [...trace.sourceDigests][0] ?? "";
-      merge(whole, conflicts, trace, first);
+      continue;
     }
+    // Decompressed content counts toward the bound too.
+    countBytes(Math.max(0, reader.read(source.name, bytes) - bytes.byteLength));
   }
-  for (const [traceId, reason] of conflicts) {
-    whole.delete(traceId);
-    refused.push({ trace_id: traceId, reason });
-  }
-  const traces = [...whole.values()].sort((a, b) => (a.traceId < b.traceId ? -1 : 1));
+  const read = reader.finish();
+  const refused = read.refused;
+  const traces = read.traces;
   if (!traces.length) {
-    const problems = [...unsupported, ...refused].slice(0, 3).map((item) => item.reason);
+    const problems = [...unsupported, ...read.skipped, ...refused]
+      .slice(0, 3)
+      .map((item) => item.reason);
     throw new PrepareError(
       `No trace was recognized in ${input}${problems.length ? ` (${problems.join("; ")})` : ""}`,
     );
@@ -394,11 +324,8 @@ export async function prepareTraceBundle(
 
   const manifestTraces: ManifestTrace[] = [];
   const formats = new Set<TraceImportFormat>();
-  const formatCounts: Record<TraceImportFormat, number> = {
-    otlp_json: 0,
-    langfuse_observations: 0,
-    atif: 0,
-  };
+  const formatCounts: Record<string, number> = {};
+  const timing: Record<string, number> = {};
   const byOrigin: Record<TraceImportOrigin, number> = {
     production: 0,
     evaluation: 0,
@@ -465,22 +392,17 @@ export async function prepareTraceBundle(
       ...(sourceDigest ? { source_digest: sourceDigest } : {}),
     };
     manifestTraces.push(declared);
-    formats.add(trace.format);
-    formatCounts[trace.format]++;
+    formats.add(adapterById(trace.format)!.manifestFormat);
+    formatCounts[trace.format] = (formatCounts[trace.format] ?? 0) + 1;
+    for (const rule of trace.inferredTiming ?? []) timing[rule] = (timing[rule] ?? 0) + 1;
     byOrigin[trace.origin]++;
     if (!manifestTraceHasIdentity(declared)) withoutIdentity++;
     if (trace.remappedTraceId || trace.remappedSpans) remappedTraces++;
     remappedSpans += trace.remappedSpans;
     blobCount += trace.blobs.length;
-    if (trace.format !== "atif")
-      for (const digest of trace.sourceDigests)
-        for (const name of fileNames.get(digest) ?? [])
-          tracesPerFile.set(name, (tracesPerFile.get(name) ?? 0) + 1);
   }
   if (!manifestTraces.length)
     throw new PrepareError(`No trace of ${input} could be prepared: ${refused[0]?.reason ?? ""}`);
-  for (const entry of supported)
-    if (entry.format !== "atif") entry.traces = tracesPerFile.get(entry.file) ?? 0;
   const manifest: TraceImportManifest = {
     version: 1,
     source: {
@@ -502,11 +424,12 @@ export async function prepareTraceBundle(
     source: manifest.source,
     output_directory: outputDirectory,
     formats: formatCounts,
-    files: { supported, unsupported },
+    files: { supported: read.supported, unsupported, skipped: read.skipped },
     traces: {
       without_identity: withoutIdentity,
       by_origin: byOrigin,
       remapped: { traces: remappedTraces, spans: remappedSpans },
+      timing,
       refused,
     },
     blobs: blobCount,

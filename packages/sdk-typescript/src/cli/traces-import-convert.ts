@@ -4,15 +4,16 @@ import { z } from "zod/v4";
 import { blobEntry, blobPrefix, BLOBS_KEY, MAX_BLOB_ENTRIES, textContentType } from "../blobs.js";
 import { TRUNCATED_KEY } from "../privacy.js";
 import { hueSpanId, hueTraceId } from "./langfuse.js";
-import { isZipSignature } from "./traces-import-zip.js";
 
 /**
- * The conversions behind `hue traces import prepare`: a source file is recognized by its content
- * (an OTLP/JSON trace export, a complete Langfuse observation export or a text ATIF export),
- * each trace becomes OTLP/JSON entries, one span each, that keep the recorded ids, hierarchy,
- * timestamps, content, errors and usage, and the entries are packed into deterministic gzip
- * batches. Nothing here depends on where a file sat or what it was called: a renamed or repacked
- * bundle converts to byte-identical batches, so the manifest's digests name the same import.
+ * The conversions behind `hue traces import prepare` that predate the format registry
+ * (`import-formats/registry.ts`, which recognizes each value and hands it to its format): OTLP/JSON
+ * spans kept as recorded, complete Langfuse observation exports and text ATIF exports, each trace
+ * as OTLP/JSON entries, one span each, that keep the recorded ids, hierarchy, timestamps,
+ * content, errors and usage; the shared attribute, large-value and JSON helpers; and the packing
+ * of entries into deterministic gzip batches and the manifest. Nothing here depends on where a
+ * file sat or what it was called: a renamed or repacked bundle converts to byte-identical
+ * batches, so the manifest's digests name the same import.
  */
 
 export const traceImportFormats = ["otlp_json", "langfuse_observations", "atif"] as const;
@@ -51,23 +52,6 @@ const BASE64_SPAN_ID = /^[A-Za-z0-9+/]{11}=$/;
 const MAX_IDENTIFIER = 16_384;
 const MAX_SESSION = 2_048;
 const MAX_NAMESPACE = 128;
-/** The root attributes Hue reads a trace's user, session and explicit entity from. */
-const USER_KEYS = [
-  "user.id",
-  "enduser.id",
-  "hue.user.id",
-  "ai.telemetry.metadata.userId",
-  "langfuse.user.id",
-];
-const SESSION_KEYS = [
-  "gen_ai.conversation.id",
-  "session.id",
-  "hue.session.id",
-  "ai.telemetry.metadata.sessionId",
-  "langfuse.session.id",
-];
-const ENTITY_NAMESPACE = "hue.world.entity.namespace";
-const ENTITY_ID = "hue.world.entity.id";
 /** Attributes that mark a trace as an evaluation's or a simulated world's. */
 const EVALUATION_KEYS = ["hue.execution.id", "hue.eval.execution_id"];
 const SIMULATION_KEYS = ["hue.world.id", "hue.environment.run_id"];
@@ -123,15 +107,19 @@ export interface PreparedBlob {
 }
 export interface ConvertedTrace {
   traceId: string;
-  format: TraceImportFormat;
+  /** The id of the format that read the trace (`import-formats/registry.ts`). */
+  format: string;
   entries: ImportEntry[];
   blobs: PreparedBlob[];
+  /** Who the trace ran for, read from its entries as Hue reads them (`import-formats/identity.ts`). */
   identity?: TraceIdentity;
   origin: TraceImportOrigin;
   /** The SHA-256 of every source file that held part of the trace. */
   sourceDigests: Set<string>;
   remappedTraceId: boolean;
   remappedSpans: number;
+  /** The rules that supplied instants the source did not record (`import-formats/rows.ts`). */
+  inferredTiming?: string[];
 }
 /** A trace, span or file that was not converted, and why. */
 export interface Refusal {
@@ -143,9 +131,9 @@ export class ConversionError extends Error {}
 
 export const sha256Hex = (value: string | Uint8Array) =>
   createHash("sha256").update(value).digest("hex");
-const digestHex = (text: string, length: number) => sha256Hex(text).slice(0, length);
+export const digestHex = (text: string, length: number) => sha256Hex(text).slice(0, length);
 
-function isObject(value: unknown): value is Record<string, unknown> {
+export function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -265,108 +253,6 @@ export function validateJsonText(raw: string): void {
         throw new ConversionError("JSON has unsafe numbers");
     }
   }
-}
-
-// --- Detection ---------------------------------------------------------------------------------
-
-export type DetectedSource =
-  | { format: "otlp_json"; envelopes: Record<string, unknown>[] }
-  | {
-      format: "langfuse_observations";
-      observations: Record<string, JsonValue>[];
-      envelope: Record<string, JsonValue>;
-      unsafeIntegers: boolean;
-    }
-  | { format: "atif"; text: string; document: unknown; unsafeIntegers: boolean }
-  | { format: "unsupported"; reason: string };
-
-const isOtlpEnvelope = (value: unknown): boolean =>
-  isObject(value) && (Array.isArray(value.resourceSpans) || Array.isArray(value.resource_spans));
-
-const isObservation = (value: unknown): value is Record<string, JsonValue> =>
-  isObject(value) &&
-  typeof value.id === "string" &&
-  typeof value.traceId === "string" &&
-  typeof value.type === "string" &&
-  typeof value.startTime === "string";
-
-/** What a file holds, read from its content alone; never from its name. */
-export function detectFormat(bytes: Uint8Array): DetectedSource {
-  if (!bytes.byteLength) return { format: "unsupported", reason: "the file is empty" };
-  if (bytes[0] === 0x1f && bytes[1] === 0x8b)
-    return { format: "unsupported", reason: "a gzip file; decompress it first" };
-  // An archive is read where the walk finds it on disk; one inside another is not opened.
-  if (isZipSignature(bytes))
-    return { format: "unsupported", reason: "a ZIP archive inside the input; extract it first" };
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
-  } catch {
-    return { format: "unsupported", reason: "not UTF-8 text" };
-  }
-  let parsed: { value: unknown; unsafeIntegers: boolean } | undefined;
-  try {
-    parsed = parseJsonText(text);
-  } catch {
-    parsed = undefined;
-  }
-  if (!parsed) {
-    // OTLP/JSON exports are also written one request a line.
-    const lines = text.split(/\r?\n/).filter((line) => line.trim());
-    if (lines.length < 2) return { format: "unsupported", reason: "not JSON" };
-    const envelopes: Record<string, unknown>[] = [];
-    for (const line of lines) {
-      let value: unknown;
-      try {
-        value = parseJsonText(line).value;
-      } catch {
-        return { format: "unsupported", reason: "not JSON" };
-      }
-      if (!isOtlpEnvelope(value))
-        return { format: "unsupported", reason: "JSON Lines whose records are not OTLP exports" };
-      envelopes.push(value as Record<string, unknown>);
-    }
-    return { format: "otlp_json", envelopes };
-  }
-  const value = parsed.value;
-  if (Array.isArray(value)) {
-    if (value.length && value.every(isOtlpEnvelope))
-      return { format: "otlp_json", envelopes: value as Record<string, unknown>[] };
-    return { format: "unsupported", reason: "a JSON array that is not a list of OTLP exports" };
-  }
-  if (!isObject(value)) return { format: "unsupported", reason: "not a JSON object" };
-  if (isOtlpEnvelope(value)) return { format: "otlp_json", envelopes: [value] };
-  if (Array.isArray(value.resourceLogs) || Array.isArray(value.resource_logs))
-    return { format: "unsupported", reason: "an OTLP logs export; only traces are imported" };
-  if (typeof value.schema_version === "string" && value.schema_version.startsWith("ATIF-")) {
-    if (!Array.isArray(value.steps))
-      return { format: "unsupported", reason: "an ATIF document without steps" };
-    return { format: "atif", text, document: value, unsafeIntegers: parsed.unsafeIntegers };
-  }
-  const key = Array.isArray(value.data)
-    ? "data"
-    : Array.isArray(value.observations)
-      ? "observations"
-      : undefined;
-  if (key) {
-    if (value.data !== undefined && value.observations !== undefined)
-      return { format: "unsupported", reason: "two observation envelopes in one file" };
-    const records = value[key] as unknown[];
-    if (!records.length)
-      return { format: "unsupported", reason: "a Langfuse export without observations" };
-    if (!records.every(isObservation))
-      return { format: "unsupported", reason: "a `data` list that is not Langfuse observations" };
-    const envelope = Object.fromEntries(
-      Object.entries(value).filter(([name]) => name !== key),
-    ) as Record<string, JsonValue>;
-    return {
-      format: "langfuse_observations",
-      observations: records,
-      envelope,
-      unsafeIntegers: parsed.unsafeIntegers,
-    };
-  }
-  return { format: "unsupported", reason: "a JSON document of no recognized shape" };
 }
 
 // --- Attributes and large values ----------------------------------------------------------------
@@ -508,45 +394,11 @@ function attributeMap(attributes: readonly OtlpAttribute[]): Map<string, OtlpVal
   return map;
 }
 
-/** A trace's identity as its root records it, in the attributes Hue reads. */
-function identityOf(
-  root: ReadonlyMap<string, OtlpValue>,
-  resource: ReadonlyMap<string, OtlpValue>,
-): TraceIdentity | undefined {
-  const identity: TraceIdentity = {};
-  for (const key of USER_KEYS) {
-    const user = identifier(stringOf(root.get(key)), MAX_IDENTIFIER);
-    if (user) {
-      identity.user = user;
-      break;
-    }
-  }
-  for (const source of [root, resource]) {
-    const namespace = identifier(stringOf(source.get(ENTITY_NAMESPACE)), MAX_NAMESPACE);
-    const id = identifier(stringOf(source.get(ENTITY_ID)), MAX_IDENTIFIER);
-    if (namespace && id) {
-      identity.entity = { namespace, id };
-      break;
-    }
-  }
-  for (const key of SESSION_KEYS) {
-    const session = identifier(stringOf(root.get(key)), MAX_SESSION);
-    if (session) {
-      identity.session = session;
-      break;
-    }
-  }
-  return identity.user || identity.entity || identity.session ? identity : undefined;
-}
-
 interface OtlpSpanDraft {
   spanId: string;
-  parentSpanId?: string;
   start: bigint;
   entry: ImportEntry;
   canonical: string;
-  attributes: Map<string, OtlpValue>;
-  resource: Map<string, OtlpValue>;
 }
 
 interface OtlpTraceDraft {
@@ -590,7 +442,11 @@ export class OtlpTraceCollector {
               this.addSpan(spanValue, resourceGroup, scopeGroup, resource, scopeName, sourceDigest);
             } catch (error) {
               if (!(error instanceof ConversionError)) throw error;
-              refused.push({ reason: error.message });
+              // A malformed span refuses its trace, never leaving a partial one; a span that names
+              // no trace is refused alone.
+              const id = otlpTraceId(isObject(spanValue) ? spanValue.traceId : undefined);
+              if (id) this.draft(id.traceId, id.remapped).conflict ??= error.message;
+              refused.push({ ...(id ? { traceId: id.traceId } : {}), reason: error.message });
             }
           }
         }
@@ -610,11 +466,10 @@ export class OtlpTraceCollector {
     if (!isObject(value)) throw new ConversionError("a span that is not a JSON object");
     const span: Record<string, unknown> = { ...value };
     const originalTraceId = span.traceId;
-    if (typeof originalTraceId !== "string" || !originalTraceId)
+    const id = otlpTraceId(originalTraceId);
+    if (typeof originalTraceId !== "string" || !id)
       throw new ConversionError("a span without a trace id");
-    let traceId = normalizeId(originalTraceId, 32);
-    const remappedTraceId = traceId === undefined;
-    if (!traceId) traceId = digestHex(`otlp.trace:${originalTraceId}`, 32);
+    const { traceId, remapped: remappedTraceId } = id;
     const originalSpanId = span.spanId;
     if (typeof originalSpanId !== "string" || !originalSpanId)
       throw new ConversionError("a span without a span id");
@@ -643,21 +498,7 @@ export class OtlpTraceCollector {
     const attributes = readAttributes(span.attributes);
     if (attributes === undefined)
       throw new ConversionError(`span ${spanId} has malformed attributes`);
-    let trace = this.traces.get(traceId);
-    if (!trace) {
-      trace = {
-        traceId,
-        remappedTraceId,
-        spans: new Map(),
-        blobs: new BlobSink(),
-        sourceDigests: new Set(),
-        remappedSpans: 0,
-        evaluation: false,
-        simulation: false,
-        production: false,
-      };
-      this.traces.set(traceId, trace);
-    }
+    const trace = this.draft(traceId, remappedTraceId);
     const kept = [...attributes];
     if (remappedTraceId)
       kept.push({ key: "hue.import.original_trace_id", value: { stringValue: originalTraceId } });
@@ -692,13 +533,29 @@ export class OtlpTraceCollector {
     trace.sourceDigests.add(sourceDigest);
     trace.spans.set(spanId, {
       spanId,
-      ...(parentSpanId ? { parentSpanId } : {}),
       start: BigInt(start),
       entry,
       canonical,
-      attributes: map,
-      resource,
     });
+  }
+
+  private draft(traceId: string, remappedTraceId: boolean): OtlpTraceDraft {
+    let trace = this.traces.get(traceId);
+    if (!trace) {
+      trace = {
+        traceId,
+        remappedTraceId,
+        spans: new Map(),
+        blobs: new BlobSink(),
+        sourceDigests: new Set(),
+        remappedSpans: 0,
+        evaluation: false,
+        simulation: false,
+        production: false,
+      };
+      this.traces.set(traceId, trace);
+    }
+    return trace;
   }
 
   /** Every trace gathered so far, spans in time order, and the traces refused whole. */
@@ -713,14 +570,11 @@ export class OtlpTraceCollector {
       const spans = [...draft.spans.values()].sort((a, b) =>
         a.start < b.start ? -1 : a.start > b.start ? 1 : a.spanId < b.spanId ? -1 : 1,
       );
-      const root = spans.find((span) => !span.parentSpanId || !draft.spans.has(span.parentSpanId));
-      const identity = root ? identityOf(root.attributes, root.resource) : undefined;
       traces.push({
         traceId: draft.traceId,
         format: "otlp_json",
         entries: spans.map((span) => span.entry),
         blobs: draft.blobs.sorted(),
-        ...(identity ? { identity } : {}),
         origin: draft.evaluation
           ? "evaluation"
           : draft.simulation
@@ -735,6 +589,15 @@ export class OtlpTraceCollector {
     }
     return { traces, refused };
   }
+}
+
+/** A span's OpenTelemetry trace id: the recorded one, or one derived from an id that is not. */
+function otlpTraceId(value: unknown): { traceId: string; remapped: boolean } | undefined {
+  if (typeof value !== "string" || !value) return undefined;
+  const traceId = normalizeId(value, 32);
+  return traceId
+    ? { traceId, remapped: false }
+    : { traceId: digestHex(`otlp.trace:${value}`, 32), remapped: true };
 }
 
 /** An OTLP attribute list as recorded, or undefined when it is malformed. */
@@ -817,7 +680,8 @@ export function unixNano(value: JsonValue | undefined): string {
   return (BigInt(seconds) * 1_000_000n + BigInt((match[2] ?? "").padEnd(9, "0"))).toString();
 }
 
-const canonicalJson = (value: JsonValue): string => {
+/** JSON text with object keys sorted: equal for equal values whatever their key order. */
+export const canonicalJson = (value: JsonValue): string => {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object")
     return `{${Object.keys(value)
@@ -965,7 +829,6 @@ function convertLangfuseTrace(draft: LangfuseTraceDraft, traceId: string): Conve
     imported.add(spanId);
     spanIds.set(originalId, spanId);
   }
-  let identity: TraceIdentity | undefined;
   // The origin markers the OTLP reader applies, read from the converted attributes with the same
   // precedence: an evaluation's or a simulated world's records are never production history,
   // whatever environment the export was taken from.
@@ -1067,10 +930,6 @@ function convertLangfuseTrace(draft: LangfuseTraceDraft, traceId: string): Conve
       attributes: attributes.finish(),
       status: { code: observation.level === "ERROR" ? 2 : 0, ...(message ? { message } : {}) },
     };
-    // The trace's owner as the OTLP reader takes it from a root: the user (`langfuse.user.id`
-    // among the keys), an explicit entity in the root's metadata or resource attributes, and the
-    // session.
-    if (!parent) identity = identityOf(attributeMap(span.attributes), attributeMap(resource));
     return {
       resource: { attributes: resource },
       scopeSpans: [
@@ -1091,7 +950,6 @@ function convertLangfuseTrace(draft: LangfuseTraceDraft, traceId: string): Conve
     format: "langfuse_observations",
     entries,
     blobs: blobs.sorted(),
-    ...(identity ? { identity } : {}),
     origin: evaluation
       ? "evaluation"
       : simulation
@@ -1446,6 +1304,14 @@ function atifUserId(value: unknown): string | undefined {
   return typeof value === "string" && /^[^\s@]{1,200}$/.test(value) ? value : undefined;
 }
 
+/** An ATIF document as read: its exact text, the parsed value and whether the text held an
+ * integer JavaScript cannot represent exactly. */
+export interface AtifSource {
+  text: string;
+  document: unknown;
+  unsafeIntegers: boolean;
+}
+
 /**
  * A text ATIF v1.7 or v1.8 export as one trace: an agent span for the run, a model span per
  * agent step with the conversation so far, a tool span per call under it, and an embedded
@@ -1454,10 +1320,7 @@ function atifUserId(value: unknown): string | undefined {
  * document stays on the root; each model and tool span keeps its own record. ATIF supplies step
  * instants, not call durations: model and tool spans are zero-duration point spans.
  */
-export function convertAtifExport(
-  source: Extract<DetectedSource, { format: "atif" }>,
-  rawBytes: number,
-): ConvertedTrace {
+export function convertAtifExport(source: AtifSource, rawBytes: number): ConvertedTrace {
   if (rawBytes > MAX_ATIF_FILE_BYTES)
     throw new ConversionError("ATIF file exceeds the import size bound");
   if (source.unsafeIntegers)
@@ -1799,15 +1662,11 @@ export function convertAtifExport(
       attributes: [{ key: "user.id", value: { stringValue: userId } }],
       status: { code: 0 },
     });
-  const session = identifier(document.session_id, MAX_SESSION);
   return {
     traceId,
     format: "atif",
     entries,
     blobs: blobs.sorted(),
-    ...(userId || session
-      ? { identity: { ...(userId ? { user: userId } : {}), ...(session ? { session } : {}) } }
-      : {}),
     origin: "unknown",
     sourceDigests: new Set(),
     remappedTraceId: false,

@@ -582,7 +582,8 @@ mapping, media handling, limits and exit codes.
 `prepare` converts the bundle on your machine and sends nothing; a Hue MCP connection authorizes
 the delivery with `prepare_trace_import`; `upload` delivers it with that authorization. Sources
 are files, directories or ZIP archives of OTLP/JSON trace exports, complete Langfuse observation
-exports and text ATIF v1.7 and v1.8 exports, recognized by content:
+exports, text ATIF v1.7 and v1.8 exports and Braintrust span rows, as JSON documents, arrays or
+JSON Lines, gzip or zstd compressed or not, recognized by content:
 
 ```sh
 npx -y @hue-run/sdk@latest traces import prepare ./exports --out ./exports.hue-import --json
@@ -592,9 +593,11 @@ npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authoriza
 ```
 
 - `prepare` writes each trace as gzip OTLP/JSON batches beside a manifest and reports the
-  manifest's digest and totals, the formats recognized, the files it could not read, invalid vendor
-  ids it mapped to OpenTelemetry ids, and the traces without a history owner (a root `user.id` or an
-  explicit entity). Nothing about a file's name or place reaches a span.
+  manifest's digest and totals, the formats recognized, the files, lines and records it could not
+  read, invalid vendor ids it mapped to OpenTelemetry ids, and the traces without a history owner,
+  read from the spans as Hue reads them. `--user-key` and `--session-key` name the user and
+  conversation of an export that records them under keys of its own. Nothing about a file's name or
+  place reaches a span.
 - `upload` registers the manifest, sends each trace's large values and batches in order, two
   requests at a time, checks every span's receipt, reconciles and completes the import. Interrupted,
   run it again: it resumes from `progress.json` in the bundle. An expired authorization is renewed
