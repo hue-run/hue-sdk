@@ -572,6 +572,36 @@ describe("MLflow traces", () => {
       session: "thread-7",
     });
   });
+
+  test("--user-key and --session-key read a span's own attributes, the trace's metadata and tags", async () => {
+    const trace = JSON.parse(await fixture("mlflow-trace.json")) as Record<string, any>;
+    delete trace.info.trace_metadata["mlflow.trace.user"];
+    delete trace.info.trace_metadata["mlflow.trace.session"];
+    trace.info.tags["app.customer"] = "tag-customer";
+    trace.info.tags["app.thread"] = "tag-thread";
+    const identity = async (...flags: string[]) =>
+      (
+        await bundle(
+          (await prepareFiles({ "trace.json": JSON.stringify(trace) }, ...flags)).output_directory,
+        )
+      ).trace(MLFLOW_TRACE).identity;
+    expect(await identity("--user-key", "app.customer", "--session-key", "app.thread")).toEqual({
+      user: "tag-customer",
+      session: "tag-thread",
+    });
+    // The trace's metadata comes before its tags, and a span's own attribute before both.
+    trace.info.trace_metadata["app.customer"] = "metadata-customer";
+    expect(await identity("--user-key", "app.customer")).toEqual({ user: "metadata-customer" });
+    trace.data.spans[0].attributes["app.customer"] = JSON.stringify("span-customer");
+    expect(await identity("--user-key", "app.customer")).toEqual({ user: "span-customer" });
+    // A JSONPath or JSON Pointer reads the trace's info.
+    expect(await identity("--user-key", "$.info.tags['app.customer']")).toEqual({
+      user: "tag-customer",
+    });
+    expect(await identity("--user-key", "/info/trace_metadata/app.customer")).toEqual({
+      user: "metadata-customer",
+    });
+  });
 });
 
 describe("MLflow span links", () => {

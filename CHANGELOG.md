@@ -8,6 +8,43 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Fixed
+
+- `hue traces import prepare` reads an OpenAI Responses request logged without its response, such
+  as `{"model": "gpt-4.1-mini", "input": "Hello"}`, and one whose `input` holds only untyped
+  `{role, content}` messages; both were skipped as no recognized format. A request logged without
+  its response becomes a trace of the conversation it sent, with no reply and no model call.
+- **Wire** A dotted `--user-key` or `--session-key` finds a key an MLflow trace records in a span's
+  own attributes or in the trace's tags, not only in its metadata: a span's attributes first, then
+  the trace's metadata, then its tags.
+- A zstd file with a frame that fails its checksum is not read, as a gzip file with a member that
+  fails its checksum is not; the frames before it were read and the damage only noted. A zstd file
+  that breaks off is still read up to the break. A zstd message of a length-prefixed protobuf file
+  that fails its checksum counts what it decompressed to against the file's 64 MiB bound.
+- A gzip file that breaks off inside a member's 8-byte trailer is not read when the CRC-32 it holds
+  does not match the member's data; it was read up to the break.
+- **Wire** Once `--user-key` decides a converted trace's user, or that it has none, no span's
+  resource keeps a user attribute Hue would read another user from, such as the `user.id` of a
+  Langfuse `metadata.resourceAttributes`. A root that records `user.account_uuid` gets the key's
+  user as `enduser.id`, since Hue passes over `user.id` beside it.
+- A span that a binary OTLP file and an OTLP/JSON or Jaeger API v3 file both hold is read once
+  when the copies differ only in encoding: key order, an int64 as a number or decimal text, an id
+  as hex or base64, or a field at its default written or left out. Its trace was refused with
+  `span … appears with different content`. The copy kept does not depend on the order the files
+  are read in.
+- **Wire** Each `execute_tool` span of a chat transcript keeps the block that holds its result,
+  else its call, as `hue.import.source_record` rather than the whole message, so a message of many
+  parallel calls is not copied into every call's span. Each result answers one call, the first
+  unanswered one under its id in the latest message that made one; calls that shared an id all
+  took its first result.
+- **Wire** The manifest declares a trace's conversation as Hue's trace list shows it (the root
+  span's, else the earliest span's that names one), and none when a tool span or a span beneath one
+  names it or the id is too long for the manifest. It could name a tool's conversation, or another
+  span's in place of a long id. `--session-key` adds its conversation to a trace whose agent spans
+  name none.
+
 ### [0.22.0] - 2026-10-21
 
 #### Added

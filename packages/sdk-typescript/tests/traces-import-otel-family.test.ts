@@ -887,6 +887,56 @@ describe("OTLP protobuf", () => {
       expect(read.bytes()).toBeGreaterThan(800_000);
     },
   );
+
+  test.skipIf(typeof zlib.zstdCompressSync !== "function")(
+    "counts what a zstd message that fails its checksum decompressed to against the file's bound",
+    async () => {
+      const checksummed = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } };
+      const damage = (frame: Buffer) => {
+        frame[frame.byteLength - 1]! ^= 0xff;
+        return frame;
+      };
+      // Each decompresses whole, about 400 KB, before its checksum fails.
+      const damaged = damage(zlib.zstdCompressSync(Buffer.alloc(400_000, 0xff), checksummed));
+      const read = binaryValues(lengthPrefixed(damaged, damaged, damaged), 1_000_000);
+      if (!read || "unsupported" in read) throw new Error("not read as binary OTLP");
+      expect([...read.values]).toEqual([]);
+      expect(read.problems).toEqual([
+        { line: 1, reason: "not an OTLP trace message: a damaged zstd message" },
+        { line: 2, reason: "not an OTLP trace message: a damaged zstd message" },
+        {
+          line: 3,
+          reason:
+            "the messages decompress to more than 1000000 bytes; this message and the 0 after it were not read",
+        },
+      ]);
+      expect(read.bytes()).toBe(800_000);
+      // A frame compressed as a stream declares no size: it is charged all that was left.
+      const streamed = damage(
+        await new Promise<Buffer>((resolve, reject) => {
+          const chunks: Buffer[] = [];
+          zlib
+            .createZstdCompress(checksummed)
+            .on("data", (chunk: Buffer) => chunks.push(chunk))
+            .on("end", () => resolve(Buffer.concat(chunks)))
+            .on("error", reject)
+            .end(Buffer.alloc(1_000, 0xff));
+        }),
+      );
+      const small = zlib.zstdCompressSync(Buffer.alloc(1_000, 0xff));
+      const rest = binaryValues(lengthPrefixed(streamed, small), 1_000_000);
+      if (!rest || "unsupported" in rest) throw new Error("not read as binary OTLP");
+      expect([...rest.values]).toEqual([]);
+      expect(rest.problems).toEqual([
+        { line: 1, reason: "not an OTLP trace message: a damaged zstd message" },
+        {
+          line: 2,
+          reason:
+            "the messages decompress to more than 1000000 bytes; this message and the 0 after it were not read",
+        },
+      ]);
+    },
+  );
 });
 
 describe("One trace across files of several formats", () => {
@@ -945,6 +995,83 @@ describe("One trace across files of several formats", () => {
     }
     // The spans the trace's one-file export holds.
     expect(spans).toEqual(await whole.spans(traceId));
+  });
+
+  test("reads once a span binary OTLP and OTLP/JSON both hold, whichever is read first", async () => {
+    const request = await fixtureJson("otlp-request.json");
+    const [first] = request.resourceSpans[0].scopeSpans[0].spans;
+    // OTLP/JSON as an exporter may write it: int64 values as numbers and fields at their defaults,
+    // which binary OTLP leaves out.
+    const numbers = (value: any): any =>
+      Array.isArray(value)
+        ? value.map(numbers)
+        : value && typeof value === "object"
+          ? Object.fromEntries(
+              Object.entries(value).map(([key, item]) => [
+                key,
+                key === "intValue" ? Number(item) : numbers(item),
+              ]),
+            )
+          : value;
+    const exported = numbers(request);
+    for (const group of exported.resourceSpans) {
+      Object.assign(group, { schemaUrl: "" });
+      Object.assign(group.resource, { droppedAttributesCount: 0 });
+      for (const scope of group.scopeSpans) {
+        Object.assign(scope.scope, { attributes: [], droppedAttributesCount: 0 });
+        for (const span of scope.spans)
+          Object.assign(span, {
+            traceState: "",
+            droppedAttributesCount: 0,
+            events: span.events ?? [],
+            droppedEventsCount: 0,
+            links: span.links ?? [],
+            droppedLinksCount: 0,
+            flags: 0,
+            status: { code: 0, message: "", ...span.status },
+          });
+      }
+    }
+    const batches: unknown[] = [];
+    for (const [json, binary, jaeger] of [
+      ["a.json", "b.binpb", "c.jsonl"],
+      ["c.json", "a.binpb", "b.jsonl"],
+    ] as const) {
+      const directory = await scratch();
+      await writeFiles(directory, {
+        [json]: JSON.stringify(exported),
+        [binary]: encodeRequest(request),
+        [jaeger]: `${JSON.stringify({ result: part(request, [first]) })}\n`,
+      });
+      const { code, report, stderr } = await prepare(directory);
+      expect(stderr).toBe("");
+      expect(code).toBe(0);
+      expect(report.traces.refused).toEqual([]);
+      expect(report.totals).toMatchObject({ traces: 1, spans: 3 });
+      const manifest = JSON.parse(
+        await readFile(join(report.output_directory as string, "manifest.json"), "utf8"),
+      ) as TraceImportManifest;
+      batches.push(manifest.traces[0]!.batches);
+    }
+    // The copy kept does not depend on the order the files were read in.
+    expect(batches[1]).toEqual(batches[0]);
+    // A value at its default is still a value: a zero is not an absent value.
+    const retries = (value: unknown) => {
+      const copy = structuredClone(request);
+      const attributes = copy.resourceSpans[0].scopeSpans[0].spans[0].attributes;
+      attributes.find(
+        (item: Attribute) => item.key === "app.request",
+      ).value.kvlistValue.values[0].value = value;
+      return copy;
+    };
+    const directory = await scratch();
+    await writeFiles(directory, {
+      "a.json": JSON.stringify(retries({})),
+      "b.binpb": encodeRequest(retries({ intValue: "0" })),
+    });
+    const { code, stderr } = await prepare(directory);
+    expect(code).not.toBe(0);
+    expect(stderr).toContain(`span ${first.spanId} appears with different content`);
   });
 
   test("refuses the trace when two formats hold one span with different content", async () => {

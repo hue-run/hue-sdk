@@ -573,14 +573,16 @@ conversation (`gen_ai.conversation.id`); a tool span, tool row or tool call neve
 | `raindrop_spans` | Raindrop's span rows: a Query API `GET /v1/traces?event_id=` answer, one row, or one per line | `trace_id`, `span_id`, `span_name`, `start_time_ns` and a Raindrop `span_type` (`INTERNAL`, `LLM_GENERATION`, `LLM_GENERATION_STREAM`, `TOOL_CALL`), alone or in `data` | the association attributes Raindrop's SDKs stamp on every span (`traceloop.association.properties.user_id` and `convo_id`, `ai.telemetry.metadata.raindrop.*`); the rows name no event, so `--user-key` names a user they lack |
 | `helicone` | Helicone requests: `npx @helicone/export` JSON or JSON Lines (`--include-body` for the bodies), or the `query-clickhouse` API answer | `request_id` and `request_created_at` with `response_status`, `request_user_id` or `request_properties`, alone or in `data` | `request_user_id`, never `helicone_user` (the Helicone account); the `Helicone-Session-Id` property |
 | `openai_chat` | An OpenAI Chat Completions request, or a line of a chat JSONL file (a fine-tuning or eval dataset) | a `messages` list holding a `{role}` message, without `object` and without anything only Anthropic sends | `safety_identifier`, else `user` |
-| `openai_responses` | An OpenAI Responses `response` object, a request (with its `output` when it was logged with it), or a bare list of input and output items | `"object": "response"` with an `output` list; a value of request fields only, with an item list as `input`; or a list of Responses items | `safety_identifier`, else `user`; `conversation` |
+| `openai_responses` | An OpenAI Responses `response` object, a request (with its `output` when it was logged with it), or a bare list of input and output items | `"object": "response"` with an `output` list; a value of request fields only, with text or a list of items and messages as `input`; or a list of Responses items | `safety_identifier`, else `user`; `conversation` |
 | `anthropic_messages` | An Anthropic Messages request or response | a response (`"type": "message"`, `"role": "assistant"`, `content`, `model`), or a `messages` request carrying something only Anthropic sends (`system`, `anthropic_version`, `stop_sequences`, an `input_schema` tool, a `tool_use` or other Anthropic content block) and nothing only OpenAI sends | `metadata.user_id` |
 
 **How each kind of format is converted.** OTLP/JSON, binary OTLP and Jaeger API v3 spans are kept
 exactly as recorded, and the spans of one trace split between files of these formats are read as
-one trace. A trace or span id that is not an OpenTelemetry id (an exporter's UUID, for example) is
-mapped to one derived from it by SHA-256, with the original kept as `hue.import.original_trace_id`
-or `hue.import.original_span_id`.
+one trace. A span that two files hold is read once when the copies differ only in encoding: key
+order, an int64 as a number or decimal text, an id as hex or base64, or a field at its default
+written or left out. A trace or span id that is not an OpenTelemetry id (an exporter's UUID, for
+example) is mapped to one derived from it by SHA-256, with the original kept as
+`hue.import.original_trace_id` or `hue.import.original_span_id`.
 
 - Jaeger UI JSON, Zipkin v2 and Phoenix spans are written as the OTLP spans they were, as the
   OpenTelemetry Collector converts Jaeger and Zipkin spans. Attributes keep their own names
@@ -681,29 +683,36 @@ anything beneath one, and every span that names one must agree. An explicit
 `user.id`, `enduser.id` and the other attributes and metadata fields Hue reads (OpenTelemetry,
 Vercel AI SDK, OpenLLMetry, Langfuse, LangSmith, Braintrust, Mastra and OpenInference metadata),
 except that `user.id` beside `user.account_uuid` names a Claude Code installation and is passed
-over.
+over. The conversation the manifest declares is the one Hue's trace list shows: that of the
+trace's root span (the earliest span with no parent; without one, the only span whose parent is
+outside the trace, when that span runs an agent or a workflow), else that of the earliest span that
+names one, spans ordered by their start in milliseconds, then by span id. The manifest declares
+none when that span is a tool span or beneath one, or when the id is not one the manifest holds
+(more than 2,048 characters, a NUL or an unpaired surrogate).
 
 **`--user-key` and `--session-key`.** For an export whose user sits under a key of its own,
 `--user-key <key>` names it, and `--session-key <key>` names the conversation the same way. The key
 is one of:
 
 - a dotted key such as `app.customer_id`, looked up as an attribute of each span or its resource,
-  then in the record's metadata (the exact key, then as a dotted path), then in the record itself;
+  then in the record's metadata (the exact key, then as a dotted path), then in the record itself
+  (for MLflow: a span's own attributes, then the trace's metadata, then its tags);
 - a JSONPath of members and indexes into the source record: `$.metadata.customer.id`,
   `$.metadata["customer.id"]` or `$.tags[0]`;
 - a JSON Pointer into the source record: `/metadata/customer/id`.
 
 The key is read on the agent's spans as the owner is: the roots' value when they name one, else the
 other spans', never a tool span's, and spans that disagree name nobody. For a row format (the
-`langfuse` format among them) the key's value is written as the root's `user.id` (or
-`gen_ai.conversation.id`) in place of the user the record names, and no span keeps an attribute it
-recorded that Hue would read another user (or conversation) from, so the trace names the key's
-value, or nobody when its spans disagree. A trace kept as recorded or converted span for span (OTLP,
-Jaeger, Zipkin, Phoenix, the documented Langfuse list, ATIF) that names no owner gains one child
-span of the agent's earliest local root (never a tool span), `hue.import.user` with the single
-attribute `user.id` (or `hue.import.session` with `gen_ai.conversation.id`), so its recorded spans
-keep their bytes and a trace also sent live does not conflict. An owner the spans already name is
-kept, and a trace with no root but tool spans gains nothing.
+`langfuse` format among them) the key's value is written as the root's `user.id` (`enduser.id` on a
+root that records `user.account_uuid`) or `gen_ai.conversation.id` in place of the one the record
+names, and no span keeps an attribute it recorded, nor its resource a user attribute, that Hue
+would read another user (or conversation) from, so the trace names the key's value, or nobody when
+its spans disagree. A trace kept as recorded or converted span for span (OTLP, Jaeger, Zipkin,
+Phoenix, the documented Langfuse list, ATIF) that names no owner gains one child span of the
+agent's earliest local root (never a tool span), `hue.import.user` with the single attribute
+`user.id` (or `hue.import.session` with `gen_ai.conversation.id`), so its recorded spans keep their
+bytes and a trace also sent live does not conflict. An owner or a conversation the agent's spans
+already name is kept, and a trace with no root but tool spans gains nothing.
 
 **Limits and refusals.** A malformed record refuses its trace, never the file: an OTLP trace with a
 malformed span (an attribute value of no OTLP shape, a protobuf span that does not decode) or whose

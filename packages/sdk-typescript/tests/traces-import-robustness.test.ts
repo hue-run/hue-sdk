@@ -385,6 +385,24 @@ describe("damaged containers", () => {
     });
   });
 
+  test("checks the CRC-32 of a gzip member whose file breaks off inside its size", () => {
+    const first = zlib.gzipSync(Buffer.from(lines(1, 3)));
+    const second = zlib.gzipSync(Buffer.from(lines(4, 7)));
+    const wrong = Buffer.from(second);
+    wrong[wrong.byteLength - 8]! ^= 0xff;
+    // The file holds the last member's whole CRC-32 and none or part of its size.
+    for (const cut of [4, 2])
+      for (const members of [[wrong], [first, wrong]])
+        expect(decodeContainer(Buffer.concat(members).subarray(0, -cut), 1 << 20)).toEqual({
+          unsupported: "a damaged gzip file",
+        });
+    // A matching CRC-32 is read up to the break.
+    expect(decodeContainer(Buffer.concat([first, second]).subarray(0, -4), 1 << 20)).toEqual({
+      bytes: Buffer.from(lines(1, 3) + lines(4, 7)),
+      note: "the gzip file breaks off; what follows the last complete line was not read",
+    });
+  });
+
   test.skipIf(typeof zlib.zstdCompressSync !== "function")(
     "reads every frame of a zstd file, passes skippable frames and names a break or trailing bytes",
     async () => {
@@ -420,6 +438,25 @@ describe("damaged containers", () => {
       const { code, report } = await prepare(root);
       expect(code).toBe(0);
       expect(report.totals.traces).toBe(10);
+    },
+  );
+
+  test.skipIf(typeof zlib.zstdCompressSync !== "function")(
+    "reads no frame of a zstd file when a later frame fails its checksum",
+    () => {
+      const checksummed = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } };
+      const first = zlib.zstdCompressSync(Buffer.from(lines(1, 3)), checksummed);
+      const second = zlib.zstdCompressSync(Buffer.from(lines(4, 7)), checksummed);
+      const corrupt = Buffer.from(second);
+      corrupt[corrupt.byteLength - 1]! ^= 0xff;
+      expect(decodeContainer(Buffer.concat([first, corrupt]), 1 << 20)).toEqual({
+        unsupported: "a damaged zstd file",
+      });
+      // A frame that breaks off is still read up to the break.
+      expect(decodeContainer(Buffer.concat([first, second.subarray(0, -2)]), 1 << 20)).toEqual({
+        bytes: Buffer.from(lines(1, 3)),
+        note: "the zstd file breaks off; what follows the last complete frame was not read",
+      });
     },
   );
 });

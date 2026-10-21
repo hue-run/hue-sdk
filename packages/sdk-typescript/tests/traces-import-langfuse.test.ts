@@ -395,6 +395,30 @@ describe("Langfuse exports", () => {
     expect(str(root, "user.id")).toBe("customer-9");
   });
 
+  test("--user-key leaves no resource naming another user than the key decides", async () => {
+    const page = copy(fixture.observationsPage);
+    const traceId = traceIdOf(page.data[0].traceId);
+    // Two root observations, each with a user among the resource attributes it recorded.
+    const prepared = (customers: string[]) => {
+      for (const [index, observation] of page.data.entries())
+        observation.metadata = {
+          customer: customers[index],
+          resourceAttributes: { "user.id": "old-user", "service.name": "support" },
+        };
+      return bundleOf({ "observations.json": JSON.stringify(page) }, "--user-key", "customer");
+    };
+    const agreed = await prepared(["a", "a"]);
+    expect(agreed.identity(traceId)).toEqual({ user: "a" });
+    // Roots that name different customers name nobody, not the user their resource recorded.
+    const disagreed = await prepared(["a", "b"]);
+    expect(disagreed.identity(traceId)).toBeUndefined();
+    for (const { spans } of [agreed, disagreed])
+      for (const span of await spans(traceId)) {
+        expect(span.resource["user.id"]).toBeUndefined();
+        expect(span.resource["service.name"]).toBe("support");
+      }
+  });
+
   test("--user-key replaces the user a Langfuse trace names, on its root", async () => {
     const trace = copy(fixture.traceWithObservations);
     trace.userId = "own-user";

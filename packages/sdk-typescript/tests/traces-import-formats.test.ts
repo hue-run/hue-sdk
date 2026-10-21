@@ -441,6 +441,93 @@ describe("identity", () => {
     expect(report.traces.without_identity).toBe(3);
   });
 
+  test("declares the conversation Hue's trace list shows, never one a tool names", async () => {
+    const root = await scratch();
+    const ids = ["11", "12", "13", "14", "15", "16", "17"].map(traceIds);
+    const [a, b, c] = ["a1", "b2", "c3"].map(spanIds);
+    const outside = spanIds("ff");
+    const at = (span: ReturnType<typeof otlpSpan>, millis: number, nanos = 0) => ({
+      ...span,
+      startTimeUnixNano: String(
+        1_760_000_000_000_000_000n + BigInt(millis) * 1_000_000n + BigInt(nanos),
+      ),
+    });
+    const tool = { "gen_ai.operation.name": "execute_tool" };
+    const agentOperation = { "gen_ai.operation.name": "invoke_agent" };
+    const files = {
+      // A tool span, or a span beneath one, names a conversation the agent's spans do not.
+      "tool.json": otlp([
+        at(otlpSpan(ids[0]!, a, undefined, "agent", { "app.thread": "keyed" }), 0),
+        at(otlpSpan(ids[0]!, b, a, "execute_tool lookup", { ...tool, "session.id": "tool" }), 1),
+      ]),
+      "beneath.json": otlp([
+        at(otlpSpan(ids[1]!, a, undefined, "agent"), 0),
+        at(otlpSpan(ids[1]!, b, a, "execute_tool lookup", tool), 1),
+        at(otlpSpan(ids[1]!, c, b, "GET /orders", { "session.id": "tool" }), 2),
+      ]),
+      // The span with no parent is the execution root, though a span whose parent is outside
+      // the trace started earlier.
+      "parentless.json": otlp([
+        at(otlpSpan(ids[2]!, a, undefined, "agent", { "session.id": "root" }), 2),
+        at(otlpSpan(ids[2]!, b, outside, "agent", { "session.id": "orphan" }), 1),
+      ]),
+      // Two roots in one millisecond: the lower span id is the earlier.
+      "tie.json": otlp([
+        at(otlpSpan(ids[3]!, a, undefined, "a", { "session.id": "first" }), 0, 900),
+        at(otlpSpan(ids[3]!, b, undefined, "b", { "session.id": "second" }), 0, 100),
+      ]),
+      // A lone span whose parent is outside the trace is the root when it runs an agent;
+      // otherwise the earliest span that names a conversation names it.
+      "agent.json": otlp([
+        at(otlpSpan(ids[4]!, a, outside, "agent", { ...agentOperation, "session.id": "run" }), 2),
+        at(otlpSpan(ids[4]!, b, a, "step", { "session.id": "step" }), 1),
+      ]),
+      "request.json": otlp([
+        at(otlpSpan(ids[5]!, a, outside, "POST /chat", { "session.id": "request" }), 2),
+        at(otlpSpan(ids[5]!, b, a, "step", { "session.id": "step" }), 1),
+      ]),
+      // Hue keeps an id longer than the manifest holds: the manifest names none, not another.
+      "long.json": otlp([
+        at(
+          otlpSpan(ids[6]!, a, undefined, "agent", {
+            "session.id": "s".repeat(3_000),
+            "app.thread": "keyed",
+          }),
+          0,
+        ),
+        at(otlpSpan(ids[6]!, b, a, "step", { "session.id": "step" }), 1),
+      ]),
+    };
+    await writeFiles(
+      root,
+      Object.fromEntries(
+        Object.entries(files).map(([name, value]) => [name, JSON.stringify(value)]),
+      ),
+    );
+    const declared = async (...flags: string[]) => {
+      const { code, report } = await prepare(root, ...flags);
+      expect(code).toBe(0);
+      const { manifest } = await bundle(report.output_directory);
+      return ids.map((traceId) => manifest.traces.find((t) => t.trace_id === traceId)!);
+    };
+    expect((await declared()).map((trace) => trace.identity?.session)).toEqual([
+      undefined,
+      undefined,
+      "root",
+      "first",
+      "run",
+      "step",
+      undefined,
+    ]);
+    // --session-key names the conversation of a trace whose agent spans name none, and keeps
+    // the one they name, however long.
+    const keyed = await declared("--session-key", "app.thread");
+    expect(keyed[0]!.identity).toEqual({ session: "keyed" });
+    expect(keyed[0]!.span_count).toBe(3);
+    expect(keyed[6]!.identity).toBeUndefined();
+    expect(keyed[6]!.span_count).toBe(2);
+  });
+
   test("--user-key adds a hue.import.user span to an OTLP trace and leaves its spans unchanged", async () => {
     const root = await scratch();
     const traceId = traceIds("5e");

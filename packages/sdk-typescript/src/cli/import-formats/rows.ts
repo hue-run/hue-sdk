@@ -421,13 +421,7 @@ export class RowTraceCollector implements TraceCollector {
       else if (row.origin === "simulation" && origin !== "evaluation") origin = "simulation";
       else if (row.environment === "production" && origin === "unknown") origin = "production";
       const attributes = new AttributeList(blobs);
-      const own: [string, JsonValue][] = [];
-      for (const [name, value] of Object.entries(row.attributes ?? {})) {
-        let kept: JsonValue | undefined = value;
-        for (const kind of keyedKinds)
-          if (kept !== undefined) kept = withoutIdentity(kind, name, kept);
-        if (kept !== undefined) own.push([name, kept]);
-      }
+      const own = withoutKeyed(row.attributes, keyedKinds);
       // An attribute the source recorded under its own name is kept as recorded; the emitter
       // adds none of the same name beside it.
       const recorded = new Set(own.map(([name]) => name));
@@ -442,7 +436,10 @@ export class RowTraceCollector implements TraceCollector {
         if (row.provider) add("gen_ai.provider.name", row.provider);
         if (row.agentName) add("gen_ai.agent.name", row.agentName);
         if (root && row.kind !== "tool") {
-          if (user.value !== undefined) add("user.id", user.value);
+          // Hue passes over `user.id` beside `user.account_uuid` (Claude Code's installation id),
+          // so a key's user beside one is written where Hue reads it.
+          const installation = user.keyed && own.some(([name]) => name === "user.account_uuid");
+          if (user.value !== undefined) add(installation ? "enduser.id" : "user.id", user.value);
           if (session.value !== undefined) add("gen_ai.conversation.id", session.value);
         }
       }
@@ -547,10 +544,10 @@ export class RowTraceCollector implements TraceCollector {
         ...(spanEvents.length ? { events: spanEvents } : {}),
         ...(links.length ? { links } : {}),
       };
-      const resource: OtlpAttribute[] = Object.entries(row.resource ?? {}).map(([name, value]) => ({
-        key: name,
-        value: anyValue(value),
-      }));
+      // Hue reads a span's user from its resource too, never its conversation.
+      const resource: OtlpAttribute[] = withoutKeyed(row.resource, user.keyed ? ["user"] : []).map(
+        ([name, value]) => ({ key: name, value: anyValue(value) }),
+      );
       if (row.environment && !row.resource?.["deployment.environment.name"])
         resource.push({
           key: "deployment.environment.name",
@@ -576,6 +573,21 @@ export class RowTraceCollector implements TraceCollector {
       ...(inferredTiming.length ? { inferredTiming } : {}),
     };
   }
+}
+
+/** A row's recorded attributes (or resource) without what Hue would read an identifier of the
+ * `kinds` from: what a key decided, a user or none, is the trace's. */
+function withoutKeyed(
+  values: Record<string, JsonValue> | undefined,
+  kinds: readonly IdentityKind[],
+): [string, JsonValue][] {
+  const kept: [string, JsonValue][] = [];
+  for (const [name, value] of Object.entries(values ?? {})) {
+    let left: JsonValue | undefined = value;
+    for (const kind of kinds) if (left !== undefined) left = withoutIdentity(kind, name, left);
+    if (left !== undefined) kept.push([name, left]);
+  }
+  return kept;
 }
 
 /** A row's content under the GenAI conventions: a tool's arguments and result, or chat messages,

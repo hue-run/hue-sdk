@@ -29,6 +29,9 @@ const isZstd = (bytes: Uint8Array, at = 0) => startsWith(bytes, ZSTD, at) || ski
 const tooLarge = (error: unknown) =>
   error instanceof RangeError ||
   (error as NodeJS.ErrnoException | undefined)?.code === "ERR_BUFFER_TOO_LARGE";
+/** A zstd frame whose content decompressed whole but does not match its checksum. */
+export const checksumFailed = (error: unknown) =>
+  (error as NodeJS.ErrnoException | undefined)?.code === "ZSTD_error_checksum_wrong";
 
 /** The file's content with its compression undone, and what of it could not be read; or why
  * none of it can be. */
@@ -93,19 +96,22 @@ function gunzip(bytes: Uint8Array, maxBytes: number): Decoded {
     }
     parts.push(inflated.buffer);
     size += inflated.buffer.byteLength;
-    // A complete member ends with its 8-byte trailer (CRC-32 and size).
+    // A complete member ends with its 8-byte trailer (CRC-32 and size). A member whose data does
+    // not match its trailer is damaged, and none of the file is trusted: the CRC-32 is checked
+    // whenever the file holds it, also when the file breaks off before the size.
     const end = start + inflated.engine.bytesWritten + 8;
+    const trailer = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (
+      (end - 4 <= bytes.byteLength &&
+        trailer.getUint32(end - 8, true) !== zlib.crc32(inflated.buffer)) ||
+      (end <= bytes.byteLength &&
+        trailer.getUint32(end - 4, true) !== inflated.buffer.byteLength >>> 0)
+    )
+      return { unsupported: "a damaged gzip file" };
     if (end > bytes.byteLength) {
       note = "the gzip file breaks off; what follows the last complete line was not read";
       break;
     }
-    // A member whose data does not match its trailer is damaged, and none of the file is trusted.
-    const trailer = new DataView(bytes.buffer, bytes.byteOffset + end - 8, 8);
-    if (
-      trailer.getUint32(0, true) !== zlib.crc32(inflated.buffer) ||
-      trailer.getUint32(4, true) !== inflated.buffer.byteLength >>> 0
-    )
-      return { unsupported: "a damaged gzip file" };
     pos = end;
   }
   // A file that reads whole, every member matching its trailer, yet failed to decompress is
@@ -170,9 +176,25 @@ function frameEnd(bytes: Uint8Array, pos: number): number | "truncated" | "other
   return at > bytes.byteLength ? "truncated" : at;
 }
 
+/** The size the header of the zstd frame starting `bytes` declares its content to be, or undefined
+ * when it declares none. */
+export function zstdContentSize(bytes: Uint8Array): number | undefined {
+  if (!startsWith(bytes, ZSTD) || bytes.byteLength < 5) return undefined;
+  const descriptor = bytes[4]!;
+  const singleSegment = (descriptor >> 5) & 1;
+  const size = [singleSegment, 2, 4, 8][descriptor >> 6]!;
+  const at = 5 + (singleSegment ? 0 : 1) + [0, 1, 2, 4][descriptor & 3]!;
+  if (!size || at + size > bytes.byteLength) return undefined;
+  let value = 0;
+  for (let index = size - 1; index >= 0; index--) value = value * 256 + bytes[at + index]!;
+  // A two-byte size counts from 256.
+  return size === 2 ? value + 256 : value;
+}
+
 /** zstd, every frame of it: Node.js decompresses only a file's first frame on its own, so each
  * frame is found and decompressed in turn. Skippable frames are passed over; a frame that breaks
- * off, and bytes after the last frame, are named. */
+ * off, and bytes after the last frame, are named; a frame that fails its checksum leaves the file
+ * unread, as a gzip member does. */
 function unzstd(bytes: Uint8Array, maxBytes: number): Decoded {
   // zstd is in node:zlib from Node.js 22.15; earlier releases of the supported range lack it.
   if (typeof zlib.zstdDecompressSync !== "function")
@@ -199,6 +221,7 @@ function unzstd(bytes: Uint8Array, maxBytes: number): Decoded {
         });
       } catch (error) {
         if (tooLarge(error)) return oversized("zstd", maxBytes);
+        if (checksumFailed(error)) return { unsupported: "a damaged zstd file" };
         stop = "damaged";
         break;
       }

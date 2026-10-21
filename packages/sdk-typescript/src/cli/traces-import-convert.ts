@@ -436,6 +436,60 @@ function decimalOf(value: unknown): string | undefined {
   return undefined;
 }
 
+/** An `AnyValue`'s members: the one an attribute sets is its value, even at its default. */
+const VALUE_MEMBERS = new Set([
+  "stringValue",
+  "boolValue",
+  "intValue",
+  "doubleValue",
+  "arrayValue",
+  "kvlistValue",
+  "bytesValue",
+]);
+/** The int64 fields, which OTLP/JSON may write as numbers or as decimal text. */
+const INT64_FIELDS = new Set(["intValue", "timeUnixNano", "startTimeUnixNano", "endTimeUnixNano"]);
+const ID_FIELDS: Record<string, 32 | 16> = { traceId: 32, spanId: 16, parentSpanId: 16 };
+
+/**
+ * An OTLP entry's content as JSON text that every encoding of it shares, so a span sent both as
+ * binary OTLP and as OTLP/JSON reads as one: keys sorted, an int64 as decimal text (OTLP/JSON may
+ * write a number), an id as lowercase hex (a protobuf JSON encoder writes base64), and a field at
+ * its protobuf default (0, "", an empty list or object), which binary OTLP never carries, left
+ * out. Undefined for a value at its default.
+ */
+function otlpContent(value: unknown, field?: string): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  let text: string | undefined;
+  if (Array.isArray(value)) {
+    if (value.length)
+      text = `[${value.map((item) => otlpContent(item) ?? defaultContent(item)).join(",")}]`;
+  } else if (isObject(value)) {
+    const members = Object.keys(value)
+      .sort()
+      .flatMap((key) => {
+        const member = otlpContent(value[key], key);
+        return member === undefined ? [] : [`${JSON.stringify(key)}:${member}`];
+      });
+    if (members.length) text = `{${members.join(",")}}`;
+  } else if (field && INT64_FIELDS.has(field) && /^-?\d+$/.test(String(value))) {
+    const decimal = BigInt(String(value)).toString();
+    if (decimal !== "0") text = JSON.stringify(decimal);
+  } else if (field && Object.hasOwn(ID_FIELDS, field)) {
+    if (value !== "") text = JSON.stringify(normalizeId(value, ID_FIELDS[field]!) ?? value);
+  } else if (value !== "" && value !== 0 && value !== false) text = JSON.stringify(value);
+  return text ?? (field && VALUE_MEMBERS.has(field) ? defaultContent(value, field) : undefined);
+}
+
+/** A value at its default as {@link otlpContent} writes one it keeps. */
+const defaultContent = (value: unknown, field?: string): string =>
+  isObject(value)
+    ? "{}"
+    : Array.isArray(value)
+      ? "[]"
+      : field === "intValue"
+        ? '"0"'
+        : JSON.stringify(value);
+
 const stringOf = (value: OtlpValue | undefined) =>
   value && typeof value.stringValue === "string" ? value.stringValue : undefined;
 
@@ -450,7 +504,8 @@ interface OtlpSpanDraft {
   parentSpanId?: string;
   start: bigint;
   entry: ImportEntry;
-  /** The SHA-256 of the entry's JSON, which a copy of the span must match. */
+  /** The SHA-256 of the entry's content ({@link otlpContent}), which a copy of the span must
+   * match. */
   digest: string;
 }
 
@@ -594,12 +649,15 @@ export class OtlpTraceCollector {
       ...resourceGroup,
       scopeSpans: [{ ...scopeGroup, spans: [span] }],
     };
-    const digest = sha256Hex(JSON.stringify(entry));
+    const digest = sha256Hex(otlpContent(entry) ?? "");
     const held = trace.spans.get(spanId);
     if (held) {
-      // The same span sent twice is one span; another payload under its id is a conflict.
+      // The same span sent twice is one span, whatever encoding carried each copy; another
+      // payload under its id is a conflict.
       if (held.digest !== digest)
         trace.conflict ??= `span ${spanId} appears with different content`;
+      // Of two encodings of one span, the copy kept does not depend on which was read first.
+      else if (JSON.stringify(entry) < JSON.stringify(held.entry)) held.entry = entry;
       trace.sourceDigests.add(sourceDigest);
       return;
     }

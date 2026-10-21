@@ -9,7 +9,7 @@ import {
   type OtlpValue,
 } from "../traces-import-convert.js";
 import type { ImportAdapter } from "./adapter.js";
-import type { ParsedValue } from "./containers.js";
+import { checksumFailed, zstdContentSize, type ParsedValue } from "./containers.js";
 
 /**
  * Binary OTLP trace files: one protobuf `ExportTraceServiceRequest` (an OTLP/HTTP request body,
@@ -407,6 +407,10 @@ function frameBytes(frame: Uint8Array, budget: number): Uint8Array {
         (error as NodeJS.ErrnoException)?.code === "ERR_BUFFER_TOO_LARGE"
       )
         throw new Oversized();
+      // A checksum is checked once the content has decompressed whole, within the budget, to the
+      // size the header declares. shortcut: a frame that declares no size is charged the whole
+      // budget left, so the file reads no further; measure its output if exports send such frames.
+      if (checksumFailed(error)) throw new ChecksumFailure(zstdContentSize(frame) ?? budget);
       throw new ConversionError("a damaged zstd message");
     }
   }
@@ -439,6 +443,13 @@ function messageValue(bytes: Uint8Array, zstd: boolean, line: number): ParsedVal
 
 /** The file's messages together decompress past the bound of one file. */
 class Oversized extends Error {}
+
+/** A zstd message that decompressed, to `decompressed` bytes, and failed its checksum. */
+class ChecksumFailure extends ConversionError {
+  constructor(readonly decompressed: number) {
+    super("a damaged zstd message");
+  }
+}
 
 /** The values of a binary OTLP file, read one at a time; the messages that could not be read are
  * added to `problems` as they are met, and `bytes` grows to the file's decompressed size. */
@@ -511,6 +522,7 @@ export function binaryValues(
           return;
         }
         if (!(error instanceof ConversionError)) throw error;
+        if (error instanceof ChecksumFailure) size = error.decompressed;
         total += size;
         problems.push({ line: index + 1, reason: `not an OTLP trace message: ${error.message}` });
       }

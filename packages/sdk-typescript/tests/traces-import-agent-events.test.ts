@@ -479,6 +479,22 @@ describe("Raindrop span rows", () => {
     const unnamed = await bundle(two);
     expect(unnamed.trace(traceId).identity).toEqual({ session: "convo-2c7e91" });
     expect(userIds(await unnamed.spans(traceId))).toEqual([]);
+
+    // Hue passes over `user.id` beside Claude Code's `user.account_uuid`: the key's user is
+    // written where Hue reads it.
+    const installation = rows(["new-user"]);
+    installation[0]!.attributes["user.account_uuid"] = "account-1";
+    const claude = await bundle(
+      await prepare(
+        await scratch({ "traces.json": JSON.stringify({ data: installation }) }),
+        "--user-key",
+        "app.customer_id",
+      ),
+    );
+    expect(claude.trace(traceId).identity).toEqual({ user: "new-user", session: "convo-2c7e91" });
+    const reply = byName(await claude.spans(traceId), "support.reply");
+    expect(str(reply, "enduser.id")).toBe("new-user");
+    expect(str(reply, "user.account_uuid")).toBe("account-1");
   });
 });
 
@@ -741,6 +757,43 @@ describe("chat transcripts", () => {
     expect(attr(answer!, "gen_ai.response.model")).toBeUndefined();
   });
 
+  test("reads a Responses request logged alone, and one whose input is untyped messages", async () => {
+    const alone = { model: "gpt-4.1-mini", input: "Hello" };
+    const untyped = {
+      model: "gpt-4.1-mini",
+      input: [{ role: "user", content: "Where is order 12?" }],
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "It has shipped." }],
+        },
+      ],
+    };
+    expect(claims(alone)).toEqual(["openai_responses"]);
+    expect(claims(untyped)).toEqual(["openai_responses"]);
+    const report = await prepare(
+      await scratch({ "requests.jsonl": `${JSON.stringify(alone)}\n${JSON.stringify(untyped)}` }),
+    );
+    expect(report.formats).toEqual({ openai_responses: 2 });
+    const { spans } = await bundle(report);
+    // The request without its response: what it sent, and no model call.
+    const sent = await spans(derived("openai_responses", sha256(canonical(alone))));
+    expect(sent.map((span) => span.name)).toEqual(["invoke_agent"]);
+    expect(json(sent[0]!, "gen_ai.input.messages")).toEqual([
+      { role: "user", parts: [{ type: "text", content: "Hello" }] },
+    ]);
+    expect(attr(sent[0]!, "gen_ai.output.messages")).toBeUndefined();
+    const [, reply] = await spans(derived("openai_responses", sha256(canonical(untyped))));
+    expect(reply!.name).toBe("chat gpt-4.1-mini");
+    expect(json(reply!, "gen_ai.input.messages")).toEqual([
+      { role: "user", parts: [{ type: "text", content: "Where is order 12?" }] },
+    ]);
+    expect(json(reply!, "gen_ai.output.messages")).toEqual([
+      { role: "assistant", parts: [{ type: "text", content: "It has shipped." }] },
+    ]);
+  });
+
   test("refuses only a malformed transcript, reads one copy of a repeated one, and takes --user-key", async () => {
     const [line] = lines(await fixture("openai-chat.jsonl"));
     const anonymous = {
@@ -813,6 +866,76 @@ describe("chat transcripts", () => {
       },
     ]);
     expect(report.totals.traces).toBe(1);
+  });
+
+  test("keeps each tool call's own block and gives each result to one call", async () => {
+    const calls = 300;
+    // Parallel calls in one message, their results in the next.
+    const parallel: Record<string, any> = {
+      messages: [
+        { role: "user", content: "Look up every order." },
+        {
+          role: "assistant",
+          content: Array.from({ length: calls }, (_, call) => ({
+            type: "tool_use",
+            id: `toolu_${call}`,
+            name: "lookup_order",
+            input: { id: call },
+          })),
+        },
+        {
+          role: "user",
+          content: Array.from({ length: calls }, (_, call) => ({
+            type: "tool_result",
+            tool_use_id: `toolu_${call}`,
+            content: `order ${call} shipped`,
+          })),
+        },
+      ],
+    };
+    // Calls sharing an id: the first takes the one result, and the id used again takes the next.
+    const call = { id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } };
+    const sameId: Record<string, any> = {
+      messages: [
+        { role: "user", content: "Look it up." },
+        { role: "assistant", content: null, tool_calls: Array.from({ length: calls }, () => call) },
+        { role: "tool", tool_call_id: "call_1", content: "r".repeat(10_000) },
+        { role: "assistant", content: null, tool_calls: [call] },
+        { role: "tool", tool_call_id: "call_1", content: "again" },
+      ],
+    };
+    const report = await prepare(
+      await scratch({ "tools.jsonl": `${JSON.stringify(parallel)}\n${JSON.stringify(sameId)}` }),
+    );
+    expect(report.traces.refused).toEqual([]);
+    const { spans } = await bundle(report);
+    const toolSpans = async (format: string, transcript: unknown) =>
+      (await spans(derived(format, sha256(canonical(transcript))))).filter(
+        (span) => str(span, "gen_ai.operation.name") === "execute_tool",
+      );
+
+    const fanned = await toolSpans("anthropic_messages", parallel);
+    expect(fanned).toHaveLength(calls);
+    for (const [index, span] of fanned.entries()) {
+      expect(json(span, "hue.import.source_record")).toEqual(parallel.messages[2].content[index]);
+      expect(json(span, "gen_ai.tool.call.result")).toBe(`order ${index} shipped`);
+    }
+    const kept = fanned.reduce(
+      (sum, span) => sum + str(span, "hue.import.source_record")!.length,
+      0,
+    );
+    expect(kept).toBeLessThan(JSON.stringify(parallel).length);
+
+    const shared = await toolSpans("openai_chat", sameId);
+    expect(shared).toHaveLength(calls + 1);
+    expect(
+      shared.flatMap((span) =>
+        attr(span, "gen_ai.tool.call.result") ? [json(span, "gen_ai.tool.call.result")] : [],
+      ),
+    ).toEqual(["r".repeat(10_000), "again"]);
+    expect(json(shared[0]!, "hue.import.source_record")).toEqual(sameId.messages[2]);
+    expect(json(shared[1]!, "hue.import.source_record")).toEqual(call);
+    expect(json(shared[calls]!, "hue.import.source_record")).toEqual(sameId.messages[4]);
   });
 });
 

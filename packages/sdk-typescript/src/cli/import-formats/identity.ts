@@ -12,7 +12,7 @@ import {
 /**
  * Who a trace ran for and which conversation it belongs to, read the way Hue reads a trace it
  * receives, so the manifest's identity and the report's `without_identity` say what Hue will
- * capture. Two parts, both copied from Hue's reader and kept in its order:
+ * capture. Three parts, copied from Hue's reader and kept in its order:
  *
  * - The identity registry: the attributes and metadata fields instrumentations name a user or a
  *   conversation by, first present wins on a record.
@@ -20,6 +20,9 @@ import {
  *   when they name nobody, the agent's other spans do. A tool span and everything beneath it never
  *   name the owner. Every carrier at the deciding step must agree, and an explicit
  *   `hue.world.entity.*` declaration wins over users.
+ * - The conversation rule: the one Hue's trace list shows, the execution root's, else the
+ *   earliest span's that names one; the manifest declares it only when that span is no tool span
+ *   and sits beneath none (see {@link sessionOf}).
  *
  * `--user-key` and `--session-key` name the identity of exports whose user sits under a key of
  * their own; see {@link parseKeyPath} and {@link applyIdentityKeys}.
@@ -445,31 +448,74 @@ function carrierOf(view: SpanView): Carrier {
 const byStart = (a: SpanView, b: SpanView) =>
   a.start < b.start ? -1 : a.start > b.start ? 1 : a.spanId < b.spanId ? -1 : 1;
 
-/** The trace's session as Hue's trace list takes it: the earliest local root's, else the earliest
- * span carrying one. */
-function sessionOf(views: readonly SpanView[]): string | undefined {
+/** Spans in the order Hue's trace list reads them: by start in whole milliseconds, then by id. */
+const byMillisecond = (a: SpanView, b: SpanView) => {
+  const [x, y] = [a.start / 1_000_000n, b.start / 1_000_000n];
+  return x < y ? -1 : x > y ? 1 : a.spanId < b.spanId ? -1 : a.spanId > b.spanId ? 1 : 0;
+};
+
+/** Operations of a span Hue takes as the execution root though its parent is outside the trace:
+ * an agent's, a workflow's, and a Vercel AI SDK call wrapping its steps. */
+const AGENT_OPERATIONS = new Set([
+  "invoke_agent",
+  "invoke_workflow",
+  "ai.generateText",
+  "ai.streamText",
+  "ai.generateObject",
+  "ai.streamObject",
+]);
+
+/** The span Hue takes as the trace's execution root: the earliest with no parent; without one,
+ * the only span whose parent is outside the trace, when it runs an agent. */
+function executionRoot(views: readonly SpanView[]): SpanView | undefined {
+  const parentless = views.filter((view) => !view.parentSpanId);
+  if (parentless.length) return parentless.reduce((a, b) => (byMillisecond(b, a) < 0 ? b : a));
   const ids = new Set(views.map((view) => view.spanId));
-  const ordered = [...views].sort(byStart);
-  const root = ordered.find((view) => !view.parentSpanId || !ids.has(view.parentSpanId));
-  for (const view of root ? [root, ...ordered] : ordered) {
-    const session = readIdentity("session", (key) => view.attributes.get(key));
-    if (
-      session !== undefined &&
-      session.length <= MAX_SESSION &&
-      validIdentifier(session, Infinity)
-    )
-      return session;
+  const [orphan, ...more] = views.filter(
+    (view) => view.parentSpanId !== undefined && !ids.has(view.parentSpanId),
+  );
+  if (!orphan || more.length) return undefined;
+  let operation: string | undefined;
+  for (const key of OPERATION_KEYS) if ((operation = text(orphan.attributes, key))) break;
+  return operation && (AGENT_OPERATIONS.has(operation) || operation.toLowerCase() === "agent")
+    ? orphan
+    : undefined;
+}
+
+/** The conversation Hue's trace list shows for the trace, and the span it is read from: the
+ * execution root's, else the earliest span's that names one. */
+function shownSession(views: readonly SpanView[]): { view: SpanView; id: string } | undefined {
+  const read = (view: SpanView) => readIdentity("session", (key) => view.attributes.get(key));
+  const root = executionRoot(views);
+  const fromRoot = root && read(root);
+  if (root && fromRoot !== undefined) return { view: root, id: fromRoot };
+  let shown: { view: SpanView; id: string } | undefined;
+  for (const view of views) {
+    const id = read(view);
+    if (id !== undefined && (!shown || byMillisecond(view, shown.view) < 0)) shown = { view, id };
   }
-  return undefined;
+  return shown;
+}
+
+/** The conversation the manifest declares: the one Hue's trace list shows, unless a tool span or
+ * a span beneath one names it (a tool never names the conversation), and only while the manifest
+ * can hold the id. */
+function sessionOf(views: readonly SpanView[], underTool: ReadonlySet<string>): string | undefined {
+  const shown = shownSession(views);
+  if (!shown || underTool.has(shown.view.spanId)) return undefined;
+  return shown.id.length <= MAX_SESSION && validIdentifier(shown.id, Infinity)
+    ? shown.id
+    : undefined;
 }
 
 /** The trace's identity as Hue will capture it from these spans: the owner (an explicit entity or
  * a user) and the session. */
 export function traceIdentity(entries: readonly ImportEntry[]): TraceIdentity | undefined {
   const views = spanViews(entries);
-  const { roots, others } = agentSpans(views, (view) => isToolSpan(view.attributes));
+  const tool = (view: SpanView) => isToolSpan(view.attributes);
+  const { roots, others } = agentSpans(views, tool);
   const owner = decideOwner(roots.map(carrierOf), others.map(carrierOf));
-  const session = sessionOf(views);
+  const session = sessionOf(views, subtreeIds(views, tool));
   const identity: TraceIdentity = {
     ...(owner?.kind === "user" ? { user: owner.id } : {}),
     ...(owner?.kind === "entity" ? { entity: { namespace: owner.namespace, id: owner.id } } : {}),
@@ -606,8 +652,8 @@ function recordOf(view: SpanView): unknown {
  * When a key names one user across the agent's spans and the trace names no owner, a child span
  * `hue.import.user` with the single attribute `user.id` is added under the agent's earliest local
  * root (never a tool span), which Hue reads as one of the agent's spans; `hue.import.session` with
- * `gen_ai.conversation.id` likewise names a session the trace lacks. An owner the spans already
- * name is kept: Hue reads it before any added span.
+ * `gen_ai.conversation.id` likewise names a conversation when the agent's spans name none. An
+ * owner or a conversation the agent's spans already name is kept.
  */
 export function applyIdentityKeys(trace: ConvertedTrace, keys: IdentityKeys): void {
   if (!keys.user && !keys.session) return;
@@ -616,6 +662,9 @@ export function applyIdentityKeys(trace: ConvertedTrace, keys: IdentityKeys): vo
   const records = new Map(views.map((view) => [view, recordOf(view)]));
   const tool = (view: SpanView) => isToolSpan(view.attributes);
   const current = traceIdentity(trace.entries);
+  // A conversation the agent's spans name is kept, one the manifest cannot hold included.
+  const shown = shownSession(views);
+  const named = shown !== undefined && !subtreeIds(views, tool).has(shown.view.spanId);
   const ids = new Set(views.map((view) => view.spanId));
   // The added span goes under the agent's earliest local root, where Hue reads it: never under a
   // tool span, whose subtree never names the owner. A trace whose every span is a tool's, or
@@ -662,7 +711,7 @@ export function applyIdentityKeys(trace: ConvertedTrace, keys: IdentityKeys): vo
     if (decided.value === undefined) continue;
     if (kind === "user" && !current?.user && !current?.entity)
       add("hue.import.user", { key: "user.id", value: { stringValue: decided.value } });
-    if (kind === "session" && !current?.session)
+    if (kind === "session" && !named)
       add("hue.import.session", {
         key: "gen_ai.conversation.id",
         value: { stringValue: decided.value },
