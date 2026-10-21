@@ -1,0 +1,120 @@
+{
+  "items": [
+    {
+      "id": "2a7e9c41-5d3b-4f86-a1c2-9e8d7f6a5b01",
+      "trace_id": "2a7e9c41-5d3b-4f86-a1c2-9e8d7f6a5b01",
+      "parent_run_ids": [],
+      "dotted_order": "20261020T140530100000Z2a7e9c41-5d3b-4f86-a1c2-9e8d7f6a5b01",
+      "run_type": "CHAIN",
+      "status": "SUCCESS",
+      "name": "support-agent",
+      "start_time": "2026-10-20T14:05:30.100000Z",
+      "end_time": "2026-10-20T14:05:33.400000Z",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Thanks! Can I change the address?"
+          }
+        ]
+      },
+      "outputs": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "Yes, until it ships."
+          }
+        ]
+      },
+      "extra": {
+        "runtime": {
+          "sdk": "langsmith-js",
+          "sdk_version": "0.10.9"
+        }
+      },
+      "metadata": {
+        "user_id": "user-42"
+      },
+      "tags": [],
+      "error": null,
+      "project_id": "5b0d3c1e-7a2f-4e8b-9c6d-2f1a0e9b8c7d",
+      "is_root": true,
+      "thread_id": "thread-7",
+      "ls_user_id": "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+      "latency_seconds": 3.3
+    },
+    {
+      "id": "2a7e9c41-5d3b-4f86-a1c2-9e8d7f6a5b02",
+      "trace_id": "2a7e9c41-5d3b-4f86-a1c2-9e8d7f6a5b01",
+      "parent_run_ids": [
+        "2a7e9c41-5d3b-4f86-a1c2-9e8d7f6a5b01"
+      ],
+      "dotted_order": "20261020T140530100000Z2a7e9c41-5d3b-4f86-a1c2-9e8d7f6a5b01.20261020T140530200000Z2a7e9c41-5d3b-4f86-a1c2-9e8d7f6a5b02",
+      "run_type": "LLM",
+      "status": "SUCCESS",
+      "name": "ChatAnthropic",
+      "start_time": "2026-10-20T14:05:30.200000Z",
+      "end_time": "2026-10-20T14:05:33.300000Z",
+      "inputs": {
+        "messages": [
+          [
+            {
+              "type": "system",
+              "content": "You help customers with their orders."
+            },
+            {
+              "type": "human",
+              "content": "Thanks! Can I change the address?"
+            }
+          ]
+        ]
+      },
+      "outputs": {
+        "generations": [
+          [
+            {
+              "text": "Yes, until it ships.",
+              "type": "ChatGeneration",
+              "message": {
+                "type": "ai",
+                "content": "Yes, until it ships."
+              }
+            }
+          ]
+        ],
+        "llm_output": null,
+        "type": "LLMResult"
+      },
+      "extra": {
+        "invocation_params": {
+          "model": "claude-sonnet-4-5"
+        }
+      },
+      "metadata": {
+        "user_id": "user-42",
+        "ls_provider": "anthropic",
+        "ls_model_name": "claude-sonnet-4-5"
+      },
+      "tags": [],
+      "error": null,
+      "project_id": "5b0d3c1e-7a2f-4e8b-9c6d-2f1a0e9b8c7d",
+      "is_root": false,
+      "thread_id": "thread-7",
+      "ls_user_id": "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+      "prompt_tokens": 2210,
+      "completion_tokens": 12,
+      "total_tokens": 2222,
+      "prompt_token_details": {
+        "raw": {
+          "cache_read": 2048,
+          "cache_creation": 150
+        }
+      },
+      "completion_token_details": {
+        "raw": {}
+      },
+      "latency_seconds": 3.1
+    }
+  ],
+  "next_cursor": null
+}

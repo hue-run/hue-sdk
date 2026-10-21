@@ -594,6 +594,10 @@ npx -y @hue-run/sdk@latest traces import prepare ./exports --out ./exports.hue-i
 npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authorization-file ./authorization.json --json
 ```
 
+- LangSmith runs (`list_runs` dumps, query pages, bulk-export rows as JSON Lines), MLflow traces
+  (`Trace.to_dict()`, `mlflow traces search --output json`), Opik's `opik export` files and span
+  pages, and W&B Weave calls are read as rows of their traces, with their model calls, tool calls,
+  token counts, end user and conversation.
 - `prepare` writes each trace as gzip OTLP/JSON batches beside a manifest and reports the
   manifest's digest and totals, the formats recognized, the files, lines and records it could not
   read, invalid vendor ids it mapped to OpenTelemetry ids, and the traces without a history owner,

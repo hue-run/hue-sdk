@@ -3,8 +3,12 @@ import type { ImportAdapter } from "./adapter.js";
 import { atif } from "./atif.js";
 import { braintrust } from "./braintrust.js";
 import { langfuse, langfuseObservations } from "./langfuse.js";
+import { langsmithRuns } from "./langsmith.js";
+import { mlflowTraces } from "./mlflow.js";
+import { opikTraces } from "./opik.js";
 import { otelFamilyAdapters } from "./otel-family.js";
 import { otlpJson } from "./otlp.js";
+import { weaveCalls } from "./weave.js";
 
 /**
  * The source formats `hue traces import prepare` reads, and how a new one is added.
@@ -42,6 +46,10 @@ export const importAdapters: readonly ImportAdapter[] = [
   atif,
   braintrust,
   ...otelFamilyAdapters,
+  langsmithRuns,
+  mlflowTraces,
+  opikTraces,
+  weaveCalls,
 ];
 
 /** The format that claims a value, the first in registry order. */

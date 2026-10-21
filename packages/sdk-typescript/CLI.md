@@ -603,6 +603,40 @@ named, and an input of more than 25,000 traces, or whose manifest would exceed 3
 compressed), is refused whole. Nothing about where a file sat or what it was called reaches a span: a renamed, reordered
 or re-zipped copy of the bundle prepares to byte-identical batches and the same manifest digest.
 
+**LangSmith, MLflow, Opik and W&B Weave.** These exports are read as rows of their traces by the
+same emitter as Braintrust rows, labelled `hue.import.format` `langsmith_runs`, `mlflow_traces`,
+`opik_traces` or `weave_calls`. A dotted `--user-key` or `--session-key` looks in a LangSmith run's
+metadata, an MLflow trace's metadata, an Opik record's metadata or a Weave call's `attributes`.
+
+- LangSmith runs: a `list_runs` dump (a JSON array or JSON Lines), the runs query page
+  (`{"runs": […]}`) or its v2 page (`{"items": […]}`), a run with its `child_runs` nested, or bulk
+  export rows converted from Parquet to JSON Lines, whose `inputs`, `outputs` and `extra` are JSON
+  text. A run time without a zone is UTC. `llm`, `tool`, `embedding` and `retriever` runs become
+  model, tool, embedding and retrieval spans; token counts are read from `llm` runs alone, since
+  `list_runs` sums a chain's over its children. The user and conversation come from the run's
+  metadata (`user_id`, `thread_id`, `session_id`, `conversation_id`) or the v2 `thread_id`, never
+  from the run's own `session_id`, which names the tracing project. A run exported before and after
+  it ended keeps the ended copy; a run with a `reference_example_id` is evaluation traffic.
+- MLflow traces: `Trace.to_dict()` (`mlflow traces get`, `trace.to_json()`), a list or JSON Lines of
+  them, or `mlflow traces search --output json`, MLflow 2's form included. Base64 ids become the
+  OpenTelemetry ids they encode, and the JSON-encoded attributes are decoded: `mlflow.spanType`
+  names the kind, `mlflow.spanInputs` and `mlflow.spanOutputs` the content, `mlflow.chat.tokenUsage`
+  the token counts. The user and conversation are the trace's `mlflow.trace.user` and
+  `mlflow.trace.session`; the root span keeps the trace's `info` in its source record. A trace
+  tagged `mlflow.eval.requestId` or `mlflow.trace.sourceScorer` is evaluation traffic, and a trace
+  exported without its spans is refused.
+- Opik: the files `opik export … project …` writes, one per trace, or spans alone (the spans API
+  page or JSON Lines). The trace becomes the root span; `llm` and `tool` spans become model and tool
+  spans, with token counts from `usage`. The conversation is the trace's `thread_id` and the user a
+  metadata field; `environment` is the deployment environment, and a trace from an experiment,
+  evaluator, optimization or the playground is evaluation traffic. A record exported twice keeps
+  the copy updated last.
+- W&B Weave calls: the calls stream's JSON Lines, a list of calls or `{"calls": […]}`. The op's
+  kind (`attributes.weave.kind`) names the span, token counts come from an `llm` call's
+  `summary.usage`, the conversation is `thread_id` and the user an `attributes` field; `wb_user_id`,
+  the W&B account that logged the call, is never the user. A trace with a scorer or an
+  `Evaluation.*` op is evaluation traffic.
+
 **History owner.** A trace's owner is read from its spans as Hue reads it: the trace's local roots
 (spans with no parent, or one outside the trace) first, then its other spans, never a tool span or
 anything beneath one, and every span that names one must agree. An explicit
