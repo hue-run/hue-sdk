@@ -937,6 +937,154 @@ describe("chat transcripts", () => {
     expect(json(shared[1]!, "hue.import.source_record")).toEqual(call);
     expect(json(shared[calls]!, "hue.import.source_record")).toEqual(sameId.messages[4]);
   });
+
+  test("reads a request logged without its reply as all it sent, with no reply", async () => {
+    const asked = [
+      { role: "user", content: "Where is order 12?" },
+      { role: "assistant", content: "It has shipped." },
+      { role: "user", content: "When will it arrive?" },
+    ];
+    const responses = { model: "gpt-4.1-mini", input: asked };
+    const empty = { model: "gpt-4.1-mini", input: "Hello", output: [] };
+    const chat = { model: "gpt-4.1-mini", messages: asked };
+    expect(claims(empty)).toEqual(["openai_responses"]);
+    const report = await prepare(
+      await scratch({
+        "requests.jsonl": [responses, empty, chat].map((line) => JSON.stringify(line)).join("\n"),
+      }),
+    );
+    expect(report.formats).toEqual({ openai_responses: 2, openai_chat: 1 });
+    const { spans } = await bundle(report);
+    const sent = asked.map(({ role, content }) => ({ role, parts: [{ type: "text", content }] }));
+    for (const [format, request] of [
+      ["openai_responses", responses],
+      ["openai_chat", chat],
+    ] as const) {
+      // The request is the latest message the agent took; the earlier turn is a model call of
+      // the conversation, never its reply.
+      const [agent, turn, ...rest] = await spans(derived(format, sha256(canonical(request))));
+      expect(json(agent!, "gen_ai.input.messages")).toEqual(sent);
+      expect(attr(agent!, "gen_ai.output.messages")).toBeUndefined();
+      expect(json(turn!, "gen_ai.output.messages")).toEqual([sent[1]]);
+      expect(rest).toEqual([]);
+    }
+    const alone = await spans(derived("openai_responses", sha256(canonical(empty))));
+    expect(alone.map((span) => span.name)).toEqual(["invoke_agent"]);
+    expect(attr(alone[0]!, "gen_ai.output.messages")).toBeUndefined();
+  });
+
+  test("reads a Helicone request body whose Responses input is untyped messages", async () => {
+    const record = {
+      request_id: "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",
+      request_created_at: "2026-10-18T10:00:01.120Z",
+      response_created_at: "2026-10-18T10:00:02.044Z",
+      response_status: 200,
+      request_body: {
+        model: "gpt-4.1-mini",
+        input: [{ role: "user", content: "Where is order 12?" }],
+      },
+      response_body: {
+        object: "response",
+        model: "gpt-4.1-mini",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "It has shipped." }],
+          },
+        ],
+      },
+      provider: "OPENAI",
+    };
+    expect(claims(record)).toEqual(["helicone"]);
+    const report = await prepare(await scratch({ "helicone.json": JSON.stringify(record) }));
+    const { spans } = await bundle(report);
+    const [call] = await spans(derived("helicone", record.request_id));
+    expect(json(call!, "gen_ai.input.messages")).toEqual([
+      { role: "user", parts: [{ type: "text", content: "Where is order 12?" }] },
+    ]);
+    expect(attr(call!, "input.value")).toBeUndefined();
+  });
+
+  test("pairs results with the calls of their turn, each result failing only its own call", async () => {
+    // Parallel Responses calls are items of their own, one turn; both share an id.
+    const call = (id: number) => ({
+      type: "function_call",
+      call_id: "call_X",
+      name: "lookup_order",
+      arguments: JSON.stringify({ id }),
+    });
+    const result = (output: string) => ({
+      type: "function_call_output",
+      call_id: "call_X",
+      output,
+    });
+    const parallel = {
+      model: "gpt-4.1-mini",
+      input: [
+        { role: "user", content: "Look up orders 1 and 2." },
+        call(1),
+        call(2),
+        result("order 1 shipped"),
+        result("order 2 pending"),
+      ],
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "One shipped, one pending." }],
+        },
+      ],
+    };
+    // One tool use id in three turns: a failed result, a good one, and a call with none.
+    const use = { type: "tool_use", id: "toolu_1", name: "lookup_order", input: { id: 1 } };
+    const answer = (content: string, failed = false) => ({
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "toolu_1",
+          content,
+          ...(failed ? { is_error: true } : {}),
+        },
+      ],
+    });
+    const retried = {
+      model: "claude-sonnet-4-5",
+      system: "You help with orders.",
+      messages: [
+        { role: "user", content: "Where is order 1?" },
+        { role: "assistant", content: [use] },
+        answer("timeout", true),
+        { role: "assistant", content: [use] },
+        answer("order 1 shipped"),
+        { role: "assistant", content: [use] },
+      ],
+    };
+    const report = await prepare(
+      await scratch({
+        "calls.jsonl": `${JSON.stringify(parallel)}\n${JSON.stringify(retried)}`,
+      }),
+    );
+    const { spans } = await bundle(report);
+    const tools = async (format: string, transcript: unknown) =>
+      (await spans(derived(format, sha256(canonical(transcript))))).filter(
+        (span) => str(span, "gen_ai.operation.name") === "execute_tool",
+      );
+    const results = (found: Span[]) =>
+      found.map((span) =>
+        attr(span, "gen_ai.tool.call.result") ? json(span, "gen_ai.tool.call.result") : undefined,
+      );
+    const lookups = await tools("openai_responses", parallel);
+    expect(lookups.map((span) => json(span, "gen_ai.tool.call.arguments"))).toEqual([
+      { id: 1 },
+      { id: 2 },
+    ]);
+    expect(results(lookups)).toEqual(["order 1 shipped", "order 2 pending"]);
+    const attempts = await tools("anthropic_messages", retried);
+    expect(results(attempts)).toEqual(["timeout", "order 1 shipped", undefined]);
+    expect(attempts.map((span) => span.status.code)).toEqual([2, 0, 0]);
+  });
 });
 
 /** JSON with sorted keys, as the importer derives a transcript's content id. */

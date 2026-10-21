@@ -442,7 +442,7 @@ describe("damaged containers", () => {
   );
 
   test.skipIf(typeof zlib.zstdCompressSync !== "function")(
-    "reads no frame of a zstd file when a later frame fails its checksum",
+    "reads no frame of a zstd file when a later frame fails its checksum or declared size",
     () => {
       const checksummed = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } };
       const first = zlib.zstdCompressSync(Buffer.from(lines(1, 3)), checksummed);
@@ -451,6 +451,24 @@ describe("damaged containers", () => {
       corrupt[corrupt.byteLength - 1]! ^= 0xff;
       expect(decodeContainer(Buffer.concat([first, corrupt]), 1 << 20)).toEqual({
         unsupported: "a damaged zstd file",
+      });
+      // A frame whose content is one byte longer or shorter than its header declares, with a
+      // checksum or without one, as gzip's size field: the low byte of the declared size.
+      for (const frame of [second, zlib.zstdCompressSync(Buffer.from(lines(4, 7)))])
+        for (const flip of [1, 2]) {
+          const resized = Buffer.from(frame);
+          const descriptor = resized[4]!;
+          resized[5 + ((descriptor >> 5) & 1 ? 0 : 1) + [0, 1, 2, 4][descriptor & 3]!]! ^= flip;
+          expect(decodeContainer(Buffer.concat([first, resized]), 1 << 20)).toEqual({
+            unsupported: "a damaged zstd file",
+          });
+        }
+      // A frame whose blocks do not decompress (literals that name a table the frame never
+      // set) is damage the read stops at, as gzip's is.
+      const damaged = Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0x25, 0, 0, 0x03, 0, 0, 0]);
+      expect(decodeContainer(Buffer.concat([first, damaged, second]), 1 << 20)).toEqual({
+        bytes: Buffer.from(lines(1, 3)),
+        note: "the zstd file is damaged; what follows the damage was not read",
       });
       // A frame that breaks off is still read up to the break.
       expect(decodeContainer(Buffer.concat([first, second.subarray(0, -2)]), 1 << 20)).toEqual({

@@ -527,13 +527,13 @@ that no format reads whole, and each message of a length-prefixed protobuf file 
 its own. CSV and Parquet are not read: export JSON or JSON Lines.
 
 Damage stays local. A gzip or zstd file that breaks off, or holds bytes after its last member or
-frame, is read up to the break and the rest named in `files.notes`; one whose checksum fails is not
-read. A line that is not UTF-8 is named and the other lines read. A bare `NaN`, `Infinity` or
-`-Infinity` (Python's `json.dumps` writes them) is read as null and named in `files.notes`. A value
-nested more than 512 levels deep is named and not read, and JSON text inside a record (metadata,
-tool arguments) nested that deep is kept as the text it is. Past 1,000 records in a row from the
-start of a JSON array that no format reads, the array is reported as unrecognized without reading
-the rest.
+frame, is read up to the break and the rest named in `files.notes`; one whose content fails its
+checksum or the size its member or frame declares is not read. A line that is not UTF-8 is named and
+the other lines read. A bare `NaN`, `Infinity` or `-Infinity` (Python's `json.dumps` writes them) is
+read as null and named in `files.notes`. A value nested more than 512 levels deep is named and not
+read, and JSON text inside a record (metadata, tool arguments) nested that deep is kept as the text
+it is. Past 1,000 records in a row from the start of a JSON array that no format reads, the array is
+reported as unrecognized without reading the rest.
 
 Every trace becomes gzip OTLP/JSON batches of at most 3 MiB decoded and 900 KiB on the wire,
 written to `--out` (default `<path>.hue-import`, created with mode 0700) beside `manifest.json`,
@@ -579,10 +579,11 @@ conversation (`gen_ai.conversation.id`); a tool span, tool row or tool call neve
 **How each kind of format is converted.** OTLP/JSON, binary OTLP and Jaeger API v3 spans are kept
 exactly as recorded, and the spans of one trace split between files of these formats are read as
 one trace. A span that two files hold is read once when the copies differ only in encoding: key
-order, an int64 as a number or decimal text, an id as hex or base64, or a field at its default
-written or left out. A trace or span id that is not an OpenTelemetry id (an exporter's UUID, for
-example) is mapped to one derived from it by SHA-256, with the original kept as
-`hue.import.original_trace_id` or `hue.import.original_span_id`.
+order, an int64 or a uint32 as a number or decimal text, an enum by name or number, a double as a
+number or text, bytes or an id as hex or as standard or URL-safe base64, padded or not, or a field
+at its default written or left out. A trace or span id that is not an OpenTelemetry id (an
+exporter's UUID, for example) is mapped to one derived from it by SHA-256, with the original kept
+as `hue.import.original_trace_id` or `hue.import.original_span_id`.
 
 - Jaeger UI JSON, Zipkin v2 and Phoenix spans are written as the OTLP spans they were, as the
   OpenTelemetry Collector converts Jaeger and Zipkin spans. Attributes keep their own names
@@ -612,6 +613,12 @@ example) is mapped to one derived from it by SHA-256, with the original kept as
   as `hue.import.source_record`. An attribute the source recorded under its own name (a Raindrop
   span's `gen_ai.*`, for example) is kept as recorded, with none of the same name added beside it,
   unless it names a user or conversation that `--user-key` or `--session-key` replaces.
+- A chat transcript (`openai_chat`, `openai_responses`, `anthropic_messages`) is one trace: an
+  agent span for the conversation, a model span per assistant turn with the conversation before
+  it, and a tool span per call with the result that answers it. The agent's reply is the answer
+  logged with the request, else the last turn when the conversation ends with it; a conversation
+  that goes on past its last turn, as a request logged without its response does, is the agent's
+  input whole and has no reply.
 - A vendor's own evaluation recorded inside a production trace is read as such, not as the
   agent's work: a Braintrust span with `purpose: "scorer"` or of type `score`, `automation`,
   `facet`, `classifier`, `preprocessor` or `review` (online scoring adds them to production
@@ -677,18 +684,19 @@ Rules shared by the row formats:
   The same rules fill in the instants a Zipkin or Phoenix span was exported without.
 
 **History owner.** A trace's owner is read from its spans as Hue reads it: the trace's local roots
-(spans with no parent, or one outside the trace) first, then its other spans, never a tool span or
-anything beneath one, and every span that names one must agree. An explicit
-`hue.world.entity.namespace` and `hue.world.entity.id` wins over a user. A user is the first of
-`user.id`, `enduser.id` and the other attributes and metadata fields Hue reads (OpenTelemetry,
-Vercel AI SDK, OpenLLMetry, Langfuse, LangSmith, Braintrust, Mastra and OpenInference metadata),
-except that `user.id` beside `user.account_uuid` names a Claude Code installation and is passed
-over. The conversation the manifest declares is the one Hue's trace list shows: that of the
-trace's root span (the earliest span with no parent; without one, the only span whose parent is
-outside the trace, when that span runs an agent or a workflow), else that of the earliest span that
-names one, spans ordered by their start in milliseconds, then by span id. The manifest declares
-none when that span is a tool span or beneath one, or when the id is not one the manifest holds
-(more than 2,048 characters, a NUL or an unpaired surrogate).
+(spans with no parent, or one outside the trace) first, then its other spans, never a tool span (a
+span any instrumentation convention Hue reads takes as a tool call) or anything beneath one, and
+every span that names one must agree. An explicit `hue.world.entity.namespace` and
+`hue.world.entity.id` wins over a user. A user is the first of `user.id`, `enduser.id` and the other
+attributes and metadata fields Hue reads (OpenTelemetry, Vercel AI SDK, OpenLLMetry, Langfuse,
+LangSmith, Braintrust, Mastra and OpenInference metadata), except that `user.id` beside
+`user.account_uuid` names a Claude Code installation and is passed over. The conversation the
+manifest declares is the one Hue's trace list shows: that of the trace's root span (the earliest
+span with no parent; without one, the only span whose parent is outside the trace, when that span
+runs an agent, an agent step or a workflow), else that of the earliest span that names one, spans
+ordered by their start in milliseconds, then by span id. The manifest declares none when that span
+is a tool span or beneath one, or when Hue does not show the id as it is: one longer than 2,048
+bytes of UTF-8, or holding a NUL or an unpaired surrogate.
 
 **`--user-key` and `--session-key`.** For an export whose user sits under a key of its own,
 `--user-key <key>` names it, and `--session-key <key>` names the conversation the same way. The key
@@ -696,7 +704,8 @@ is one of:
 
 - a dotted key such as `app.customer_id`, looked up as an attribute of each span or its resource,
   then in the record's metadata (the exact key, then as a dotted path), then in the record itself
-  (for MLflow: a span's own attributes, then the trace's metadata, then its tags);
+  (for MLflow: a span's own attributes, then the trace's metadata, then its tags; the record of an
+  MLflow trace's root span holds the trace's `info` beside the span);
 - a JSONPath of members and indexes into the source record: `$.metadata.customer.id`,
   `$.metadata["customer.id"]` or `$.tags[0]`;
 - a JSON Pointer into the source record: `/metadata/customer/id`.
@@ -711,8 +720,10 @@ its spans disagree. A trace kept as recorded or converted span for span (OTLP, J
 Phoenix, the documented Langfuse list, ATIF) that names no owner gains one child span of the
 agent's earliest local root (never a tool span), `hue.import.user` with the single attribute
 `user.id` (or `hue.import.session` with `gen_ai.conversation.id`), so its recorded spans keep their
-bytes and a trace also sent live does not conflict. An owner or a conversation the agent's spans
-already name is kept, and a trace with no root but tool spans gains nothing.
+bytes and a trace also sent live does not conflict. `hue.import.session` starts before any tool
+span that names a conversation, so that Hue's trace list shows the key's. An owner or a
+conversation the agent's spans already name is kept, and a trace with no root but tool spans gains
+nothing.
 
 **Limits and refusals.** A malformed record refuses its trace, never the file: an OTLP trace with a
 malformed span (an attribute value of no OTLP shape, a protobuf span that does not decode) or whose

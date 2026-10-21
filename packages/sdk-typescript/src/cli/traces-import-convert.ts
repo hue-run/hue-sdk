@@ -47,8 +47,9 @@ const BATCH_SUFFIX = "]}";
 const BATCH_FRAME_BYTES = BATCH_PREFIX.length + BATCH_SUFFIX.length;
 const HEX32 = /^[0-9a-f]{32}$/;
 const HEX16 = /^[0-9a-f]{16}$/;
-const BASE64_TRACE_ID = /^[A-Za-z0-9+/]{22}==$/;
-const BASE64_SPAN_ID = /^[A-Za-z0-9+/]{11}=$/;
+/** An id as ProtoJSON writes it: padded base64, standard or URL-safe. */
+const BASE64_TRACE_ID = /^[A-Za-z0-9+/_-]{22}==$/;
+const BASE64_SPAN_ID = /^[A-Za-z0-9+/_-]{11}=$/;
 const MAX_IDENTIFIER = 16_384;
 const MAX_SESSION = 2_048;
 const MAX_NAMESPACE = 128;
@@ -68,7 +69,8 @@ export interface OtlpValue {
   stringValue?: string;
   boolValue?: boolean;
   intValue?: string;
-  doubleValue?: number;
+  /** A number, or as OTLP/JSON may write it: decimal text, or `NaN`, `Infinity` or `-Infinity`. */
+  doubleValue?: number | string;
   arrayValue?: { values: OtlpValue[] };
   kvlistValue?: { values: OtlpAttribute[] };
   bytesValue?: string;
@@ -448,14 +450,37 @@ const VALUE_MEMBERS = new Set([
 ]);
 /** The int64 fields, which OTLP/JSON may write as numbers or as decimal text. */
 const INT64_FIELDS = new Set(["intValue", "timeUnixNano", "startTimeUnixNano", "endTimeUnixNano"]);
+/** The uint32 fields, which OTLP/JSON may write as numbers or as decimal text, with the names of
+ * an enum field's values in order, which ProtoJSON may write instead of the number. */
+const UINT32_FIELDS: Record<string, readonly string[]> = {
+  kind: [
+    "SPAN_KIND_UNSPECIFIED",
+    "SPAN_KIND_INTERNAL",
+    "SPAN_KIND_SERVER",
+    "SPAN_KIND_CLIENT",
+    "SPAN_KIND_PRODUCER",
+    "SPAN_KIND_CONSUMER",
+  ],
+  code: ["STATUS_CODE_UNSET", "STATUS_CODE_OK", "STATUS_CODE_ERROR"],
+  flags: [],
+  droppedAttributesCount: [],
+  droppedEventsCount: [],
+  droppedLinksCount: [],
+};
 const ID_FIELDS: Record<string, 32 | 16> = { traceId: 32, spanId: 16, parentSpanId: 16 };
+/** A double as ProtoJSON may write it as text. */
+const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+/** Bytes as ProtoJSON may write them: standard or URL-safe base64, padded or not. */
+const BASE64 = /^[A-Za-z0-9+/_-]*={0,2}$/;
 
 /**
  * An OTLP entry's content as JSON text that every encoding of it shares, so a span sent both as
- * binary OTLP and as OTLP/JSON reads as one: keys sorted, an int64 as decimal text (OTLP/JSON may
- * write a number), an id as lowercase hex (a protobuf JSON encoder writes base64), and a field at
- * its protobuf default (0, "", an empty list or object), which binary OTLP never carries, left
- * out. Undefined for a value at its default.
+ * binary OTLP and as OTLP/JSON reads as one: keys sorted, an int64 as decimal text and a uint32
+ * as a number (OTLP/JSON may write either as a number or as text), an enum by its number, not its
+ * name, a double as a number unless it is NaN or an infinity, bytes as padded standard base64, an
+ * id as lowercase hex (a protobuf JSON encoder writes base64), and a field at its protobuf
+ * default (0, "", an empty list or object), which binary OTLP never carries, left out. Undefined
+ * for a value at its default.
  */
 function otlpContent(value: unknown, field?: string): string | undefined {
   if (value === null || value === undefined) return undefined;
@@ -474,7 +499,15 @@ function otlpContent(value: unknown, field?: string): string | undefined {
   } else if (field && INT64_FIELDS.has(field) && /^-?\d+$/.test(String(value))) {
     const decimal = BigInt(String(value)).toString();
     if (decimal !== "0") text = JSON.stringify(decimal);
-  } else if (field && Object.hasOwn(ID_FIELDS, field)) {
+  } else if (field && Object.hasOwn(UINT32_FIELDS, field)) {
+    const named = typeof value === "string" ? UINT32_FIELDS[field]!.indexOf(value) : -1;
+    const number = named >= 0 ? named : /^\d+$/.test(String(value)) ? Number(value) : value;
+    if (number !== 0) text = JSON.stringify(number);
+  } else if (field === "doubleValue")
+    text = JSON.stringify(typeof value === "string" && DECIMAL.test(value) ? Number(value) : value);
+  else if (field === "bytesValue" && typeof value === "string" && BASE64.test(value))
+    text = JSON.stringify(Buffer.from(value, "base64").toString("base64"));
+  else if (field && Object.hasOwn(ID_FIELDS, field)) {
     if (value !== "") text = JSON.stringify(normalizeId(value, ID_FIELDS[field]!) ?? value);
   } else if (value !== "" && value !== 0 && value !== false) text = JSON.stringify(value);
   return text ?? (field && VALUE_MEMBERS.has(field) ? defaultContent(value, field) : undefined);

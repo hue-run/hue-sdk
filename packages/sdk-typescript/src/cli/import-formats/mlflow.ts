@@ -24,8 +24,8 @@ import { nanosFrom, readRecords, type EventRow, type SpanKind, type SpanRow } fr
  *   `mlflow.trace.sourceScorer` (a judge's own trace) is evaluation traffic.
  * - A span's `links`, which `Span.to_dict()` writes beside its parent, become span links, to a
  *   span of the same trace or of another, their ids read as the trace's own are.
- * - A trace is one record: a malformed span refuses its trace. The spans without a parent keep the
- *   trace's `info` beside the span in their source record.
+ * - A trace is one record: a malformed span refuses its trace. Its roots, the spans without a
+ *   parent in the export, keep the trace's `info` beside the span in their source record.
  */
 
 const isTrace = (value: unknown): value is JsonObject =>
@@ -176,7 +176,7 @@ function readSpan(span: JsonValue, trace: Trace): { row: SpanRow; events: EventR
     ...(end !== undefined ? { end } : {}),
     ...(input !== undefined && input !== null ? { input } : {}),
     ...(output !== undefined && output !== null ? { output } : {}),
-    record: parentKey === undefined ? { info: trace.info, span } : (span as JsonObject),
+    record: span as JsonObject,
     // Where a dotted key looks after the attributes written: the span's own (most are kept in its
     // record alone), then the trace's metadata, then its tags.
     metadata: { ...trace.tags, ...trace.metadata, ...attributes },
@@ -223,6 +223,11 @@ function readTrace(value: JsonObject, context: ConvertContext): void {
     throw new ConversionError("a trace exported without its spans; export it with its spans");
   // Every span is read before any is added, so a malformed one refuses the trace whole.
   const read = spans.map((span) => readSpan(span, trace));
+  // The trace's roots, with no parent or one outside the export, keep its `info` beside them.
+  const keys = new Set(read.map(({ row }) => row.spanKey));
+  for (const { row } of read)
+    if (row.parentKey === undefined || row.parentKey === row.spanKey || !keys.has(row.parentKey))
+      row.record = { info: trace.info, span: row.record };
   for (const { row, events } of read) {
     context.row(row);
     for (const event of events) context.event(event);

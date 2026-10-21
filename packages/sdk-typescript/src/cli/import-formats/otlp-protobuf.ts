@@ -9,7 +9,7 @@ import {
   type OtlpValue,
 } from "../traces-import-convert.js";
 import type { ImportAdapter } from "./adapter.js";
-import { checksumFailed, zstdContentSize, type ParsedValue } from "./containers.js";
+import { readZstd, type ParsedValue } from "./containers.js";
 
 /**
  * Binary OTLP trace files: one protobuf `ExportTraceServiceRequest` (an OTLP/HTTP request body,
@@ -140,7 +140,14 @@ function anyValue(reader: Reader, depth: number): OtlpValue {
     1: [2, (r) => (value = { stringValue: r.text() })],
     2: [0, (r) => (value = { boolValue: r.varint() !== 0n })],
     3: [0, (r) => (value = { intValue: signed(r.varint()) })],
-    4: [1, (r) => (value = { doubleValue: r.fixed(8).getFloat64(0, true) })],
+    4: [
+      1,
+      (r) => {
+        const double = r.fixed(8).getFloat64(0, true);
+        // OTLP/JSON names NaN and the infinities, which JSON has no number for.
+        value = { doubleValue: Number.isFinite(double) ? double : String(double) };
+      },
+    ],
     5: [
       2,
       (r) => {
@@ -390,32 +397,23 @@ function decoded(traces: DecodedTraces, line?: number): ParsedValue {
   };
 }
 
-/** One length-prefixed message's bytes, a zstd message decompressed. `budget` is what the file
- * may still decompress to. */
+/** One length-prefixed message's bytes, a zstd message decompressed frame by frame (see
+ * {@link readZstd}). `budget` is what the file may still decompress to. */
 function frameBytes(frame: Uint8Array, budget: number): Uint8Array {
-  let bytes = frame;
-  if (isZstd(frame)) {
-    if (typeof zlib.zstdDecompressSync !== "function")
-      throw new ConversionError(
-        "a zstd message, which this Node.js cannot decompress (Node.js 22.15 or later can)",
-      );
-    try {
-      bytes = zlib.zstdDecompressSync(frame, { maxOutputLength: Math.max(0, budget) });
-    } catch (error) {
-      if (
-        error instanceof RangeError ||
-        (error as NodeJS.ErrnoException)?.code === "ERR_BUFFER_TOO_LARGE"
-      )
-        throw new Oversized();
-      // A checksum is checked once the content has decompressed whole, within the budget, to the
-      // size the header declares. shortcut: a frame that declares no size is charged the whole
-      // budget left, so the file reads no further; measure its output if exports send such frames.
-      if (checksumFailed(error)) throw new ChecksumFailure(zstdContentSize(frame) ?? budget);
-      throw new ConversionError("a damaged zstd message");
-    }
+  if (!isZstd(frame)) {
+    if (frame.byteLength > budget) throw new Oversized();
+    return frame;
   }
-  if (bytes.byteLength > budget) throw new Oversized();
-  return bytes;
+  if (typeof zlib.zstdDecompressSync !== "function")
+    throw new ConversionError(
+      "a zstd message, which this Node.js cannot decompress (Node.js 22.15 or later can)",
+    );
+  const read = readZstd(frame, Math.max(0, budget));
+  if (read.kind === "oversized") throw new Oversized();
+  // A message is its frames whole: one that does not decompress whole, or that holds other bytes,
+  // is damaged, and counts what its frames decompressed to.
+  if (read.kind === "mismatched" || read.stop) throw new DamagedZstd(read.size);
+  return Buffer.concat(read.parts);
 }
 
 /** One message read: protobuf, or OTLP/JSON that a zstd message held. */
@@ -444,8 +442,8 @@ function messageValue(bytes: Uint8Array, zstd: boolean, line: number): ParsedVal
 /** The file's messages together decompress past the bound of one file. */
 class Oversized extends Error {}
 
-/** A zstd message that decompressed, to `decompressed` bytes, and failed its checksum. */
-class ChecksumFailure extends ConversionError {
+/** A zstd message that is damaged after its frames decompressed to `decompressed` bytes. */
+class DamagedZstd extends ConversionError {
   constructor(readonly decompressed: number) {
     super("a damaged zstd message");
   }
@@ -522,7 +520,7 @@ export function binaryValues(
           return;
         }
         if (!(error instanceof ConversionError)) throw error;
-        if (error instanceof ChecksumFailure) size = error.decompressed;
+        if (error instanceof DamagedZstd) size = Math.max(size, error.decompressed);
         total += size;
         problems.push({ line: index + 1, reason: `not an OTLP trace message: ${error.message}` });
       }

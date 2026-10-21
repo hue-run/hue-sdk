@@ -262,6 +262,29 @@ const text = (map: ReadonlyMap<string, JsonValue>, key: string) => {
   return typeof value === "string" && value ? value : undefined;
 };
 
+/** Text as Hue takes it for a label: non-blank, at most `max` characters, well-formed. */
+const label = (value: JsonValue | undefined, max = 256) =>
+  typeof value === "string" &&
+  value.trim() !== "" &&
+  value.length <= max &&
+  validIdentifier(value, Infinity)
+    ? value
+    : undefined;
+
+/** An attribute recorded as JSON text, parsed; text that is not JSON as recorded. */
+function jsonText(value: JsonValue | undefined): JsonValue | undefined {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as JsonValue;
+  } catch {
+    return value;
+  }
+}
+
+/** One span as Hue reads its kind: its attributes and its instrumentation scope's name. */
+type Recorded = Pick<SpanView, "attributes" | "scope">;
+
+/** The keys Hue reads a span's operation from, in order (Genkit's action kind last). */
 const OPERATION_KEYS = [
   "gen_ai.operation.name",
   "openinference.span.kind",
@@ -269,42 +292,133 @@ const OPERATION_KEYS = [
   "ai.operationId",
   "operation.name",
   "langfuse.observation.type",
+  "genkit:metadata:subtype",
 ];
 const TOOL_OPERATIONS = new Set(["tool", "execute_tool", "ai.toolcall"]);
+/** Keys Braintrust's span processor stamps on every span, whatever recorded it. */
+const BRAINTRUST_SYSTEM_KEYS = new Set([
+  "braintrust.parent",
+  "braintrust.org",
+  "braintrust.app_url",
+  "braintrust.context_json",
+]);
 
-/** Whether Hue reads the span as a tool call: its operation names one, or an instrumentation
- * convention reads a tool from its attributes. */
-export function isToolSpan(attributes: ReadonlyMap<string, JsonValue>): boolean {
-  let operation: string | undefined;
-  for (const key of OPERATION_KEYS) if ((operation = text(attributes, key))) break;
-  if (operation && TOOL_OPERATIONS.has(operation.toLowerCase())) return true;
+/** A field of Braintrust's `span_attributes`, recorded as one JSON object or flattened. */
+function braintrustSpanAttribute(
+  attributes: ReadonlyMap<string, JsonValue>,
+  field: string,
+): JsonValue | undefined {
+  const whole = jsonText(attributes.get("braintrust.span_attributes"));
+  if (
+    whole !== null &&
+    typeof whole === "object" &&
+    !Array.isArray(whole) &&
+    Object.hasOwn(whole, field)
+  )
+    return whole[field];
+  return attributes.get(`braintrust.span_attributes.${field}`);
+}
+
+/** Braintrust's span type, on a span that records Braintrust's own keys. */
+const braintrustType = (attributes: ReadonlyMap<string, JsonValue>) =>
+  [...attributes.keys()].some(
+    (key) => key.startsWith("braintrust.") && !BRAINTRUST_SYSTEM_KEYS.has(key),
+  )
+    ? label(braintrustSpanAttribute(attributes, "type"), 64)
+    : undefined;
+
+/** The span's operation as Hue reads it: the first operation key it records, else MLflow's span
+ * type (JSON text, `"TOOL"` with its quotes), else Braintrust's. */
+function operationOf({ attributes }: Recorded): string | undefined {
+  for (const key of OPERATION_KEYS) {
+    const operation = text(attributes, key);
+    if (operation) return operation;
+  }
+  return label(jsonText(attributes.get("mlflow.spanType"))) ?? braintrustType(attributes);
+}
+
+/**
+ * Whether one of the instrumentation conventions Hue reads takes the span as a tool call, tried
+ * in Hue's order: the GenAI conventions (`gen_ai.tool.*`, which Hue's SDKs, Pydantic AI and
+ * Google ADK record too), LangSmith, Claude Code, the Vercel AI SDK, Braintrust, VoltAgent (whose
+ * tool search steps are no call, whatever a later convention reads), OpenInference, OpenLLMetry,
+ * Langfuse, MLflow, Spring AI and Genkit.
+ */
+function readsToolCall({ attributes, scope }: Recorded): boolean {
+  const has = (key: string) => attributes.has(key);
   if (
     text(attributes, "gen_ai.tool.name") ||
     text(attributes, "gen_ai.tool.call.id") ||
-    attributes.has("gen_ai.tool.call.arguments") ||
-    attributes.has("gen_ai.tool.call.result")
+    has("gen_ai.tool.call.arguments") ||
+    has("gen_ai.tool.call.result")
+  )
+    return true;
+  if (
+    text(attributes, "langsmith.span.kind") === "tool" &&
+    (has("gen_ai.prompt") || has("gen_ai.completion"))
+  )
+    return true;
+  if (
+    scope === "com.anthropic.claude_code.tracing" &&
+    text(attributes, "span.type") === "tool" &&
+    (text(attributes, "tool_name") || text(attributes, "tool_use_id"))
   )
     return true;
   if (
     text(attributes, "ai.toolCall.name") ||
     text(attributes, "ai.toolCall.id") ||
-    attributes.has("ai.toolCall.args") ||
-    attributes.has("ai.toolCall.result")
+    has("ai.toolCall.args") ||
+    has("ai.toolCall.result")
   )
     return true;
+  if (
+    braintrustType(attributes) === "tool" &&
+    (label(braintrustSpanAttribute(attributes, "name")) ||
+      text(attributes, "tool.name") ||
+      ["input_json", "input", "output_json", "output"].some((key) => has(`braintrust.${key}`)))
+  )
+    return true;
+  if (scope === "@voltagent/core" || (has("tool.call.id") && !has("openinference.span.kind"))) {
+    if (has("tool.search.name")) return false;
+    if (text(attributes, "tool.call.id")) return true;
+  }
   const kind = text(attributes, "openinference.span.kind")?.toUpperCase();
   if (kind === "TOOL" || (kind === undefined && text(attributes, "tool.name"))) return true;
   if (
     text(attributes, "traceloop.span.kind") === "tool" &&
     (text(attributes, "traceloop.entity.name") ||
-      attributes.has("traceloop.entity.input") ||
-      attributes.has("traceloop.entity.output"))
+      has("traceloop.entity.input") ||
+      has("traceloop.entity.output"))
+  )
+    return true;
+  if (
+    text(attributes, "langfuse.observation.type") === "tool" &&
+    (has("langfuse.observation.input") || has("langfuse.observation.output"))
+  )
+    return true;
+  if (
+    label(jsonText(attributes.get("mlflow.spanType"))) === "TOOL" &&
+    (has("mlflow.spanInputs") || has("mlflow.spanOutputs"))
+  )
+    return true;
+  if (
+    text(attributes, "spring.ai.tool.definition.name") ||
+    text(attributes, "spring.ai.tool.call.id") ||
+    has("spring.ai.tool.call.arguments") ||
+    has("spring.ai.tool.call.result")
   )
     return true;
   return (
-    text(attributes, "langfuse.observation.type") === "tool" &&
-    (attributes.has("langfuse.observation.input") || attributes.has("langfuse.observation.output"))
+    text(attributes, "genkit:metadata:subtype") === "tool" &&
+    !!(text(attributes, "genkit:name") || has("genkit:input") || has("genkit:output"))
   );
+}
+
+/** Whether Hue reads the span as a tool call: its operation names one, or an instrumentation
+ * convention reads a call from it. */
+export function isToolSpan(view: Recorded): boolean {
+  const operation = operationOf(view)?.toLowerCase();
+  return (operation !== undefined && TOOL_OPERATIONS.has(operation)) || readsToolCall(view);
 }
 
 /** One span of a trace as the owner rule sees it. */
@@ -314,18 +428,22 @@ export interface SpanView {
   start: bigint;
   attributes: Map<string, JsonValue>;
   resource: Map<string, JsonValue>;
+  /** Its instrumentation scope's name, which some conventions are known by. */
+  scope?: string;
   /** The span object as emitted, for a key path into it. */
   span: Record<string, unknown>;
 }
 
 export function spanViews(entries: readonly ImportEntry[]): SpanView[] {
   return entries.flatMap((entry) => {
-    const span = entry.scopeSpans[0]?.spans[0];
+    const group = entry.scopeSpans[0];
+    const span = group?.spans[0];
     if (!span || typeof span.spanId !== "string") return [];
     const parent = span.parentSpanId;
     let start = 0n;
     if (typeof span.startTimeUnixNano === "string" && /^\d+$/.test(span.startTimeUnixNano))
       start = BigInt(span.startTimeUnixNano);
+    const scope = isObject(group?.scope) ? group.scope.name : undefined;
     return [
       {
         spanId: span.spanId,
@@ -333,6 +451,7 @@ export function spanViews(entries: readonly ImportEntry[]): SpanView[] {
         start,
         attributes: sourceMap(span.attributes),
         resource: sourceMap(isObject(entry.resource) ? entry.resource.attributes : undefined),
+        ...(typeof scope === "string" ? { scope } : {}),
         span,
       },
     ];
@@ -455,10 +574,12 @@ const byMillisecond = (a: SpanView, b: SpanView) => {
 };
 
 /** Operations of a span Hue takes as the execution root though its parent is outside the trace:
- * an agent's, a workflow's, and a Vercel AI SDK call wrapping its steps. */
+ * an agent's, a workflow's, an agent step's, and a Vercel AI SDK call wrapping its steps. Any
+ * spelling of `agent` (MLflow's `AGENT`) is one too. */
 const AGENT_OPERATIONS = new Set([
   "invoke_agent",
   "invoke_workflow",
+  "agent_step",
   "ai.generateText",
   "ai.streamText",
   "ai.generateObject",
@@ -475,44 +596,46 @@ function executionRoot(views: readonly SpanView[]): SpanView | undefined {
     (view) => view.parentSpanId !== undefined && !ids.has(view.parentSpanId),
   );
   if (!orphan || more.length) return undefined;
-  let operation: string | undefined;
-  for (const key of OPERATION_KEYS) if ((operation = text(orphan.attributes, key))) break;
+  const operation = operationOf(orphan);
   return operation && (AGENT_OPERATIONS.has(operation) || operation.toLowerCase() === "agent")
     ? orphan
     : undefined;
 }
 
+const sessionOfSpan = (view: SpanView) =>
+  readIdentity("session", (key) => view.attributes.get(key));
+
 /** The conversation Hue's trace list shows for the trace, and the span it is read from: the
  * execution root's, else the earliest span's that names one. */
-function shownSession(views: readonly SpanView[]): { view: SpanView; id: string } | undefined {
-  const read = (view: SpanView) => readIdentity("session", (key) => view.attributes.get(key));
+function shownSession(
+  views: readonly SpanView[],
+): { view: SpanView; id: string; root: boolean } | undefined {
   const root = executionRoot(views);
-  const fromRoot = root && read(root);
-  if (root && fromRoot !== undefined) return { view: root, id: fromRoot };
-  let shown: { view: SpanView; id: string } | undefined;
+  const fromRoot = root && sessionOfSpan(root);
+  if (root && fromRoot !== undefined) return { view: root, id: fromRoot, root: true };
+  let shown: { view: SpanView; id: string; root: boolean } | undefined;
   for (const view of views) {
-    const id = read(view);
-    if (id !== undefined && (!shown || byMillisecond(view, shown.view) < 0)) shown = { view, id };
+    const id = sessionOfSpan(view);
+    if (id !== undefined && (!shown || byMillisecond(view, shown.view) < 0))
+      shown = { view, id, root: false };
   }
   return shown;
 }
 
 /** The conversation the manifest declares: the one Hue's trace list shows, unless a tool span or
- * a span beneath one names it (a tool never names the conversation), and only while the manifest
- * can hold the id. */
+ * a span beneath one names it (a tool never names the conversation), and only while Hue keeps it
+ * as the id itself, at most 2,048 bytes of UTF-8. */
 function sessionOf(views: readonly SpanView[], underTool: ReadonlySet<string>): string | undefined {
   const shown = shownSession(views);
   if (!shown || underTool.has(shown.view.spanId)) return undefined;
-  return shown.id.length <= MAX_SESSION && validIdentifier(shown.id, Infinity)
-    ? shown.id
-    : undefined;
+  return validIdentifier(shown.id, MAX_SESSION) ? shown.id : undefined;
 }
 
 /** The trace's identity as Hue will capture it from these spans: the owner (an explicit entity or
  * a user) and the session. */
 export function traceIdentity(entries: readonly ImportEntry[]): TraceIdentity | undefined {
   const views = spanViews(entries);
-  const tool = (view: SpanView) => isToolSpan(view.attributes);
+  const tool = (view: SpanView) => isToolSpan(view);
   const { roots, others } = agentSpans(views, tool);
   const owner = decideOwner(roots.map(carrierOf), others.map(carrierOf));
   const session = sessionOf(views, subtreeIds(views, tool));
@@ -652,34 +775,36 @@ function recordOf(view: SpanView): unknown {
  * When a key names one user across the agent's spans and the trace names no owner, a child span
  * `hue.import.user` with the single attribute `user.id` is added under the agent's earliest local
  * root (never a tool span), which Hue reads as one of the agent's spans; `hue.import.session` with
- * `gen_ai.conversation.id` likewise names a conversation when the agent's spans name none. An
- * owner or a conversation the agent's spans already name is kept.
+ * `gen_ai.conversation.id` likewise names a conversation when the agent's spans name none, timed
+ * so that Hue's trace list shows it (see {@link sessionStart}). An owner or a conversation the
+ * agent's spans already name is kept.
  */
 export function applyIdentityKeys(trace: ConvertedTrace, keys: IdentityKeys): void {
   if (!keys.user && !keys.session) return;
   const views = spanViews(trace.entries);
   if (!views.length) return;
   const records = new Map(views.map((view) => [view, recordOf(view)]));
-  const tool = (view: SpanView) => isToolSpan(view.attributes);
+  const tool = (view: SpanView) => isToolSpan(view);
   const current = traceIdentity(trace.entries);
-  // A conversation the agent's spans name is kept, one the manifest cannot hold included.
-  const shown = shownSession(views);
-  const named = shown !== undefined && !subtreeIds(views, tool).has(shown.view.spanId);
+  // A conversation any of the agent's spans names is kept, one the manifest cannot hold included.
+  const underTool = subtreeIds(views, tool);
+  const named = views.some(
+    (view) => !underTool.has(view.spanId) && sessionOfSpan(view) !== undefined,
+  );
   const ids = new Set(views.map((view) => view.spanId));
   // The added span goes under the agent's earliest local root, where Hue reads it: never under a
   // tool span, whose subtree never names the owner. A trace whose every span is a tool's, or
   // whose parents close on themselves, has no such root and gains nothing.
-  const [root] = agentSpans(views, tool).roots.sort(byStart);
-  if (!root) return;
-  const rootEntry = trace.entries.find((entry) => entry.scopeSpans[0]?.spans[0] === root.span);
-  const add = (name: string, attribute: OtlpAttribute) => {
+  const [parent] = agentSpans(views, tool).roots.sort(byStart);
+  if (!parent) return;
+  const parentEntry = trace.entries.find((entry) => entry.scopeSpans[0]?.spans[0] === parent.span);
+  const add = (name: string, attribute: OtlpAttribute, start: bigint) => {
     let spanId = digestHex(`${name}:${trace.traceId}`, 16);
     for (let salt = 0; ids.has(spanId) || /^0+$/.test(spanId); salt++)
       spanId = digestHex(`${name}:${trace.traceId}:${salt}`, 16);
     ids.add(spanId);
-    const start = String(root.span.startTimeUnixNano);
     trace.entries.push({
-      resource: isObject(rootEntry?.resource) ? rootEntry.resource : { attributes: [] },
+      resource: isObject(parentEntry?.resource) ? parentEntry.resource : { attributes: [] },
       scopeSpans: [
         {
           scope: { name: "hue.import" },
@@ -687,11 +812,11 @@ export function applyIdentityKeys(trace: ConvertedTrace, keys: IdentityKeys): vo
             {
               traceId: trace.traceId,
               spanId,
-              parentSpanId: root.spanId,
+              parentSpanId: parent.spanId,
               name,
               kind: 1,
-              startTimeUnixNano: start,
-              endTimeUnixNano: start,
+              startTimeUnixNano: String(start),
+              endTimeUnixNano: String(start),
               attributes: [attribute],
               status: { code: 0 },
             },
@@ -709,12 +834,26 @@ export function applyIdentityKeys(trace: ConvertedTrace, keys: IdentityKeys): vo
       resolveKey(path, view, records.get(view), member(records.get(view), "metadata")),
     );
     if (decided.value === undefined) continue;
+    const value = { stringValue: decided.value };
     if (kind === "user" && !current?.user && !current?.entity)
-      add("hue.import.user", { key: "user.id", value: { stringValue: decided.value } });
-    if (kind === "session" && !named)
-      add("hue.import.session", {
-        key: "gen_ai.conversation.id",
-        value: { stringValue: decided.value },
-      });
+      add("hue.import.user", { key: "user.id", value }, parent.start);
+    const start = kind === "session" && !named ? sessionStart(views, parent.start) : undefined;
+    if (start !== undefined)
+      add("hue.import.session", { key: "gen_ai.conversation.id", value }, start);
   }
+}
+
+/** When a span naming a conversation, added under the agent's root at `start`, must start for
+ * Hue's trace list to show its conversation when the agent's spans name none: the list shows the
+ * execution root's, else the earliest span's that names one, by millisecond, then span id. A tool
+ * span that names one in the root's millisecond, or before it, is passed by starting the added
+ * span in the millisecond before it. Undefined when the execution root names one: no added span
+ * changes what the list shows. */
+function sessionStart(views: readonly SpanView[], start: bigint): bigint | undefined {
+  const shown = shownSession(views);
+  if (!shown) return start;
+  if (shown.root) return undefined;
+  const first = shown.view.start / 1_000_000n;
+  if (start / 1_000_000n < first) return start;
+  return first > 0n ? first * 1_000_000n - 1n : undefined;
 }

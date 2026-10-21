@@ -8,9 +8,10 @@ import { isZipSignature } from "../traces-import-zip.js";
  * its own, a line that is not JSON named with its number instead of refusing the file.
  *
  * Damage is contained the same way: a gzip or zstd file that breaks off, or carries bytes after
- * its last member or frame, is read up to the break and the rest named; a line that is not UTF-8
- * is named and the other lines read; Python's bare `NaN` and `Infinity` are read as null and
- * named.
+ * its last member or frame, is read up to the break and the rest named, while a member or frame
+ * whose content fails its checksum or declared size leaves the file unread; a line that is not
+ * UTF-8 is named and the other lines read; Python's bare `NaN` and `Infinity` are read as null
+ * and named.
  */
 
 const GZIP = [0x1f, 0x8b];
@@ -29,9 +30,6 @@ const isZstd = (bytes: Uint8Array, at = 0) => startsWith(bytes, ZSTD, at) || ski
 const tooLarge = (error: unknown) =>
   error instanceof RangeError ||
   (error as NodeJS.ErrnoException | undefined)?.code === "ERR_BUFFER_TOO_LARGE";
-/** A zstd frame whose content decompressed whole but does not match its checksum. */
-export const checksumFailed = (error: unknown) =>
-  (error as NodeJS.ErrnoException | undefined)?.code === "ZSTD_error_checksum_wrong";
 
 /** The file's content with its compression undone, and what of it could not be read; or why
  * none of it can be. */
@@ -176,54 +174,85 @@ function frameEnd(bytes: Uint8Array, pos: number): number | "truncated" | "other
   return at > bytes.byteLength ? "truncated" : at;
 }
 
-/** The size the header of the zstd frame starting `bytes` declares its content to be, or undefined
- * when it declares none. */
-export function zstdContentSize(bytes: Uint8Array): number | undefined {
-  if (!startsWith(bytes, ZSTD) || bytes.byteLength < 5) return undefined;
-  const descriptor = bytes[4]!;
+/** A complete zstd frame without the checks of its content, its checksum and declared size, so
+ * that content can be read and measured. A single-segment frame's window is the size it declares,
+ * which is not trusted here: it is read with a window of `window` bytes, at least the 128 KiB a
+ * block may hold and at most the 128 MiB zstd reads by default. */
+function withoutChecks(frame: Uint8Array, window: number): Buffer {
+  const descriptor = frame[4]!;
   const singleSegment = (descriptor >> 5) & 1;
-  const size = [singleSegment, 2, 4, 8][descriptor >> 6]!;
-  const at = 5 + (singleSegment ? 0 : 1) + [0, 1, 2, 4][descriptor & 3]!;
-  if (!size || at + size > bytes.byteLength) return undefined;
-  let value = 0;
-  for (let index = size - 1; index >= 0; index--) value = value * 256 + bytes[at + index]!;
-  // A two-byte size counts from 256.
-  return size === 2 ? value + 256 : value;
+  const dictionaryAt = 5 + (singleSegment ? 0 : 1);
+  const dictionaryEnd = dictionaryAt + [0, 1, 2, 4][descriptor & 3]!;
+  const blocksAt = dictionaryEnd + [singleSegment, 2, 4, 8][descriptor >> 6]!;
+  const log = Math.min(27, Math.max(17, Math.ceil(Math.log2(window))));
+  return Buffer.concat([
+    frame.subarray(0, 4),
+    // No declared size, no single segment, no checksum; the reserved bit and dictionary kept.
+    Uint8Array.of(descriptor & 0x0b),
+    singleSegment ? Uint8Array.of((log - 10) << 3) : frame.subarray(5, 6),
+    frame.subarray(dictionaryAt, dictionaryEnd),
+    frame.subarray(blocksAt, (descriptor >> 2) & 1 ? -4 : frame.byteLength),
+  ]);
 }
 
-/** zstd, every frame of it: Node.js decompresses only a file's first frame on its own, so each
- * frame is found and decompressed in turn. Skippable frames are passed over; a frame that breaks
- * off, and bytes after the last frame, are named; a frame that fails its checksum leaves the file
- * unread, as a gzip member does. */
-function unzstd(bytes: Uint8Array, maxBytes: number): Decoded {
-  // zstd is in node:zlib from Node.js 22.15; earlier releases of the supported range lack it.
-  if (typeof zlib.zstdDecompressSync !== "function")
-    return {
-      unsupported:
-        "a zstd file, which this Node.js cannot decompress (Node.js 22.15 or later can); decompress it first",
-    };
+/** zstd content read frame by frame, each decompressed on its own: Node.js decompresses only the
+ * first frame of what it is given, Bun every one. */
+export type ZstdRead =
+  | {
+      kind: "read";
+      parts: Buffer[];
+      /** The bytes the frames read decompressed to. */
+      size: number;
+      frames: number;
+      /** Where the frames read end, and why reading stopped there when it stopped early: bytes
+       * that are no frame, a frame that breaks off, or one whose blocks do not decompress. */
+      end: number;
+      stop?: "trailing" | "truncated" | "damaged";
+    }
+  /** The frames decompress to more than the bound. */
+  | { kind: "oversized" }
+  /** A frame's blocks decompress whole to content its checksum or declared size does not match;
+   * `size` counts that content with the frames before it. */
+  | { kind: "mismatched"; size: number };
+
+/** Every frame of zstd content, skippable frames passed over, together decompressing to at most
+ * `maxBytes`. A frame that fails to decompress is read again without the checks of its content
+ * (see {@link withoutChecks}): content that then decompresses whole, and so does not match its
+ * checksum or declared size, is `mismatched`, as a gzip member that fails its trailer is
+ * damaged; blocks that still do not decompress stop the read there. */
+export function readZstd(bytes: Uint8Array, maxBytes: number): ZstdRead {
   const parts: Buffer[] = [];
   let size = 0;
   let pos = 0;
   let frames = 0;
-  let stop: "trailing" | "truncated" | "damaged" | undefined;
   while (pos < bytes.byteLength) {
     const end = frameEnd(bytes, pos);
-    if (end === "other" || end === "truncated") {
-      stop = end === "other" ? "trailing" : "truncated";
-      break;
-    }
+    if (end === "other" || end === "truncated")
+      return {
+        kind: "read",
+        parts,
+        size,
+        frames,
+        end: pos,
+        stop: end === "other" ? "trailing" : "truncated",
+      };
     if (!skippable(bytes, pos)) {
+      const frame = bytes.subarray(pos, end);
+      const budget = maxBytes - size;
       let output: Buffer;
       try {
-        output = zlib.zstdDecompressSync(bytes.subarray(pos, end), {
-          maxOutputLength: maxBytes - size,
-        });
+        output = zlib.zstdDecompressSync(frame, { maxOutputLength: budget });
       } catch (error) {
-        if (tooLarge(error)) return oversized("zstd", maxBytes);
-        if (checksumFailed(error)) return { unsupported: "a damaged zstd file" };
-        stop = "damaged";
-        break;
+        if (tooLarge(error)) return { kind: "oversized" };
+        try {
+          output = zlib.zstdDecompressSync(withoutChecks(frame, budget), {
+            maxOutputLength: budget,
+          });
+        } catch (unchecked) {
+          if (tooLarge(unchecked)) return { kind: "oversized" };
+          return { kind: "read", parts, size, frames, end: pos, stop: "damaged" };
+        }
+        return { kind: "mismatched", size: size + output.byteLength };
       }
       parts.push(output);
       size += output.byteLength;
@@ -231,6 +260,23 @@ function unzstd(bytes: Uint8Array, maxBytes: number): Decoded {
     }
     pos = end;
   }
+  return { kind: "read", parts, size, frames, end: pos };
+}
+
+/** zstd, every frame of it. Bytes after the last frame, a frame that breaks off and one whose
+ * blocks do not decompress are named, and what precedes them is read; a frame whose content does
+ * not match its checksum or declared size leaves the file unread, as a gzip member does. */
+function unzstd(bytes: Uint8Array, maxBytes: number): Decoded {
+  // zstd is in node:zlib from Node.js 22.15; earlier releases of the supported range lack it.
+  if (typeof zlib.zstdDecompressSync !== "function")
+    return {
+      unsupported:
+        "a zstd file, which this Node.js cannot decompress (Node.js 22.15 or later can); decompress it first",
+    };
+  const read = readZstd(bytes, maxBytes);
+  if (read.kind === "oversized") return oversized("zstd", maxBytes);
+  if (read.kind === "mismatched") return { unsupported: "a damaged zstd file" };
+  const { parts, frames, stop, end: pos } = read;
   if (!frames)
     return {
       unsupported:

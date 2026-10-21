@@ -601,6 +601,11 @@ describe("MLflow traces", () => {
     expect(await identity("--user-key", "/info/trace_metadata/app.customer")).toEqual({
       user: "metadata-customer",
     });
+    // So does a trace whose top span's parent is outside the export: that span is its root.
+    trace.data.spans[0].parent_span_id = Buffer.from("1122334455667788", "hex").toString("base64");
+    expect(await identity("--user-key", "/info/tags/app.customer")).toEqual({
+      user: "tag-customer",
+    });
   });
 });
 

@@ -26,10 +26,12 @@ import { nanosFrom, readRecords, type SpanRow } from "./rows.js";
  * assistant turn (consecutive assistant messages or items are one turn) with the conversation so
  * far as its input, and an `execute_tool` span per tool call, paired with its result by
  * `tool_call_id`, `call_id` or `tool_use_id`: a result answers one call, the first unanswered one
- * under its id in the latest message that made one. A logged answer (a response object, or
- * `output` beside a request's `input`) is the last turn and carries the token usage the source
- * records; a request logged without one is the conversation it sent, with no reply. A transcript
- * whose turns together repeat more than 64 MiB of conversation is refused.
+ * under its id in the latest turn that made one, and fails it when the result says so (Anthropic
+ * `is_error`). The agent's reply is a logged answer (a response object, or `output` beside a
+ * request's `input`), which is the last turn and carries the token usage the source records, else
+ * the last turn when the conversation ends with it. A conversation that goes on past its last
+ * turn is a request logged without its reply: the agent's input is all of it, and it has no
+ * reply. A transcript whose turns together repeat more than 64 MiB of conversation is refused.
  *
  * - Ids: a response's own id (`msg_…`, `resp_…`) names the trace; otherwise the trace id derives
  *   from the SHA-256 of the value's canonical JSON, so the same transcript is the same trace.
@@ -144,7 +146,7 @@ export function requestContent(body: JsonValue | undefined): JsonValue | undefin
   if (!fields) return body;
   if (Array.isArray(fields.messages)) return chatItems(fields.messages);
   if (typeof fields.input === "string") return [{ role: "user", content: fields.input }];
-  if (isItemList(fields.input)) return chatItems(fields.input);
+  if (isInputList(fields.input)) return chatItems(fields.input);
   return body;
 }
 
@@ -203,8 +205,6 @@ interface Transcript {
   tools?: JsonValue;
   user?: string;
   session?: string;
-  /** Tool call ids whose result the source marks as an error (Anthropic `is_error`). */
-  failed?: ReadonlySet<string>;
 }
 
 interface Turn {
@@ -235,6 +235,14 @@ function blockOf(raw: JsonValue, message: GenAiMessage, part: number): JsonValue
   return blocks.length === message.parts.length ? blocks[part]! : message.parts[part]!;
 }
 
+/** Whether the source marks a tool result as failed: an Anthropic `tool_result` block with
+ * `is_error`, whose message's content blocks are its parts in order. */
+function failedResult(raw: JsonValue, part: number): boolean {
+  const content = object(raw)?.content;
+  const block = Array.isArray(content) ? object(content[part]) : undefined;
+  return block?.type === "tool_result" && block.is_error === true;
+}
+
 /** The trace's rows: the agent, a chat span per turn and a tool span per call. */
 function transcriptRows(traceKey: string, transcript: Transcript): SpanRow[] {
   // Spans carry the items in shapes the emitter reads; records keep them as the source wrote them.
@@ -261,37 +269,47 @@ function transcriptRows(traceKey: string, transcript: Transcript): SpanRow[] {
       `a transcript whose turns together repeat more than ${MAX_REPEATED_BYTES} bytes of conversation`,
     );
   // Each tool result answers a call made before it under its id: the first unanswered one of the
-  // latest message that made one. No result answers two calls, and an id a later turn uses again
-  // is that turn's. Results by the call's message and part, with the block that holds them.
-  const results = new Map<string, { response: JsonValue; block: JsonValue }>();
-  const calls = new Map<string, { message: number; parts: number[]; answered: number }>();
+  // latest turn that made one, a turn's calls in the order made, however many of its messages or
+  // items hold them. No result answers two calls, and an id a later turn uses again is that
+  // turn's. Results by the call's message and part, with the block that holds them.
+  const turnOf = new Map<number, number>();
+  for (const [number, turn] of turns.entries())
+    for (let index = turn.at; index < turn.end; index++) turnOf.set(index, number);
+  const results = new Map<string, { response: JsonValue; block: JsonValue; failed: boolean }>();
+  const calls = new Map<string, { turn: number; slots: string[]; answered: number }>();
   for (const [index, message] of history.entries())
     for (const [at, part] of message.parts.entries()) {
       if (typeof part.id !== "string") continue;
       const made = calls.get(part.id);
-      if (part.type === "tool_call") {
-        if (made?.message === index) made.parts.push(at);
-        else calls.set(part.id, { message: index, parts: [at], answered: 0 });
-      } else if (part.type === "tool_call_response" && made && made.answered < made.parts.length)
-        results.set(`${made.message}.${made.parts[made.answered++]}`, {
+      const turn = turnOf.get(index);
+      if (part.type === "tool_call" && turn !== undefined) {
+        if (made?.turn === turn) made.slots.push(`${index}.${at}`);
+        else calls.set(part.id, { turn, slots: [`${index}.${at}`], answered: 0 });
+      } else if (part.type === "tool_call_response" && made && made.answered < made.slots.length)
+        results.set(made.slots[made.answered++]!, {
           response: part.response ?? null,
           block: blockOf(raw[index]!, message, at),
+          failed: failedResult(raw[index]!, at),
         });
     }
 
   const model = transcript.model ?? transcript.answer?.model;
   const system = transcript.system;
-  const firstTurn = turns[0]?.at ?? history.length;
   const last = turns.at(-1);
-  const lastOutput = answerItems ?? (last ? items.slice(last.at, last.end) : undefined);
+  // The reply is the logged answer, else the last turn when the conversation ends with it. A
+  // conversation that goes on past its last turn, or has none, is a request logged without its
+  // reply: the agent's input is all of it, so its last message is the request.
+  const replied = answerItems !== undefined || last?.end === history.length;
+  const input = replied ? items.slice(0, turns[0]?.at ?? history.length) : items;
+  const reply = answerItems ?? (replied && last ? items.slice(last.at, last.end) : undefined);
   const rows: SpanRow[] = [
     {
       traceKey,
       spanKey: "agent",
       name: "invoke_agent",
       kind: "agent",
-      ...(firstTurn > 0 ? { input: items.slice(0, firstTurn) } : {}),
-      ...(lastOutput?.length ? { output: lastOutput } : {}),
+      ...(input.length ? { input } : {}),
+      ...(reply?.length ? { output: reply } : {}),
       ...(system !== undefined ? { systemInstructions: system } : {}),
       ...(transcript.user !== undefined ? { user: transcript.user } : {}),
       ...(transcript.session !== undefined ? { session: transcript.session } : {}),
@@ -350,7 +368,7 @@ function transcriptRows(traceKey: string, transcript: Transcript): SpanRow[] {
             arguments: part.arguments ?? null,
             ...(result ? { result: result.response } : {}),
           },
-          ...(id !== undefined && transcript.failed?.has(id) ? { error: {} } : {}),
+          ...(result?.failed ? { error: {} } : {}),
           record: result?.block ?? blockOf(output.raw[index]!, message, at),
           sequence: sequence++,
         });
@@ -510,19 +528,6 @@ const isAnthropicResponse = (value: unknown): boolean => {
   );
 };
 
-/** Tool use ids whose result block says `is_error`. */
-function failedToolUses(messages: readonly JsonValue[]): Set<string> {
-  const failed = new Set<string>();
-  for (const message of messages) {
-    const content = object(message)?.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content.map(object))
-      if (block?.type === "tool_result" && block.is_error === true && text(block.tool_use_id))
-        failed.add(text(block.tool_use_id)!);
-  }
-  return failed;
-}
-
 export const anthropicMessages: ImportAdapter = {
   id: "anthropic_messages",
   manifestFormat: "otlp_json",
@@ -555,7 +560,6 @@ export const anthropicMessages: ImportAdapter = {
           ...(system !== undefined ? { system } : {}),
           ...(message.tools !== undefined ? { tools: message.tools } : {}),
           ...(user !== undefined ? { user } : {}),
-          failed: failedToolUses(messages),
         };
       },
       (fields) => (isAnthropicResponse(fields) ? text(fields.id) : undefined),
@@ -610,6 +614,10 @@ const RESPONSES_REQUEST_FIELDS = new Set([
   "usage",
 ]);
 
+/** A request's `output` that holds no answer: absent, null or an empty list. */
+const noOutput = (output: JsonValue | undefined) =>
+  output === undefined || output === null || (Array.isArray(output) && !output.length);
+
 /** A request (`input`: text, or items and messages), with the answer beside it (`output`) when
  * it was logged too. */
 const isResponsesRequest = (value: unknown): boolean => {
@@ -618,7 +626,7 @@ const isResponsesRequest = (value: unknown): boolean => {
     return false;
   return (
     (typeof fields.input === "string" || isInputList(fields.input)) &&
-    (fields.output === undefined || fields.output === null || isItemList(fields.output))
+    (noOutput(fields.output) || isItemList(fields.output))
   );
 };
 
@@ -642,7 +650,12 @@ export const openaiResponses: ImportAdapter = {
         const system = systemParts(fields.instructions);
         const failed = fields.status === "failed";
         const error = object(fields.error);
-        const output = Array.isArray(fields.output) ? fields.output : undefined;
+        // A response object's output is its answer, an empty one too (a failed response); a
+        // request's empty output is no answer.
+        const output =
+          Array.isArray(fields.output) && (isResponseObject(fields) || !noOutput(fields.output))
+            ? fields.output
+            : undefined;
         const input =
           fields.input === undefined || fields.input === null
             ? []

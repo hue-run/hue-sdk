@@ -13,16 +13,24 @@ refuses to publish a version without a matching entry below.
 #### Fixed
 
 - `hue traces import prepare` reads an OpenAI Responses request logged without its response, such
-  as `{"model": "gpt-4.1-mini", "input": "Hello"}`, and one whose `input` holds only untyped
-  `{role, content}` messages; both were skipped as no recognized format. A request logged without
-  its response becomes a trace of the conversation it sent, with no reply and no model call.
+  as `{"model": "gpt-4.1-mini", "input": "Hello"}` or one with an empty `output`, and one whose
+  `input` holds only untyped `{role, content}` messages; these were skipped as no recognized
+  format, and a Helicone request body with such an `input` was kept as raw JSON.
+- **Wire** A chat transcript (OpenAI chat or Responses, Anthropic Messages) that goes on past its
+  last assistant turn, as a request logged without its response does, has the whole conversation
+  as its agent's input and no reply. Its last assistant turn was read as the reply, and the
+  messages after it, the request among them, were on no span. No model call stands for the
+  response the source lacks.
 - **Wire** A dotted `--user-key` or `--session-key` finds a key an MLflow trace records in a span's
   own attributes or in the trace's tags, not only in its metadata: a span's attributes first, then
-  the trace's metadata, then its tags.
-- A zstd file with a frame that fails its checksum is not read, as a gzip file with a member that
-  fails its checksum is not; the frames before it were read and the damage only noted. A zstd file
-  that breaks off is still read up to the break. A zstd message of a length-prefixed protobuf file
-  that fails its checksum counts what it decompressed to against the file's 64 MiB bound.
+  the trace's metadata, then its tags. A JSONPath or JSON Pointer reads the trace's `info` on each
+  of its root spans, a span whose parent is outside the export included.
+- A zstd file with a frame whose content fails its checksum, or is longer or shorter than the frame
+  declares, is not read, as a gzip file with a member that fails its trailer is not; the frames
+  before it were read and the damage only noted. A zstd file that breaks off, or whose frame does
+  not decompress, is still read up to the damage. Each zstd message of a length-prefixed protobuf
+  file is read frame by frame, where Node.js read only its first frame, and a damaged one counts
+  what its frames decompressed to against the file's 64 MiB bound.
 - A gzip file that breaks off inside a member's 8-byte trailer is not read when the CRC-32 it holds
   does not match the member's data; it was read up to the break.
 - **Wire** Once `--user-key` decides a converted trace's user, or that it has none, no span's
@@ -30,20 +38,30 @@ refuses to publish a version without a matching entry below.
   Langfuse `metadata.resourceAttributes`. A root that records `user.account_uuid` gets the key's
   user as `enduser.id`, since Hue passes over `user.id` beside it.
 - A span that a binary OTLP file and an OTLP/JSON or Jaeger API v3 file both hold is read once
-  when the copies differ only in encoding: key order, an int64 as a number or decimal text, an id
-  as hex or base64, or a field at its default written or left out. Its trace was refused with
-  `span … appears with different content`. The copy kept does not depend on the order the files
-  are read in.
+  when the copies differ only in encoding: key order, an int64 or a uint32 as a number or decimal
+  text, an enum by name or number, a double as a number or text, bytes or an id as hex or as
+  standard or URL-safe base64, padded or not, or a field at its default written or left out. Its
+  trace was refused with `span … appears with different content`. The copy kept does not depend on
+  the order the files are read in.
+- **Wire** A binary OTLP double that is NaN or infinite is written as OTLP/JSON names it (`"NaN"`,
+  `"Infinity"`, `"-Infinity"`), not as `null`. A trace or span id written as URL-safe base64 is read
+  as the id it encodes; it was mapped to an id derived from its text.
 - **Wire** Each `execute_tool` span of a chat transcript keeps the block that holds its result,
   else its call, as `hue.import.source_record` rather than the whole message, so a message of many
   parallel calls is not copied into every call's span. Each result answers one call, the first
-  unanswered one under its id in the latest message that made one; calls that shared an id all
-  took its first result.
+  unanswered one under its id in the latest turn that made one, however many items of the turn
+  hold its calls, and an Anthropic result's `is_error` fails only the call it answers. Calls that
+  shared an id all took its first result and its error.
 - **Wire** The manifest declares a trace's conversation as Hue's trace list shows it (the root
   span's, else the earliest span's that names one), and none when a tool span or a span beneath one
-  names it or the id is too long for the manifest. It could name a tool's conversation, or another
-  span's in place of a long id. `--session-key` adds its conversation to a trace whose agent spans
-  name none.
+  names it, or when the id is longer than 2,048 bytes of UTF-8, which Hue does not show as it is.
+  It could name a tool's conversation, or another span's in place of a long id. A span whose
+  parent is outside the trace is its root when it runs an agent by any name Hue reads, an agent
+  step or MLflow's `AGENT` among them, and a tool span is one any instrumentation convention Hue
+  reads takes as a call (MLflow, Braintrust, Genkit, LangSmith, Spring AI, Claude Code and
+  VoltAgent tool spans too), for the owner as for the conversation. `--session-key` adds its
+  conversation to a trace whose agent spans name none, starting before any tool span that names
+  one so that the trace list shows it.
 
 ### [0.22.0] - 2026-10-21
 
