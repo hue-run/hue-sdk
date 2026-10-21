@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Agent, ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { gzip } from "node:zlib";
+import { waitUntil } from "@vercel/functions";
 import type { Attributes, Span as ApiSpan } from "@opentelemetry/api";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import {
@@ -99,9 +100,16 @@ type Response = {
 /** A finished span or emitted log record as the OpenTelemetry SDK hands it to a processor. */
 export type RecordValue = ReadableSpan | ReadableLogRecord;
 
+type DeliveryCohort = {
+  pending: number;
+  promise: Promise<void>;
+  resolve: () => void;
+};
+
 /** The transport surface the exporters report through; kept narrow so nothing else depends on it. */
 interface ExportSink {
   readonly options: ReturnType<typeof validateOptions>;
+  exporting(records: RecordValue[]): void;
   finish(signal: Signal, records: RecordValue[]): void;
   acceptedRecords(signal: Signal, count: number): void;
   issue(
@@ -330,6 +338,9 @@ export class HueTransport {
   private failed = { traces: 0, logs: 0 };
   private spans = new Map<ReadableSpan, number>();
   private logs = new Map<ReadableLogRecord, number>();
+  // A cohort closes when export starts, so later requests cannot extend its lifetime.
+  private deliveryCohort?: DeliveryCohort;
+  private deliveries = new WeakMap<RecordValue, DeliveryCohort>();
   private pendingBytes = 0;
   private dropped = { traces: 0, logs: 0 };
   /** Records of each trace the SDK never sent (dropped from the queue, refused as invalid or
@@ -507,6 +518,7 @@ export class HueTransport {
           this.protectMedia(admitted);
           this.countEnded(admitted);
           spans.onEnd(admitted);
+          this.protectDelivery(admitted);
         } catch {
           if (admitted) this.finish("traces", [admitted]);
           else this.releaseMedia(span);
@@ -564,6 +576,7 @@ export class HueTransport {
           admitted = queued as ReadableLogRecord;
           this.admitLogParts(log, queued);
           logs.onEmit(queued as Parameters<LogRecordProcessor["onEmit"]>[0]);
+          this.protectDelivery(admitted);
         } catch {
           if (admitted) this.finish("logs", [admitted]);
           this.issue(
@@ -675,6 +688,14 @@ export class HueTransport {
           0,
           "Unresolved resource attributes omitted from the telemetry snapshot",
         );
+      if (!advisory) {
+        const cohort = (this.deliveryCohort ??= {
+          pending: 0,
+          ...Promise.withResolvers<void>(),
+        });
+        cohort.pending++;
+        this.deliveries.set(snapshot.record, cohort);
+      }
       return snapshot.record;
     } catch {
       if (advisory) return undefined;
@@ -688,6 +709,23 @@ export class HueTransport {
       );
       return undefined;
     }
+  }
+
+  /** Register in the caller's request before it can return; outside Vercel this is a no-op. */
+  private protectDelivery(record: RecordValue): void {
+    const cohort = this.deliveries.get(record);
+    if (!cohort) return;
+    try {
+      waitUntil(cohort.promise);
+    } catch {
+      // A host hook must never undo admission or change the application's result.
+    }
+  }
+
+  /** @internal Seal the batch's cohort before export can yield to another request. */
+  exporting(records: RecordValue[]): void {
+    if (records.some((record) => this.deliveries.get(record) === this.deliveryCohort))
+      this.deliveryCohort = undefined;
   }
 
   private track(span: ReadableSpan): void {
@@ -804,6 +842,16 @@ export class HueTransport {
   /** @internal Exporter callback: releases queued records after an export attempt settles. */
   finish(signal: Signal, records: RecordValue[]): void {
     for (const record of records) {
+      const cohort = this.deliveries.get(record);
+      if (cohort) {
+        this.deliveries.delete(record);
+        if (--cohort.pending === 0) {
+          if (this.deliveryCohort === cohort) this.deliveryCohort = undefined;
+          // Export registered its upload reports before finishing these records. A snapshot
+          // includes their final accounting without following uploads from later requests.
+          void this.drainUploads().then(cohort.resolve, cohort.resolve);
+        }
+      }
       this.releaseMedia(record);
       this.logMedia.delete(record);
       const pending = signal === "traces" ? this.spans : this.logs;
@@ -1700,6 +1748,7 @@ class ReportingExporter<T extends RecordValue> {
   ) {}
 
   export(records: T[], callback: (result: ExportResult) => void): void {
+    this.transport.exporting(records);
     const work = this.exportRecords(records)
       .then(
         () => callback({ code: ExportResultCode.SUCCESS }),

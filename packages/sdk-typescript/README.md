@@ -552,8 +552,8 @@ the Langfuse project's own keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, a
 `HUE_API_KEY`:
 
 ```sh
-npx -y @hue-run/sdk@0.22.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.22.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.23.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.23.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 - It reads Langfuse Cloud and self-hosted v4 through the Observations API v2, and self-hosted v3
@@ -1105,6 +1105,16 @@ drain's uploads. `flushSafe()` joins a drain still sending its records and other
 own. Stop request production
 before shutdown so late spans cannot race it. A client does not own instrumented
 operations still running in the application.
+
+In Vercel Functions, the TypeScript SDK automatically registers admitted spans and logs with
+[`waitUntil`](https://vercel.com/docs/functions/functions-api-reference/vercel-functions-package#waituntil).
+The response or Workflow step can return while the existing batches and their media uploads finish
+in the background, within the function's lifetime limit. You can remove a per-step
+`await hue.flushSafe()` when its purpose is to prevent the function freezing before delivery.
+Keep an explicit flush when you need its acknowledgement report before continuing. Background
+delivery preserves capture, redaction, batching and failure reports; it never flushes or shuts down
+application-owned providers. In other hosts, keep the host's lifetime hook or await a flush before
+a short-lived process exits.
 
 ## Live spans
 

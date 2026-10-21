@@ -82,6 +82,7 @@ if (!values.archive && !values["registry-version"]) {
   // stripInternal must keep the transport's @internal mutators out of the published declarations.
   const transportTypes = readFileSync(join(staging, "dist", "transport.d.ts"), "utf8");
   for (const member of [
+    "exporting",
     "finish",
     "acceptedRecords",
     "issue",
@@ -968,6 +969,7 @@ const installedPackageTests = [
   "sdk.test.ts",
   "tool-endpoint.test.ts",
   "live-spans.test.ts",
+  "lifetime.test.ts",
   "evals.test.ts",
   "scorer-publication.test.ts",
   "attempt.test.ts",
