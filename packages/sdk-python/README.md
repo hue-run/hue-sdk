@@ -450,8 +450,10 @@ a `threading.Event`; setting it ends the wait and closes active HTTP reads.
 
 Automatic capture requires a compatible service. Set the complete user ID
 on the root request through `hue.context(user_id=...)`, then attach explicit account metadata to
-each tool span. Configure faithful production provenance on the application's OpenTelemetry
-resource (`deployment.environment.name=production`); eval and simulation traffic stay excluded.
+each tool span. Declare the application's environment on its OpenTelemetry resource with
+`deployment.environment.name`. Missing or empty environment declarations and the exact value
+`production` can contribute to a user's World. Any explicit nonproduction declaration prevents
+capture, even if another declaration says `production`. Eval and simulation traffic stay excluded.
 
 ```python
 with hue.context(user_id="user-123"):
