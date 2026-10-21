@@ -1,0 +1,211 @@
+{
+ "resourceSpans": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "support-agent"
+      }
+     },
+     {
+      "key": "deployment.environment.name",
+      "value": {
+       "stringValue": "production"
+      }
+     }
+    ]
+   },
+   "scopeSpans": [
+    {
+     "scope": {
+      "name": "support-agent",
+      "version": "1.4.0"
+     },
+     "spans": [
+      {
+       "traceId": "3c5e7f9081a2b3c4d5e6f708192a3b4c",
+       "spanId": "0f1e2d3c4b5a6978",
+       "name": "invoke_agent support-agent",
+       "kind": 2,
+       "startTimeUnixNano": "1792504991402000123",
+       "endTimeUnixNano": "1792505003877000456",
+       "attributes": [
+        {
+         "key": "gen_ai.operation.name",
+         "value": {
+          "stringValue": "invoke_agent"
+         }
+        },
+        {
+         "key": "user.id",
+         "value": {
+          "stringValue": "user-42"
+         }
+        },
+        {
+         "key": "gen_ai.conversation.id",
+         "value": {
+          "stringValue": "conversation-7"
+         }
+        },
+        {
+         "key": "app.flags",
+         "value": {
+          "arrayValue": {
+           "values": [
+            {
+             "stringValue": "beta"
+            },
+            {
+             "boolValue": true
+            },
+            {
+             "doubleValue": 0.5
+            }
+           ]
+          }
+         }
+        },
+        {
+         "key": "app.request",
+         "value": {
+          "kvlistValue": {
+           "values": [
+            {
+             "key": "retries",
+             "value": {
+              "intValue": "-1"
+             }
+            },
+            {
+             "key": "raw",
+             "value": {
+              "bytesValue": "AAEC"
+             }
+            }
+           ]
+          }
+         }
+        }
+       ],
+       "status": {}
+      },
+      {
+       "traceId": "3c5e7f9081a2b3c4d5e6f708192a3b4c",
+       "spanId": "1e2d3c4b5a697887",
+       "parentSpanId": "0f1e2d3c4b5a6978",
+       "name": "chat gpt-5",
+       "kind": 3,
+       "startTimeUnixNano": "1792504992010000000",
+       "endTimeUnixNano": "1792504995233000000",
+       "attributes": [
+        {
+         "key": "gen_ai.operation.name",
+         "value": {
+          "stringValue": "chat"
+         }
+        },
+        {
+         "key": "gen_ai.request.model",
+         "value": {
+          "stringValue": "gpt-5"
+         }
+        },
+        {
+         "key": "gen_ai.input.messages",
+         "value": {
+          "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Where is order 12?\"}]}]"
+         }
+        },
+        {
+         "key": "gen_ai.usage.input_tokens",
+         "value": {
+          "intValue": "1834"
+         }
+        },
+        {
+         "key": "gen_ai.usage.output_tokens",
+         "value": {
+          "intValue": "96"
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1792504995200000000",
+         "name": "gen_ai.choice",
+         "attributes": [
+          {
+           "key": "finish_reason",
+           "value": {
+            "stringValue": "tool_calls"
+           }
+          }
+         ]
+        }
+       ],
+       "status": {
+        "code": 1
+       }
+      },
+      {
+       "traceId": "3c5e7f9081a2b3c4d5e6f708192a3b4c",
+       "spanId": "2d3c4b5a69788796",
+       "parentSpanId": "0f1e2d3c4b5a6978",
+       "name": "execute_tool lookup_order",
+       "kind": 1,
+       "startTimeUnixNano": "1792504995300000000",
+       "endTimeUnixNano": "1792504995900000000",
+       "attributes": [
+        {
+         "key": "gen_ai.operation.name",
+         "value": {
+          "stringValue": "execute_tool"
+         }
+        },
+        {
+         "key": "gen_ai.tool.name",
+         "value": {
+          "stringValue": "lookup_order"
+         }
+        },
+        {
+         "key": "gen_ai.tool.call.arguments",
+         "value": {
+          "stringValue": "{\"id\":12,\"user_id\":\"account-the-tool-touched\"}"
+         }
+        },
+        {
+         "key": "user.id",
+         "value": {
+          "stringValue": "account-the-tool-touched"
+         }
+        }
+       ],
+       "links": [
+        {
+         "traceId": "00000000000000000000000000c0ffee",
+         "spanId": "00000000000000aa",
+         "attributes": [
+          {
+           "key": "link.kind",
+           "value": {
+            "stringValue": "retry"
+           }
+          }
+         ]
+        }
+       ],
+       "status": {
+        "code": 2,
+        "message": "carrier timeout"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

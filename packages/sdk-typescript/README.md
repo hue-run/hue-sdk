@@ -581,9 +581,11 @@ mapping, media handling, limits and exit codes.
 `hue traces import` brings exports you already hold into Hue in two steps, with no project key.
 `prepare` converts the bundle on your machine and sends nothing; a Hue MCP connection authorizes
 the delivery with `prepare_trace_import`; `upload` delivers it with that authorization. Sources
-are files, directories or ZIP archives of OTLP/JSON trace exports, Langfuse exports (API answers,
-UI downloads and blob-storage files), text ATIF v1.7 and v1.8 exports and Braintrust span rows, as
-JSON documents, arrays or JSON Lines, gzip or zstd compressed or not, recognized by content:
+are files, directories or ZIP archives of OTLP/JSON and OTLP protobuf trace exports (OpenTelemetry
+Collector file exporter output included), Langfuse exports (API answers, UI downloads and
+blob-storage files), text ATIF v1.7 and v1.8 exports, Braintrust span rows, Jaeger and Zipkin
+traces, Arize Phoenix span exports and Datadog LLM Observability spans, as JSON documents, arrays
+or JSON Lines, gzip or zstd compressed or not, recognized by content:
 
 ```sh
 npx -y @hue-run/sdk@latest traces import prepare ./exports --out ./exports.hue-import --json

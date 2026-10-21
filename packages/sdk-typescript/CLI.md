@@ -506,9 +506,13 @@ stopped.
 `hue traces import` brings historical traces into Hue from exports you already hold: OTLP/JSON
 trace exports (a `{"resourceSpans": […]}` document, a list of them, or one per line), Langfuse
 exports (public API answers, UI downloads and blob-storage files), text ATIF v1.7 and
-v1.8 exports, embedded subagents included, and Braintrust span rows (a UI download, the fetch or
-query API's answer, `bt sync pull` JSON Lines or a cloud-storage export). It needs no project key. `prepare` runs on the machine
-that holds the exports and sends nothing; a Hue MCP connection then authorizes the delivery
+v1.8 exports, embedded subagents included, Braintrust span rows (a UI download, the fetch or
+query API's answer, `bt sync pull` JSON Lines or a cloud-storage export), binary OTLP (a protobuf
+`ExportTraceServiceRequest`, or OpenTelemetry Collector file exporter output), Jaeger (the API v3
+answer or stream, and the UI's or `/api/traces` JSON), Zipkin v2 JSON, Arize Phoenix span exports
+(`/spans/otlpv1` and `/spans`) and Datadog LLM Observability spans (the export API's answer). It
+needs no project key. `prepare` runs on the machine that holds the exports and sends nothing; a
+Hue MCP connection then authorizes the delivery
 (`prepare_trace_import`); `upload` delivers the bundle with that authorization, and
 `get_trace_import` reports what arrived.
 
@@ -564,12 +568,31 @@ token usage, a `tool` row a tool call with its name, call id, arguments and resu
 `metrics` (or `created`), the error as an error status and the whole row as
 `hue.import.source_record`; `log` rows are events of the span they belong to, rows exported more
 than once keep the highest `_xact_id`, and an experiment's rows are declared evaluation traffic.
-Chat content in the common shapes (OpenAI chat messages and choices, OpenAI Responses items,
-Anthropic content blocks, LangChain messages, plain strings) is written as GenAI message parts; any
-other content is kept as `input.value` and `output.value`. These traces are labelled
-`hue.import.format` `braintrust` and declared `otlp_json` in the manifest's `source.formats`, the
-encoding Hue receives. A vendor id that is not an OpenTelemetry id is mapped by SHA-256 with the
-original kept, and a parent the export does not hold leaves the span a root of its trace, the
+A Datadog LLM Observability span becomes one span likewise: its `span_kind` the operation, its
+messages (with their tool calls and tool results) GenAI message parts, its `metrics` token usage, a
+tool span's input and output values its arguments and result, `session_id` the conversation, a
+`user_id` (or `usr.id`) tag the end user, the `env` tag the deployment environment and the
+`service` tag the service. Its `start_ns` and `duration` are nanoseconds; a `start_ns` too small to
+be nanoseconds is read as milliseconds or microseconds by its size and the rule named
+(`start_ns_read_as_ms`, `start_ns_read_as_us`). Chat content in the common shapes (OpenAI chat
+messages and choices, OpenAI Responses items, Anthropic content blocks, LangChain messages, plain
+strings) is written as GenAI message parts; any other content is kept as `input.value` and
+`output.value`. These traces are labelled `hue.import.format` with their format (`braintrust`,
+`datadog_llmobs`) and declared `otlp_json` in the manifest's `source.formats`, the encoding Hue
+receives. Binary OTLP is read as OTLP/JSON is and its spans kept as recorded: one protobuf request
+per file, or the Collector file exporter's length-prefixed messages (`format: proto`, or
+`compression: zstd` around protobuf or JSON), whose message number the report gives as its `line`;
+Jaeger's API v3 answers and NDJSON streams are OTLP/JSON inside `{"result": …}` and are kept as
+recorded too. Jaeger UI JSON, Zipkin v2 and Phoenix spans are written as the OTLP spans they were,
+as the OpenTelemetry Collector converts Jaeger and Zipkin spans: attributes kept under their own
+names (Phoenix's OpenInference attributes among them), the process or local endpoint as the
+resource, the kind, status, scope, events and links from the tags, references and annotations Jaeger
+and Zipkin write them as, and the source span whole as `hue.import.source_record`, labelled
+`jaeger`, `zipkin`, `phoenix_otlp` or `phoenix_spans`. A 64-bit Jaeger or Zipkin trace id is
+zero-padded to 128 bits as the Collector pads it, the original kept, and a Zipkin server span that
+shares its client's id becomes the client's child under an id derived from it. A vendor id that
+is not an OpenTelemetry id is mapped by SHA-256 with the original kept, and a parent the export
+does not hold leaves the span a root of its trace, the
 original kept as `hue.import.original_parent_span_id`. An instant the source did not record is
 filled in by a fixed rule named on the span (`hue.import.timing`) and counted in the report: a
 span without a start starts at its end, else with its parent, else with the trace's earliest
@@ -591,9 +614,10 @@ over. For an export whose user sits under a key of its own, `--user-key <key>` n
 key, looked up as an attribute of each span and then in its source record and metadata, or a JSON
 path into the source record (`$.metadata.customer.id` or `/metadata/customer/id`); `--session-key`
 names the conversation the same way. A tool span's key is never read. For a row format such as
-Braintrust the key's value becomes the root's `user.id` (or `gen_ai.conversation.id`). A trace kept
-as recorded (OTLP, Langfuse, ATIF) that names no owner gains one child span of its earliest root,
-`hue.import.user` with the single attribute `user.id` (or `hue.import.session` with
+Braintrust or Datadog the key's value becomes the root's `user.id` (or `gen_ai.conversation.id`). A
+trace kept as recorded or converted span for span (OTLP, Langfuse, ATIF, Jaeger, Zipkin, Phoenix)
+that names no owner gains one child span of its earliest root, `hue.import.user` with the single
+attribute `user.id` (or `hue.import.session` with
 `gen_ai.conversation.id`), so its recorded spans keep their bytes and a trace also sent live does
 not conflict; an owner the spans already name is kept.
 

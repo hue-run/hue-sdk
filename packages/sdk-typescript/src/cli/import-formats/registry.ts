@@ -3,6 +3,7 @@ import type { ImportAdapter } from "./adapter.js";
 import { atif } from "./atif.js";
 import { braintrust } from "./braintrust.js";
 import { langfuse, langfuseObservations } from "./langfuse.js";
+import { otelFamilyAdapters } from "./otel-family.js";
 import { otlpJson } from "./otlp.js";
 
 /**
@@ -40,6 +41,7 @@ export const importAdapters: readonly ImportAdapter[] = [
   langfuse,
   atif,
   braintrust,
+  ...otelFamilyAdapters,
 ];
 
 /** The format that claims a value, the first in registry order. */
