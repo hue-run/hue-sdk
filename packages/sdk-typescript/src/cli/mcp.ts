@@ -60,7 +60,7 @@ const CLIENT_LABELS: Record<ClientId, string> = {
 };
 type AuthMode = "key" | "oauth";
 /** Clients whose browser sign-in with Hue works against the deployed server. */
-const OAUTH_CLIENTS: readonly ClientId[] = ["claude-code", "codex", "conductor"];
+const OAUTH_CLIENTS: readonly ClientId[] = ["claude-code", "codex", "conductor", "cursor"];
 /** Toolset names Hue's MCP server accepts: `all`, its catalog groups and its curated profiles. */
 export const MCP_TOOLSETS = [
   "all",
@@ -113,11 +113,12 @@ is never written.
 
 Options:
   --client NAME   Coding agent to configure (required)
-  --auth MODE     oauth: URL only, sign in with Hue in the client (claude-code, codex and
-                  conductor; their default)
+  --auth MODE     oauth: URL only, sign in with Hue in the client (claude-code, codex,
+                  conductor and cursor; their default)
                   key: reference ${ENV_VAR} (the default for the other clients and with
-                  --read-only). Without --auth, claude-code and codex keep the choice of
-                  an existing entry, and use a key for a new one when ${ENV_VAR} is set
+                  --read-only). Without --auth, claude-code, codex and cursor keep the
+                  choice of an existing entry, and use a key for a new one when
+                  ${ENV_VAR} is set
   --read-only     Add ?read_only=true to a key configuration's URL so write tools are
                   hidden; selects a key without --auth. A sign-in connection has Read and
                   write access; use a Read key for read-only
@@ -246,9 +247,12 @@ export function renderMcpSignInSnippets(url: string, serverName = SERVER_NAME) {
     project ? `"${PROJECT_HEADER}" = "${project}"` : null,
   ].filter((value): value is string => value !== null);
   const claudeCodeServer = { type: "http", url };
+  const cursorServer = { url };
   return {
     claudeCodeServer,
     claudeCodeProjectJson: json({ mcpServers: { [serverName]: claudeCodeServer } }),
+    cursorServer,
+    cursorJson: json({ mcpServers: { [serverName]: cursorServer } }),
     claudeCodeCli: {
       args: ["mcp", "add", "--transport", "http", "--scope", "user", serverName, url],
       display: `claude mcp add --transport http --scope user ${serverName} ${shellWord(url)}`,
@@ -772,14 +776,18 @@ interface ExistingEntry {
 const hasAuthorization = (headers: unknown) =>
   isRecord(headers) && Object.keys(headers).some((name) => name.toLowerCase() === "authorization");
 
-/** The server's HTTP entry in `./.mcp.json`; an unreadable file is reported by the write. */
-async function readClaudeProjectEntry(
+/**
+ * The server's HTTP entry under `mcpServers` in a project file (`.mcp.json` for Claude Code,
+ * `.cursor/mcp.json` for Cursor); an unreadable file is reported by the write.
+ */
+async function readProjectEntry(
   cwd: string,
+  file: string,
   serverName: string,
 ): Promise<ExistingEntry | undefined> {
   let config: unknown;
   try {
-    ({ config } = await readJsonConfig(resolve(cwd, ".mcp.json"), ".mcp.json"));
+    ({ config } = await readJsonConfig(resolve(cwd, file), file));
   } catch {
     return undefined;
   }
@@ -788,7 +796,7 @@ async function readClaudeProjectEntry(
   if (!isRecord(entry) || typeof entry.url !== "string" || !parseMcpUrl(entry.url))
     return undefined;
   const auth = hasAuthorization(entry.headers) ? "key" : "oauth";
-  return { url: entry.url, auth, source: ".mcp.json" };
+  return { url: entry.url, auth, source: file };
 }
 
 /**
@@ -902,7 +910,7 @@ function planFor(
   serverName: string,
 ): Plan {
   const snippets = renderMcpSnippets(url, serverName);
-  // Claude Code and Codex take the same plan shape with or without a key.
+  // Claude Code, Codex and Cursor take the same plan shape with or without a key.
   const shared = auth === "oauth" ? renderMcpSignInSnippets(url, serverName) : snippets;
   const claudeUser: CliCommand = {
     executable: "claude",
@@ -945,8 +953,8 @@ function planFor(
         kind: "file",
         file: join(".cursor", "mcp.json"),
         key: "mcpServers",
-        entry: snippets.cursorServer,
-        snippet: snippets.cursorJson,
+        entry: shared.cursorServer,
+        snippet: shared.cursorJson,
       };
     case "vscode":
       return {
@@ -978,8 +986,8 @@ function planFor(
 /**
  * The authentication used without `--auth`, and the line saying why. A client that can sign in
  * does, unless a key is asked for: read-only access (`--read-only`, or `read_only=true` in
- * `--url`), which a sign-in connection does not have. For Claude Code and Codex, an existing entry
- * keeps its choice, so rerunning the command, to change `--toolsets` for instance, never swaps a
+ * `--url`), which a sign-in connection does not have. For Claude Code, Codex and Cursor, an existing
+ * entry keeps its choice, so rerunning the command, to change `--toolsets` for instance, never swaps a
  * working setup; a key keeps its `read_only`. A new entry uses a key when `HUE_MCP_KEY` is set in
  * `env`; only the variable's presence is checked. Conductor signed in by default before and keeps
  * doing so: its agents read the login-shell environment Conductor captures, not this shell's. The
@@ -1051,10 +1059,15 @@ function nextSteps(
               `If Codex did not open Hue in your browser, run: codex mcp login ${serverName}`,
               `${approve} Then start a new Codex session, which loads ${serverName}.`,
             ]
-          : [
-              `In Conductor, open MCP status from the plug icon or /mcp-status, refresh, and use ${serverName}'s authentication action. ${approve}`,
-              "Start a new agent session if the Hue tools do not appear. Hue has not yet verified signed-in Conductor end to end; if the tools still do not load, rerun with --auth key.",
-            ];
+          : client === "cursor"
+            ? [
+                `Turn on ${serverName} in Cursor's MCP settings and use its login action, or run: cursor-agent mcp login ${serverName}`,
+                approve,
+              ]
+            : [
+                `In Conductor, open MCP status from the plug icon or /mcp-status, refresh, and use ${serverName}'s authentication action. ${approve}`,
+                "Start a new agent session if the Hue tools do not appear. Hue has not yet verified signed-in Conductor end to end; if the tools still do not load, rerun with --auth key.",
+              ];
   else if (client === "vscode")
     lines = [
       `${label} prompts for the key (input ${INPUT_ID}) when the server starts; paste the ${ENV_VAR} value that hue login stored in .env.hue.`,
@@ -1131,9 +1144,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     return fail(`--auth must be key or oauth.\n\n${MCP_USAGE}`, 2);
   if (explicitAuth === "oauth" && !OAUTH_CLIENTS.includes(clientId))
     return fail(
-      clientId === "cursor"
-        ? "--auth oauth is not available for cursor: Hue does not yet accept Cursor's sign-in callback. Use a key (the default), or sign in from claude-code or codex."
-        : `--auth oauth is available for ${OAUTH_CLIENTS.join(", ")}. Use a key (the default) for ${clientId}.`,
+      `--auth oauth is available for ${OAUTH_CLIENTS.join(", ")}. Use a key (the default) for ${clientId}.`,
       2,
     );
   const scope = parsed.values.scope ?? "project";
@@ -1178,11 +1189,13 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
       ? "read_only in --url"
       : undefined;
   // Without --auth or read_only, an existing entry keeps its choice. A user-scope `claude mcp add`
-  // refuses a name it already has, and Conductor keeps its default, so only these two are read.
+  // refuses a name it already has, and Conductor keeps its default, so only these three are read.
   let existing: ExistingEntry | undefined;
   if (explicitAuth === undefined && !parsed.values["read-only"] && !urlReadOnly) {
     if (clientId === "claude-code" && scope === "project")
-      existing = await readClaudeProjectEntry(cwd, serverName);
+      existing = await readProjectEntry(cwd, ".mcp.json", serverName);
+    else if (clientId === "cursor")
+      existing = await readProjectEntry(cwd, join(".cursor", "mcp.json"), serverName);
     else if (clientId === "codex") {
       // Without codex on PATH nothing is run, so nothing Codex holds is replaced. With it, an
       // entry that cannot be read may hold either a key or a sign-in, so the command does not

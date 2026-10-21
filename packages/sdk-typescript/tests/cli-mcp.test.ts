@@ -206,6 +206,15 @@ const CURSOR_OBSERVE_JSON = CURSOR_JSON.replace(
   "https://mcp.hue.run/mcp",
   "https://mcp.hue.run/mcp?toolsets=observe",
 );
+/** Cursor signs in by default: the URL alone, on the observe profile. */
+const CURSOR_SIGN_IN_OBSERVE_JSON = `{
+  "mcpServers": {
+    "hue": {
+      "url": "https://mcp.hue.run/mcp?toolsets=observe"
+    }
+  }
+}
+`;
 const CODEX_TOML = `[mcp_servers.hue]\nurl = "https://mcp.hue.run/mcp"\nbearer_token_env_var = "HUE_MCP_KEY"\nsupports_parallel_tool_calls = true\n`;
 /** Claude Code, Codex and Conductor list every tool unless --toolsets says otherwise. */
 const ALL_URL = "https://mcp.hue.run/mcp?toolsets=all";
@@ -316,10 +325,13 @@ describe("hue mcp install", () => {
     const root = await temporaryRoot();
     const cursor = await mcp(["install", "--client", "cursor"], { cwd: root });
     expect(cursor.code).toBe(0);
-    // Cursor lists the observe profile unless --toolsets says otherwise.
-    expect(await readFile(join(root, ".cursor", "mcp.json"), "utf8")).toBe(CURSOR_OBSERVE_JSON);
+    // Cursor signs in and lists the observe profile unless --toolsets says otherwise.
+    expect(await readFile(join(root, ".cursor", "mcp.json"), "utf8")).toBe(
+      CURSOR_SIGN_IN_OBSERVE_JSON,
+    );
     expect(await mode(join(root, ".cursor", "mcp.json"))).toBe(0o600);
     expect(cursor.stdout).toContain("Wrote .cursor/mcp.json");
+    expect(cursor.stdout).toContain("or run: cursor-agent mcp login hue");
 
     // VS Code keeps Hue's default list: the production reads and the catalog tools.
     const vscode = await mcp(["install", "--client", "vscode"], { cwd: root });
@@ -865,7 +877,7 @@ describe("hue mcp install", () => {
     );
     expect(pinned.code).toBe(0);
     expect(pinned.stdout).toBe(
-      `Would write .cursor/mcp.json:\n${CURSOR_OBSERVE_JSON.replace('"hue"', '"hue-release-token"').replace("?toolsets=observe", "?project=release-token&toolsets=observe")}`,
+      `Would write .cursor/mcp.json:\n${CURSOR_SIGN_IN_OBSERVE_JSON.replace('"hue"', '"hue-release-token"').replace("?toolsets=observe", "?project=release-token&toolsets=observe")}`,
     );
   });
 
@@ -886,7 +898,7 @@ describe("hue mcp install", () => {
 
     const printed = await mcp(["install", "--client", "cursor", "--print"], { cwd: root });
     expect(printed.code).toBe(0);
-    expect(printed.stdout).toBe(CURSOR_OBSERVE_JSON);
+    expect(printed.stdout).toBe(CURSOR_SIGN_IN_OBSERVE_JSON);
     await expect(lstat(join(root, ".cursor"))).rejects.toThrow();
 
     // A codex that holds no hue entry, so the default signs in.
@@ -1068,14 +1080,12 @@ describe("hue mcp install", () => {
 
   test("--auth oauth is refused where sign-in does not work, and with read-only", async () => {
     const root = await temporaryRoot();
-    for (const client of ["cursor", "vscode", "windsurf", "gemini"]) {
+    for (const client of ["vscode", "windsurf", "gemini"]) {
       const result = await mcp(["install", "--client", client, "--auth", "oauth"], { cwd: root });
       expect(result.code).toBe(2);
       expect(result.stdout).toBe("");
       expect(result.stderr).toContain("--auth oauth is");
     }
-    const cursor = await mcp(["install", "--client", "cursor", "--auth", "oauth"], { cwd: root });
-    expect(cursor.stderr).toContain("Cursor's sign-in callback");
     for (const argv of [
       ["install", "--client", "claude-code", "--auth", "oauth", "--read-only"],
       ["install", "--client", "conductor", "--auth", "oauth", "--read-only"],
@@ -1453,10 +1463,41 @@ describe("hue mcp install", () => {
     expect(codex.stdout).toContain("Then start a new Codex session, which loads hue.");
   });
 
-  test("cursor, vscode, windsurf and gemini use a key without a note", async () => {
+  test("cursor signs in by default, keeps an existing key and uses a key when asked", async () => {
+    const root = await temporaryRoot();
+    const signIn = await mcp(["install", "--client", "cursor"], { cwd: root });
+    expect(signIn.code).toBe(0);
+    expect(await readFile(join(root, ".cursor", "mcp.json"), "utf8")).toBe(
+      CURSOR_SIGN_IN_OBSERVE_JSON,
+    );
+    expect(signIn.stderr).toBe(SIGN_IN_NOTE);
+    expect(signIn.stdout).toContain(
+      "Turn on hue in Cursor's MCP settings and use its login action, or run: cursor-agent mcp login hue",
+    );
+    // A rerun never swaps a working key entry for sign-in.
+    await writeFile(join(root, ".cursor", "mcp.json"), CURSOR_OBSERVE_JSON);
+    const kept = await mcp(["install", "--client", "cursor"], { cwd: root });
+    expect(kept.code).toBe(0);
+    expect(await readFile(join(root, ".cursor", "mcp.json"), "utf8")).toBe(CURSOR_OBSERVE_JSON);
+    expect(kept.stderr).toContain("Keeping a key, as the existing entry in .cursor/mcp.json has");
+    // A new entry uses a key when HUE_MCP_KEY is set, and always with --auth key.
+    const fresh = await temporaryRoot();
+    const withKey = await mcp(["install", "--client", "cursor", "--print"], {
+      cwd: fresh,
+      env: { PATH: join(fresh, "empty-bin"), HUE_MCP_KEY: "hue_live_must_not_leak" },
+    });
+    expect(withKey.stdout).toBe(CURSOR_OBSERVE_JSON);
+    expect(withKey.stderr).toBe(KEY_NOTE);
+    const explicit = await mcp(["install", "--client", "cursor", "--auth", "key", "--print"], {
+      cwd: fresh,
+    });
+    expect(explicit.stdout).toBe(CURSOR_OBSERVE_JSON);
+    expect(explicit.stderr).toBe("");
+  });
+
+  test("vscode, windsurf and gemini use a key without a note", async () => {
     const root = await temporaryRoot();
     const snippets = {
-      cursor: CURSOR_OBSERVE_JSON,
       vscode: VSCODE_JSON,
       windsurf: WINDSURF_JSON,
       gemini:
@@ -1636,7 +1677,9 @@ describe("hue mcp install", () => {
         cwd: root,
       },
     );
-    expect(everything.stdout).toBe(CURSOR_JSON.replace("https://mcp.hue.run/mcp", ALL_URL));
+    expect(everything.stdout).toBe(
+      CURSOR_SIGN_IN_OBSERVE_JSON.replace("?toolsets=observe", "?toolsets=all"),
+    );
     // --toolsets replaces a selection in --url; without the flag, the URL's selection is kept.
     const withUrl = (selection: string) => [
       "install",

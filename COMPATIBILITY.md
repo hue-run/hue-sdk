@@ -1,6 +1,6 @@
 # Compatibility
 
-This checkout covers TypeScript `0.21.0` and Python `0.13.4`. Registry availability is established by the completed [release workflow](https://github.com/hue-run/hue-sdk/blob/main/RELEASING.md). See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+This checkout covers TypeScript `0.21.1` and Python `0.13.4`. Registry availability is established by the completed [release workflow](https://github.com/hue-run/hue-sdk/blob/main/RELEASING.md). See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |

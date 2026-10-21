@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.21.0`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.21.1`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -193,19 +193,19 @@ for staging). Hue's Settings page does not show these snippets; this command kee
   write** access to every active project in the organization the consent page names, within your
   role, so an agent first calls `list_projects` and passes the chosen project's id as `project_id`.
   The approval lasts 30 days; then sign in again. Sign-in covers the MCP server only: tracing and
-  `hue eval` still use a project key as `HUE_API_KEY`. It is available for `claude-code`, `codex`
-  and `conductor`. Hue does not yet accept Cursor's sign-in callback, so `cursor` and the other
-  clients use a key.
+  `hue eval` still use a project key as `HUE_API_KEY`. It is available for `claude-code`, `codex`,
+  `conductor` and `cursor`; the other clients use a key.
 - `key` references the `HUE_MCP_KEY` environment variable, which `hue login` stores in
   `.env.hue`. A key value is never written. Use a key for read-only access (a **Read** key, which
   only `hue login --keys coding-agent` accepts), for a run that cannot complete a browser sign-in
   (CI, `claude -p`), or for access that must outlast 30 days.
 
-Without `--auth`, `claude-code`, `codex` and `conductor` sign in and the other clients use a key.
-`--read-only` (or `read_only=true` in `--url`) selects a key. Otherwise `claude-code` and `codex`
-keep the choice of the server's existing entry, in `./.mcp.json` or as `codex mcp get` reports it,
-so a rerun that changes `--toolsets` keeps a key and its `read_only`; for a new entry they use a
-key when `HUE_MCP_KEY` is set (only its presence is checked). When `codex` is on `PATH` but `codex mcp get` fails
+Without `--auth`, `claude-code`, `codex`, `conductor` and `cursor` sign in and the other clients
+use a key. `--read-only` (or `read_only=true` in `--url`) selects a key. Otherwise `claude-code`,
+`codex` and `cursor` keep the choice of the server's existing entry, in `./.mcp.json`,
+`./.cursor/mcp.json` or as `codex mcp get` reports it, so a rerun that changes `--toolsets` keeps a
+key and its `read_only`; for a new entry they use a key when `HUE_MCP_KEY` is set (only its
+presence is checked). When `codex` is on `PATH` but `codex mcp get` fails
 for another reason, the command asks for `--auth` rather than guess which to keep. `conductor` keeps signing in, since
 its agents read the login-shell environment Conductor captures rather than your terminal's. The
 command names its choice on stderr; pass `--auth` to replace an entry as given.
@@ -253,7 +253,7 @@ reviewed cases `case_id`, environment versions `environment_version_id`, and tra
 | `claude-code` | Merges `mcpServers.hue` into `./.mcp.json`. `--scope user` runs `claude mcp add --transport http --scope user hue URL --header 'Authorization: Bearer ${HUE_MCP_KEY}'` when `claude` is on `PATH`, otherwise prints it. | Merges `mcpServers.hue` with only `type` and `url` into `./.mcp.json`; `--scope user` runs `claude mcp add --transport http --scope user hue URL`. Then restart Claude Code, run `/mcp`, select `hue` and choose **Authenticate**. |
 | `codex` | Runs `codex mcp add hue --url URL --bearer-token-env-var HUE_MCP_KEY`, or prints the `[mcp_servers.hue]` TOML block for `~/.codex/config.toml`. | Runs `codex mcp add hue --url URL`, which signs in at once and waits up to 5 minutes for the browser; without `--auth` and outside a terminal (CI, an agent's shell tool) the command prints it instead. A sign-in that does not finish leaves the server registered, and `codex mcp login hue` signs in. Then start a new Codex session. The printed TOML block keeps its URL bare and sends the selection as the `X-Hue-MCP-Toolsets` header. |
 | `conductor` | Runs the Claude Code user-scope and Codex key commands above. | Runs `claude mcp add --transport http --scope user hue URL` and `codex mcp add hue --url URL` (printed outside a terminal, as for `codex`). Then use `hue`'s authentication action in Conductor's MCP status (the plug icon or `/mcp-status`). |
-| `cursor` | Merges `mcpServers.hue` into `./.cursor/mcp.json` with `${env:HUE_MCP_KEY}`. | Refused. |
+| `cursor` | Merges `mcpServers.hue` into `./.cursor/mcp.json` with `${env:HUE_MCP_KEY}`. | Merges `mcpServers.hue` with only `url` into `./.cursor/mcp.json`. Then turn on `hue` in Cursor's MCP settings and use its login action, or run `cursor-agent mcp login hue`. |
 | `vscode` | Merges `servers.hue` and the `hue-mcp-key` password input into `./.vscode/mcp.json`. | Refused. |
 | `windsurf` | Prints the `serverUrl` snippet for `~/.codeium/windsurf/mcp_config.json`; nothing is written to the home directory. | Refused. |
 | `gemini` | Runs `gemini mcp add --scope user --transport http hue URL --header 'Authorization: Bearer ${HUE_MCP_KEY}'`, or prints it. | Refused. |
@@ -381,8 +381,8 @@ and Hue never receives or stores them. The command is part of the `hue` executab
 #   LANGFUSE_PUBLIC_KEY=pk-lf-...
 #   LANGFUSE_SECRET_KEY=sk-lf-...
 #   LANGFUSE_BASE_URL=https://cloud.langfuse.com
-npx -y @hue-run/sdk@0.21.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.21.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.21.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.21.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` come from the environment or `--env-path`
@@ -698,7 +698,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.21.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.21.1.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -709,7 +709,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.21.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.21.1.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -751,10 +751,10 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.21.0 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.21.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.21.0 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.21.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.21.1 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.21.1 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.21.1 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.21.1 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 One invocation creates one run holding every selected case; it prints the run URL
@@ -792,7 +792,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.21.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.21.1 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
