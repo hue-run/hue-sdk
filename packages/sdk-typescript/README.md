@@ -82,9 +82,9 @@ claim. Setup never enables content capture or creates a simulation, Hue Run, eva
 or remote execution. See the [setup CLI contract](./CLI.md) for the supported shapes and release gates.
 
 For an existing account, `hue mcp install --client claude-code` (or `codex`, `conductor`,
-`cursor`, `vscode`, `windsurf`, `gemini`) writes the Hue MCP configuration. For Claude Code, Codex
-and Conductor it holds only the URL, and you sign in with Hue in the client; for the other clients,
-`--read-only` and `--auth key` it references `HUE_MCP_KEY` (VS Code prompts for the key).
+`cursor`, `vscode`, `windsurf`, `gemini`) writes the Hue MCP configuration. For Claude Code, Codex,
+Conductor and Cursor it holds only the URL, and you sign in with Hue in the client; for the other
+clients, `--read-only` and `--auth key` it references `HUE_MCP_KEY` (VS Code prompts for the key).
 `hue login` validates keys created in Hue Settings and stores them in `.env.hue` without printing
 them. See [Store project keys](./CLI.md#store-project-keys) and
 [Install the MCP for your coding agent](./CLI.md#install-the-mcp-for-your-coding-agent).
@@ -204,7 +204,7 @@ while the callback result is returned unchanged.
 
 ### Tool endpoint evidence
 
-TypeScript `0.21.0` adds optional `ToolOptions.endpoint`: `{ url, source, method?, captureQueryParameters? }`.
+Since TypeScript `0.21.0`, `ToolOptions` accepts an optional `endpoint`: `{ url, source, method?, captureQueryParameters? }`.
 Use the actual HTTP(S) request URL, client config URL or receipt URL; set `source` to `request`,
 `client_config` or `receipt`. Supply `method` only when known. With content capture enabled,
 Hue records `url.full`, `hue.tool.endpoint.source` and optional `http.request.method` through the
@@ -552,8 +552,8 @@ the Langfuse project's own keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, a
 `HUE_API_KEY`:
 
 ```sh
-npx -y @hue-run/sdk@0.21.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.21.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.21.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.21.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 - It reads Langfuse Cloud and self-hosted v4 through the Observations API v2, and self-hosted v3

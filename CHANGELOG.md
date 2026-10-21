@@ -8,6 +8,17 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.21.1] - 2026-10-20
+
+#### Changed
+
+- `hue mcp install --client cursor` signs in with Hue by default, now that Hue accepts Cursor's
+  sign-in callback: it writes only the URL to `./.cursor/mcp.json`, and the next steps name
+  Cursor's login action and `cursor-agent mcp login hue`. As for Claude Code and Codex, a rerun
+  keeps the key or sign-in of an existing `hue` entry in `./.cursor/mcp.json`, and a new entry
+  uses a key when `HUE_MCP_KEY` is set. `--auth key`, `--read-only` and `read_only` in `--url`
+  still select a key; `--auth oauth` is no longer refused for `cursor`.
+
 ### [0.21.0] - 2026-10-20
 
 #### Breaking
@@ -2362,6 +2373,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.18 (2026-10-20): the TypeScript installation command pins `@hue-run/sdk@0.21.1`.
 - 0.8.17 (2026-10-20): pin Python `0.13.4`, document released HTTP endpoint evidence, and include Node 26.
 - 0.8.16 (2026-10-20): the TypeScript installation command pins `@hue-run/sdk@0.21.0`.
 - 0.8.14 (2026-10-20): the Python installation commands pin `hue-run==0.13.3`.
