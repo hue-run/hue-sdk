@@ -47,9 +47,9 @@ const BATCH_SUFFIX = "]}";
 const BATCH_FRAME_BYTES = BATCH_PREFIX.length + BATCH_SUFFIX.length;
 const HEX32 = /^[0-9a-f]{32}$/;
 const HEX16 = /^[0-9a-f]{16}$/;
-/** An id as ProtoJSON writes it: padded base64, standard or URL-safe. */
-const BASE64_TRACE_ID = /^[A-Za-z0-9+/_-]{22}==$/;
-const BASE64_SPAN_ID = /^[A-Za-z0-9+/_-]{11}=$/;
+/** An id as ProtoJSON reads it: base64, standard or URL-safe, padded or not. */
+const BASE64_TRACE_ID = /^[A-Za-z0-9+/_-]{22}(?:==)?$/;
+const BASE64_SPAN_ID = /^[A-Za-z0-9+/_-]{11}=?$/;
 const MAX_IDENTIFIER = 16_384;
 const MAX_SESSION = 2_048;
 const MAX_NAMESPACE = 128;
@@ -419,13 +419,20 @@ function renameProtoFields(decoded: unknown): void {
 }
 
 /** An OTLP id as sent (hex, or the base64 of a protobuf-JSON encoder) as lowercase hex, or
- * undefined for anything that is not a valid nonzero id of the length. */
+ * undefined for anything that is not a valid nonzero id of the length. Unpadded, any 22 (or 11)
+ * letters and digits pass for base64, so such text is an id only as an encoder writes it, its last
+ * character's spare bits zero, and two other ids that differ only in those bits stay two. */
 function normalizeId(value: unknown, length: 32 | 16): string | undefined {
   if (typeof value !== "string") return undefined;
-  const base64 = length === 32 ? BASE64_TRACE_ID : BASE64_SPAN_ID;
-  const candidate = base64.test(value)
-    ? Buffer.from(value, "base64").toString("hex")
-    : value.toLowerCase();
+  const bytes = (length === 32 ? BASE64_TRACE_ID : BASE64_SPAN_ID).test(value)
+    ? Buffer.from(value, "base64")
+    : undefined;
+  const candidate =
+    bytes &&
+    (value.endsWith("=") ||
+      bytes.toString("base64url") === value.replaceAll("+", "-").replaceAll("/", "_"))
+      ? bytes.toString("hex")
+      : value.toLowerCase();
   return (length === 32 ? HEX32 : HEX16).test(candidate) && !/^0+$/.test(candidate)
     ? candidate
     : undefined;
@@ -473,6 +480,22 @@ const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 /** Bytes as ProtoJSON may write them: standard or URL-safe base64, padded or not. */
 const BASE64 = /^[A-Za-z0-9+/_-]*={0,2}$/;
 
+/** An `AnyValue` member's value however ProtoJSON spelled it: an int64 (a number or decimal text)
+ * as its decimal text, a double as a number (decimal text read as one; NaN and the infinities keep
+ * their names, which JSON has no number for) and bytes as padded standard base64. Any other value
+ * as recorded. Copies of a span compare by these ({@link otlpContent}) and identity reads them. */
+export function protoJsonValue(field: "intValue" | "doubleValue" | "bytesValue", value: unknown) {
+  if (field === "intValue")
+    return (typeof value === "number" || typeof value === "string") && /^-?\d+$/.test(`${value}`)
+      ? BigInt(`${value}`).toString()
+      : value;
+  if (field === "doubleValue")
+    return typeof value === "string" && DECIMAL.test(value) ? Number(value) : value;
+  return typeof value === "string" && BASE64.test(value)
+    ? Buffer.from(value, "base64").toString("base64")
+    : value;
+}
+
 /**
  * An OTLP entry's content as JSON text that every encoding of it shares, so a span sent both as
  * binary OTLP and as OTLP/JSON reads as one: keys sorted, an int64 as decimal text and a uint32
@@ -497,16 +520,14 @@ function otlpContent(value: unknown, field?: string): string | undefined {
       });
     if (members.length) text = `{${members.join(",")}}`;
   } else if (field && INT64_FIELDS.has(field) && /^-?\d+$/.test(String(value))) {
-    const decimal = BigInt(String(value)).toString();
+    const decimal = protoJsonValue("intValue", value);
     if (decimal !== "0") text = JSON.stringify(decimal);
   } else if (field && Object.hasOwn(UINT32_FIELDS, field)) {
     const named = typeof value === "string" ? UINT32_FIELDS[field]!.indexOf(value) : -1;
     const number = named >= 0 ? named : /^\d+$/.test(String(value)) ? Number(value) : value;
     if (number !== 0) text = JSON.stringify(number);
-  } else if (field === "doubleValue")
-    text = JSON.stringify(typeof value === "string" && DECIMAL.test(value) ? Number(value) : value);
-  else if (field === "bytesValue" && typeof value === "string" && BASE64.test(value))
-    text = JSON.stringify(Buffer.from(value, "base64").toString("base64"));
+  } else if (field === "doubleValue" || field === "bytesValue")
+    text = JSON.stringify(protoJsonValue(field, value));
   else if (field && Object.hasOwn(ID_FIELDS, field)) {
     if (value !== "") text = JSON.stringify(normalizeId(value, ID_FIELDS[field]!) ?? value);
   } else if (value !== "" && value !== 0 && value !== false) text = JSON.stringify(value);

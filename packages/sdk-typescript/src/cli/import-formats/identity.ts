@@ -1,6 +1,7 @@
 import {
   digestHex,
   isObject,
+  protoJsonValue,
   type ConvertedTrace,
   type ImportEntry,
   type JsonValue,
@@ -221,44 +222,64 @@ export function readIdentity(
 
 // --- Reading emitted spans ---------------------------------------------------------------------
 
-/** An OTLP value in source form: an int64 stays its decimal text, a kvlist becomes an object.
- * A value of no OTLP shape (a recorded span need not have one) is null. */
-function sourceValue(value: unknown): JsonValue {
+const DOUBLE_NAMES: ReadonlySet<string> = new Set(["NaN", "Infinity", "-Infinity"]);
+
+/** An OTLP value as Hue reads it, whichever ProtoJSON spelling recorded it (see
+ * `protoJsonValue`), so every copy of a span reads alike: a double as a number (NaN and the
+ * infinities by name), bytes as padded standard base64, a kvlist as an object, and an int64 as its
+ * decimal text in `source` form, the form identity is read in, or as a number while it is safe in
+ * `content` form, the form JSON content is read in. A value of no OTLP shape (a recorded span need
+ * not have one) is null. */
+function otlpJson(value: unknown, form: "source" | "content"): JsonValue {
   if (!isObject(value)) return null;
   const { stringValue, boolValue, doubleValue, intValue, bytesValue } = value as OtlpValue;
   if (typeof stringValue === "string") return stringValue;
   if (typeof boolValue === "boolean") return boolValue;
-  if (typeof doubleValue === "number") return doubleValue;
-  if (typeof intValue === "string" || typeof intValue === "number") return String(intValue);
-  if (typeof bytesValue === "string") return bytesValue;
+  const double = protoJsonValue("doubleValue", doubleValue);
+  if (typeof double === "number" || (typeof double === "string" && DOUBLE_NAMES.has(double)))
+    return double;
+  if (typeof intValue === "string" || typeof intValue === "number") {
+    const decimal = String(protoJsonValue("intValue", intValue));
+    return form === "content" && Number.isSafeInteger(Number(decimal)) ? Number(decimal) : decimal;
+  }
+  if (typeof bytesValue === "string") return String(protoJsonValue("bytesValue", bytesValue));
   const list = (field: "arrayValue" | "kvlistValue"): unknown[] | undefined => {
     const holder = value[field];
     const values = isObject(holder) ? holder.values : undefined;
     return Array.isArray(values) ? values : isObject(holder) ? [] : undefined;
   };
   const array = list("arrayValue");
-  if (array) return array.map(sourceValue);
+  if (array) return array.map((item) => otlpJson(item, form));
   const kvlist = list("kvlistValue");
   if (kvlist)
     return Object.fromEntries(
       kvlist.flatMap((item) =>
-        isObject(item) && typeof item.key === "string" ? [[item.key, sourceValue(item.value)]] : [],
+        isObject(item) && typeof item.key === "string"
+          ? [[item.key, otlpJson(item.value, form)]]
+          : [],
       ),
     );
   return null;
 }
 
-function sourceMap(attributes: unknown): Map<string, JsonValue> {
-  const map = new Map<string, JsonValue>();
+/** A recorded attribute list by key, each value as recorded. */
+function valueMap(attributes: unknown): Map<string, OtlpValue> {
+  const map = new Map<string, OtlpValue>();
   if (!Array.isArray(attributes)) return map;
   for (const item of attributes as unknown[])
     if (isObject(item) && typeof item.key === "string" && isObject(item.value))
-      map.set(item.key, sourceValue(item.value));
+      map.set(item.key, item.value as OtlpValue);
   return map;
 }
 
-const text = (map: ReadonlyMap<string, JsonValue>, key: string) => {
-  const value = map.get(key);
+/** Attributes in source form, which identity is read from. */
+const sourceMap = (values: ReadonlyMap<string, OtlpValue>) =>
+  new Map([...values].map(([key, value]) => [key, otlpJson(value, "source")]));
+
+/** An attribute's text as Hue reads a span's operation and tool keys: a string value, not empty;
+ * a number or bytes is none. */
+const text = (values: ReadonlyMap<string, OtlpValue>, key: string) => {
+  const value = values.get(key)?.stringValue;
   return typeof value === "string" && value ? value : undefined;
 };
 
@@ -271,18 +292,40 @@ const label = (value: JsonValue | undefined, max = 256) =>
     ? value
     : undefined;
 
-/** An attribute recorded as JSON text, parsed; text that is not JSON as recorded. */
-function jsonText(value: JsonValue | undefined): JsonValue | undefined {
-  if (typeof value !== "string") return value;
+/** How deep Hue parses JSON text an attribute records: text nested deeper, or holding a number
+ * that is not finite or an integer past 2^53, is kept as the text it is. */
+const MAX_CONTENT_DEPTH = 32;
+
+/** An attribute's JSON content as Hue reads it: the value in content form, its text parsed as
+ * JSON within Hue's limits, else kept as the text it is. */
+function jsonContent(value: OtlpValue | undefined): JsonValue | undefined {
+  if (value === undefined) return undefined;
+  const content = otlpJson(value, "content");
+  if (typeof content !== "string") return content;
+  let parsed: JsonValue;
   try {
-    return JSON.parse(value) as JsonValue;
+    parsed = JSON.parse(content) as JsonValue;
   } catch {
-    return value;
+    return content;
   }
+  const stack = [{ item: parsed, depth: 0 }];
+  while (stack.length) {
+    const { item, depth } = stack.pop()!;
+    if (depth > MAX_CONTENT_DEPTH) return content;
+    if (
+      typeof item === "number" &&
+      (!Number.isFinite(item) || (Number.isInteger(item) && !Number.isSafeInteger(item)))
+    )
+      return content;
+    if (item !== null && typeof item === "object")
+      for (const child of Object.values(item)) stack.push({ item: child, depth: depth + 1 });
+  }
+  return parsed;
 }
 
-/** One span as Hue reads its kind: its attributes and its instrumentation scope's name. */
-type Recorded = Pick<SpanView, "attributes" | "scope">;
+/** One span as Hue reads its kind: its attributes as recorded and its instrumentation scope's
+ * name. */
+type Recorded = Pick<SpanView, "values" | "scope">;
 
 /** The keys Hue reads a span's operation from, in order (Genkit's action kind last). */
 const OPERATION_KEYS = [
@@ -305,10 +348,10 @@ const BRAINTRUST_SYSTEM_KEYS = new Set([
 
 /** A field of Braintrust's `span_attributes`, recorded as one JSON object or flattened. */
 function braintrustSpanAttribute(
-  attributes: ReadonlyMap<string, JsonValue>,
+  values: ReadonlyMap<string, OtlpValue>,
   field: string,
 ): JsonValue | undefined {
-  const whole = jsonText(attributes.get("braintrust.span_attributes"));
+  const whole = jsonContent(values.get("braintrust.span_attributes"));
   if (
     whole !== null &&
     typeof whole === "object" &&
@@ -316,25 +359,26 @@ function braintrustSpanAttribute(
     Object.hasOwn(whole, field)
   )
     return whole[field];
-  return attributes.get(`braintrust.span_attributes.${field}`);
+  const flattened = values.get(`braintrust.span_attributes.${field}`);
+  return flattened && otlpJson(flattened, "content");
 }
 
 /** Braintrust's span type, on a span that records Braintrust's own keys. */
-const braintrustType = (attributes: ReadonlyMap<string, JsonValue>) =>
-  [...attributes.keys()].some(
+const braintrustType = (values: ReadonlyMap<string, OtlpValue>) =>
+  [...values.keys()].some(
     (key) => key.startsWith("braintrust.") && !BRAINTRUST_SYSTEM_KEYS.has(key),
   )
-    ? label(braintrustSpanAttribute(attributes, "type"), 64)
+    ? label(braintrustSpanAttribute(values, "type"), 64)
     : undefined;
 
 /** The span's operation as Hue reads it: the first operation key it records, else MLflow's span
  * type (JSON text, `"TOOL"` with its quotes), else Braintrust's. */
-function operationOf({ attributes }: Recorded): string | undefined {
+function operationOf({ values }: Recorded): string | undefined {
   for (const key of OPERATION_KEYS) {
-    const operation = text(attributes, key);
+    const operation = text(values, key);
     if (operation) return operation;
   }
-  return label(jsonText(attributes.get("mlflow.spanType"))) ?? braintrustType(attributes);
+  return label(jsonContent(values.get("mlflow.spanType"))) ?? braintrustType(values);
 }
 
 /**
@@ -344,73 +388,73 @@ function operationOf({ attributes }: Recorded): string | undefined {
  * tool search steps are no call, whatever a later convention reads), OpenInference, OpenLLMetry,
  * Langfuse, MLflow, Spring AI and Genkit.
  */
-function readsToolCall({ attributes, scope }: Recorded): boolean {
-  const has = (key: string) => attributes.has(key);
+function readsToolCall({ values, scope }: Recorded): boolean {
+  const has = (key: string) => values.has(key);
   if (
-    text(attributes, "gen_ai.tool.name") ||
-    text(attributes, "gen_ai.tool.call.id") ||
+    text(values, "gen_ai.tool.name") ||
+    text(values, "gen_ai.tool.call.id") ||
     has("gen_ai.tool.call.arguments") ||
     has("gen_ai.tool.call.result")
   )
     return true;
   if (
-    text(attributes, "langsmith.span.kind") === "tool" &&
+    text(values, "langsmith.span.kind") === "tool" &&
     (has("gen_ai.prompt") || has("gen_ai.completion"))
   )
     return true;
   if (
     scope === "com.anthropic.claude_code.tracing" &&
-    text(attributes, "span.type") === "tool" &&
-    (text(attributes, "tool_name") || text(attributes, "tool_use_id"))
+    text(values, "span.type") === "tool" &&
+    (text(values, "tool_name") || text(values, "tool_use_id"))
   )
     return true;
   if (
-    text(attributes, "ai.toolCall.name") ||
-    text(attributes, "ai.toolCall.id") ||
+    text(values, "ai.toolCall.name") ||
+    text(values, "ai.toolCall.id") ||
     has("ai.toolCall.args") ||
     has("ai.toolCall.result")
   )
     return true;
   if (
-    braintrustType(attributes) === "tool" &&
-    (label(braintrustSpanAttribute(attributes, "name")) ||
-      text(attributes, "tool.name") ||
+    braintrustType(values) === "tool" &&
+    (label(braintrustSpanAttribute(values, "name")) ||
+      text(values, "tool.name") ||
       ["input_json", "input", "output_json", "output"].some((key) => has(`braintrust.${key}`)))
   )
     return true;
   if (scope === "@voltagent/core" || (has("tool.call.id") && !has("openinference.span.kind"))) {
     if (has("tool.search.name")) return false;
-    if (text(attributes, "tool.call.id")) return true;
+    if (text(values, "tool.call.id")) return true;
   }
-  const kind = text(attributes, "openinference.span.kind")?.toUpperCase();
-  if (kind === "TOOL" || (kind === undefined && text(attributes, "tool.name"))) return true;
+  const kind = text(values, "openinference.span.kind")?.toUpperCase();
+  if (kind === "TOOL" || (kind === undefined && text(values, "tool.name"))) return true;
   if (
-    text(attributes, "traceloop.span.kind") === "tool" &&
-    (text(attributes, "traceloop.entity.name") ||
+    text(values, "traceloop.span.kind") === "tool" &&
+    (text(values, "traceloop.entity.name") ||
       has("traceloop.entity.input") ||
       has("traceloop.entity.output"))
   )
     return true;
   if (
-    text(attributes, "langfuse.observation.type") === "tool" &&
+    text(values, "langfuse.observation.type") === "tool" &&
     (has("langfuse.observation.input") || has("langfuse.observation.output"))
   )
     return true;
   if (
-    label(jsonText(attributes.get("mlflow.spanType"))) === "TOOL" &&
+    label(jsonContent(values.get("mlflow.spanType"))) === "TOOL" &&
     (has("mlflow.spanInputs") || has("mlflow.spanOutputs"))
   )
     return true;
   if (
-    text(attributes, "spring.ai.tool.definition.name") ||
-    text(attributes, "spring.ai.tool.call.id") ||
+    text(values, "spring.ai.tool.definition.name") ||
+    text(values, "spring.ai.tool.call.id") ||
     has("spring.ai.tool.call.arguments") ||
     has("spring.ai.tool.call.result")
   )
     return true;
   return (
-    text(attributes, "genkit:metadata:subtype") === "tool" &&
-    !!(text(attributes, "genkit:name") || has("genkit:input") || has("genkit:output"))
+    text(values, "genkit:metadata:subtype") === "tool" &&
+    !!(text(values, "genkit:name") || has("genkit:input") || has("genkit:output"))
   );
 }
 
@@ -426,6 +470,9 @@ export interface SpanView {
   spanId: string;
   parentSpanId?: string;
   start: bigint;
+  /** Its attributes as recorded, which its operation and tool call are read from. */
+  values: Map<string, OtlpValue>;
+  /** Its attributes and its resource's in source form, which identity is read from. */
   attributes: Map<string, JsonValue>;
   resource: Map<string, JsonValue>;
   /** Its instrumentation scope's name, which some conventions are known by. */
@@ -444,13 +491,17 @@ export function spanViews(entries: readonly ImportEntry[]): SpanView[] {
     if (typeof span.startTimeUnixNano === "string" && /^\d+$/.test(span.startTimeUnixNano))
       start = BigInt(span.startTimeUnixNano);
     const scope = isObject(group?.scope) ? group.scope.name : undefined;
+    const values = valueMap(span.attributes);
     return [
       {
         spanId: span.spanId,
         ...(typeof parent === "string" && parent ? { parentSpanId: parent } : {}),
         start,
-        attributes: sourceMap(span.attributes),
-        resource: sourceMap(isObject(entry.resource) ? entry.resource.attributes : undefined),
+        values,
+        attributes: sourceMap(values),
+        resource: sourceMap(
+          valueMap(isObject(entry.resource) ? entry.resource.attributes : undefined),
+        ),
         ...(typeof scope === "string" ? { scope } : {}),
         span,
       },
@@ -542,8 +593,12 @@ function decideOwner(roots: readonly Carrier[], others: readonly Carrier[]): Own
 function carrierOf(view: SpanView): Carrier {
   const carrier: Carrier = { explicit: [], users: [], invalid: false };
   for (const values of [view.attributes, view.resource]) {
-    const id = text(values, ENTITY_ID);
-    const namespace = text(values, ENTITY_NAMESPACE);
+    const entity = (key: string) => {
+      const value = values.get(key);
+      return typeof value === "string" && value ? value : undefined;
+    };
+    const id = entity(ENTITY_ID);
+    const namespace = entity(ENTITY_NAMESPACE);
     if (!id && !namespace) continue;
     if (
       !id ||
@@ -574,12 +629,11 @@ const byMillisecond = (a: SpanView, b: SpanView) => {
 };
 
 /** Operations of a span Hue takes as the execution root though its parent is outside the trace:
- * an agent's, a workflow's, an agent step's, and a Vercel AI SDK call wrapping its steps. Any
- * spelling of `agent` (MLflow's `AGENT`) is one too. */
+ * an agent's, a workflow's, and a Vercel AI SDK call wrapping its steps. Any spelling of `agent`
+ * (MLflow's `AGENT`) is one too; an agent step (`agent_step`) without its agent is not. */
 const AGENT_OPERATIONS = new Set([
   "invoke_agent",
   "invoke_workflow",
-  "agent_step",
   "ai.generateText",
   "ai.streamText",
   "ai.generateObject",

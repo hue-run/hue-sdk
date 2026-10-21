@@ -116,6 +116,12 @@ export interface SpanRow {
   resource?: Record<string, JsonValue>;
   /** The whole source record, kept as `hue.import.source_record`. */
   record: JsonValue;
+  /** The trace's own record the row was read with (an MLflow trace's `{info}`), which a root of the
+   * trace keeps beside its record, `{...context, span: record}`. A later export of the trace may
+   * extend it (a tag added), so copies of a span are compared without it, and of copies that
+   * differ only in it, the one whose context sorts first is kept, whatever order they are read
+   * in, so every span of the trace keeps the same export's. */
+  context?: Record<string, JsonValue>;
   /** Where a dotted `--user-key` or `--session-key` looks after the span's attributes. */
   metadata?: JsonValue;
   /** A revision of a record exported more than once: the highest is kept. Decimal digits compare
@@ -262,6 +268,7 @@ export class RowTraceCollector implements TraceCollector {
     key(row.traceKey, "trace id");
     key(row.spanKey, "span id");
     validateSource(row.record);
+    if (row.context) contextText(row.context);
     const draft = this.draft(row.traceKey);
     draft.sourceDigests.add(sourceDigest);
     const digest = sha256Hex(canonicalJson(row.record));
@@ -271,6 +278,12 @@ export class RowTraceCollector implements TraceCollector {
       return undefined;
     }
     if (held.digest === digest) {
+      if (
+        row.context &&
+        held.row.context &&
+        contextText(row.context) < contextText(held.row.context)
+      )
+        held.row = row;
       const elsewhere =
         at &&
         held.at &&
@@ -353,6 +366,10 @@ export class RowTraceCollector implements TraceCollector {
         ? row.parentKey
         : undefined;
     if (cyclic(rows, parentOf)) throw new ConversionError("The source hierarchy contains a cycle");
+    const sourceRecord = (row: SpanRow): JsonValue =>
+      row.context && parentOf(row) === undefined
+        ? { ...row.context, span: row.record }
+        : row.record;
     const { starts, ends, notes } = timesOf(rows, parentOf);
     const traceNotes = new Set([...notes.values()].flat());
     // The trace's user and conversation: from the identity keys when they name one across the
@@ -378,7 +395,7 @@ export class RowTraceCollector implements TraceCollector {
           attributes: new Map(Object.entries(span.row.attributes ?? {})),
           resource: new Map(Object.entries(span.row.resource ?? {})),
         },
-        span.row.record,
+        sourceRecord(span.row),
         span.row.metadata,
       );
     const decide = (path: IdentityKeys["user"], own: (row: SpanRow) => string | undefined) => {
@@ -472,7 +489,7 @@ export class RowTraceCollector implements TraceCollector {
       const spanNotes = [...(row.timing ? [row.timing] : []), ...(notes.get(spanKey) ?? [])];
       for (const rule of row.timing?.split("; ") ?? []) traceNotes.add(rule);
       if (spanNotes.length) attributes.add("hue.import.timing", spanNotes.join("; "));
-      attributes.add(SOURCE_RECORD, JSON.stringify(row.record));
+      attributes.add(SOURCE_RECORD, JSON.stringify(sourceRecord(row)));
       const start = starts.get(spanKey)!;
       const spanEvents = (events.get(spanKey) ?? [])
         .map((event) => {
@@ -633,6 +650,19 @@ function addContent(
       add(`${field}.mime_type`, "application/json");
     }
   }
+}
+
+/** A row's context as canonical JSON, by which copies of a span are ordered; the context is
+ * checked and its text made once, however many rows share it. */
+const contextTexts = new WeakMap<object, string>();
+function contextText(context: Record<string, JsonValue>): string {
+  let text = contextTexts.get(context);
+  if (text === undefined) {
+    validateSource(context);
+    text = canonicalJson(context);
+    contextTexts.set(context, text);
+  }
+  return text;
 }
 
 /** The SHA-256 of an event's record, by which copies of it are told apart. */

@@ -541,9 +541,10 @@ describe("identity", () => {
     const expected: Record<string, string | undefined> = {};
     // A span whose parent is outside the trace is the root when it runs an agent by any name Hue
     // reads one by, though a child named a conversation in the same millisecond with a lower id.
-    for (const [name, operation] of [
-      ["agent-step", { "gen_ai.operation.name": "agent_step" }],
-      ["mlflow-agent", { "mlflow.spanType": JSON.stringify("AGENT") }],
+    // An agent step without its agent is no root, so the child's conversation is the one shown.
+    for (const [name, operation, shown] of [
+      ["agent-step", { "gen_ai.operation.name": "agent_step" }, "child"],
+      ["mlflow-agent", { "mlflow.spanType": JSON.stringify("AGENT") }, "orphan-root"],
     ] as const) {
       const traceId = traceIds(String(Object.keys(files).length + 10));
       const orphan = spanIds("f0").replace(/0$/, "1");
@@ -564,7 +565,7 @@ describe("identity", () => {
           950_000,
         ),
       ]);
-      expected[traceId] = "orphan-root";
+      expected[traceId] = shown;
     }
     // A tool span of each convention Hue reads a call by never names the conversation: by the
     // operation Hue takes from MLflow's, Braintrust's or Genkit's span type, or by the call a
@@ -583,21 +584,43 @@ describe("identity", () => {
       "genkit-call": { ...chat, "genkit:metadata:subtype": "tool", "genkit:name": "lookup" },
       langsmith: { "langsmith.span.kind": "tool", "gen_ai.prompt": '{"id":12}' },
       "spring-ai": { "spring.ai.tool.definition.name": "lookup" },
-      voltagent: { "tool.call.id": "call-1", "tool.name": "lookup" },
+      voltagent: { "tool.call.id": "call-1" },
+      // JSON nested 32 levels deep, within Hue's limits.
+      "braintrust-deep": {
+        "braintrust.span_attributes": `{"type":"tool","x":${"[".repeat(32)}${"]".repeat(32)}}`,
+      },
     };
-    for (const [name, attributes] of Object.entries(conventions)) {
+    // Hue reads an operation or a tool key from a string value only, and JSON nested at most 32
+    // levels deep that holds no number past 2^53, so none of these spans is a tool's.
+    const notTools: Record<string, Attributes> = {
+      "int-call-id": { "gen_ai.tool.call.id": 5 },
+      "braintrust-unsafe": {
+        "braintrust.span_attributes": '{"type":"tool","x":12345678901234567890}',
+      },
+      "braintrust-deeper": {
+        "braintrust.span_attributes": `{"type":"tool","x":${"[".repeat(33)}${"]".repeat(33)}}`,
+      },
+      "bytes-kind": {},
+    };
+    for (const [name, attributes, shown] of [
+      ...Object.entries(conventions).map(([name, values]) => [name, values, undefined] as const),
+      ...Object.entries(notTools).map(([name, values]) => [name, values, "tool-session"] as const),
+    ]) {
       const traceId = traceIds(String(Object.keys(files).length + 10));
+      const span = at(
+        otlpSpan(traceId, tool, agent, "lookup", { ...attributes, "session.id": "tool-session" }),
+        1,
+      );
+      // Bytes whose base64 reads as OpenInference's tool kind.
+      const kind = { key: "openinference.span.kind", value: { bytesValue: "TOOL" } };
       files[`${name}.json`] = otlp([
         at(
           otlpSpan(traceId, agent, undefined, "agent", { "gen_ai.operation.name": "invoke_agent" }),
           0,
         ),
-        at(
-          otlpSpan(traceId, tool, agent, "lookup", { ...attributes, "session.id": "tool-session" }),
-          1,
-        ),
+        name === "bytes-kind" ? { ...span, attributes: [...span.attributes, kind] } : span,
       ]);
-      expected[traceId] = undefined;
+      expected[traceId] = shown;
     }
     // Claude Code's tool spans are known by their scope; VoltAgent's tool search step is no call.
     const claude = traceIds("31");

@@ -27,7 +27,8 @@ import { readZstd, type ParsedValue } from "./containers.js";
  * alone reported. It is written here because the package carries no protobuf runtime.
  *
  * The messages of a length-prefixed file are read one at a time, and their decompressed sizes
- * together, those of messages that then do not read included, are bounded as one file's are.
+ * together, those of messages that then do not read included, are bounded as one file's are, a
+ * zstd message's frames counted as {@link readZstd} counts them.
  */
 
 /** Marks a value decoded from protobuf: no JSON document can carry a symbol key. */
@@ -385,7 +386,7 @@ function binary(bytes: Uint8Array): boolean {
 }
 
 /** A decoded request as a value; its JSON text is made only when a format asks for it. */
-function decoded(traces: DecodedTraces, line?: number): ParsedValue {
+function decoded(traces: DecodedTraces, line?: number, note?: string): ParsedValue {
   let text: string | undefined;
   return {
     value: { [PROTOBUF]: traces } satisfies Decoded,
@@ -394,15 +395,20 @@ function decoded(traces: DecodedTraces, line?: number): ParsedValue {
     },
     unsafeIntegers: false,
     ...(line !== undefined ? { line } : {}),
+    ...(note ? { note } : {}),
   };
 }
 
 /** One length-prefixed message's bytes, a zstd message decompressed frame by frame (see
- * {@link readZstd}). `budget` is what the file may still decompress to. */
-function frameBytes(frame: Uint8Array, budget: number): Uint8Array {
+ * {@link readZstd}), with what it counts against the bound and a note on bytes after its frames.
+ * `budget` is what the file may still count. */
+function frameBytes(
+  frame: Uint8Array,
+  budget: number,
+): { bytes: Uint8Array; counted: number; note?: string } {
   if (!isZstd(frame)) {
     if (frame.byteLength > budget) throw new Oversized();
-    return frame;
+    return { bytes: frame, counted: frame.byteLength };
   }
   if (typeof zlib.zstdDecompressSync !== "function")
     throw new ConversionError(
@@ -410,14 +416,24 @@ function frameBytes(frame: Uint8Array, budget: number): Uint8Array {
     );
   const read = readZstd(frame, Math.max(0, budget));
   if (read.kind === "oversized") throw new Oversized();
-  // A message is its frames whole: one that does not decompress whole, or that holds other bytes,
-  // is damaged, and counts what its frames decompressed to.
-  if (read.kind === "mismatched" || read.stop) throw new DamagedZstd(read.size);
-  return Buffer.concat(read.parts);
+  // Bytes after a message's frames (zero padding) are named and its frames read, as a zstd file's
+  // are; a frame that breaks off or does not decompress whole damages the message, which counts
+  // what its frames did.
+  if (read.kind === "mismatched" || (read.stop && (read.stop !== "trailing" || !read.frames)))
+    throw new DamagedZstd(read.size);
+  return {
+    bytes: read.bytes,
+    counted: read.size,
+    ...(read.stop
+      ? {
+          note: `${frame.byteLength - read.end} bytes after the message's last zstd frame are not zstd and were not read`,
+        }
+      : {}),
+  };
 }
 
 /** One message read: protobuf, or OTLP/JSON that a zstd message held. */
-function messageValue(bytes: Uint8Array, zstd: boolean, line: number): ParsedValue {
+function messageValue(bytes: Uint8Array, zstd: boolean, line: number, note?: string): ParsedValue {
   if (
     zstd &&
     !binary(bytes) &&
@@ -431,20 +447,27 @@ function messageValue(bytes: Uint8Array, zstd: boolean, line: number): ParsedVal
     }
     try {
       const parsed = parseJsonText(text.trim());
-      return { value: parsed.value, text, unsafeIntegers: parsed.unsafeIntegers, line };
+      return {
+        value: parsed.value,
+        text,
+        unsafeIntegers: parsed.unsafeIntegers,
+        line,
+        ...(note ? { note } : {}),
+      };
     } catch {
       throw new ConversionError("a message that is not JSON");
     }
   }
-  return decoded(decodeTraces(bytes), line);
+  return decoded(decodeTraces(bytes), line, note);
 }
 
 /** The file's messages together decompress past the bound of one file. */
 class Oversized extends Error {}
 
-/** A zstd message that is damaged after its frames decompressed to `decompressed` bytes. */
+/** A damaged zstd message, and what its frames count against the bound, the damaged one included
+ * (see {@link readZstd}). */
 class DamagedZstd extends ConversionError {
-  constructor(readonly decompressed: number) {
+  constructor(readonly counted: number) {
     super("a damaged zstd message");
   }
 }
@@ -506,9 +529,9 @@ export function binaryValues(
       // A message counts what it decompressed to, whether or not it then reads.
       let size = frame.byteLength;
       try {
-        const bytes = frameBytes(frame, maxBytes - total);
-        size = bytes.byteLength;
-        const value = messageValue(bytes, isZstd(frame), index + 1);
+        const read = frameBytes(frame, maxBytes - total);
+        size = read.counted;
+        const value = messageValue(read.bytes, isZstd(frame), index + 1, read.note);
         total += size;
         yield value;
       } catch (error) {
@@ -520,7 +543,7 @@ export function binaryValues(
           return;
         }
         if (!(error instanceof ConversionError)) throw error;
-        if (error instanceof DamagedZstd) size = Math.max(size, error.decompressed);
+        if (error instanceof DamagedZstd) size = Math.max(size, error.counted);
         total += size;
         problems.push({ line: index + 1, reason: `not an OTLP trace message: ${error.message}` });
       }

@@ -32,8 +32,11 @@ const tooLarge = (error: unknown) =>
   (error as NodeJS.ErrnoException | undefined)?.code === "ERR_BUFFER_TOO_LARGE";
 
 /** The file's content with its compression undone, and what of it could not be read; or why
- * none of it can be. */
-export type Decoded = { bytes: Uint8Array; note?: string } | { unsupported: string };
+ * none of it can be. `counted` is what decompressing it counts against the bounds when that is
+ * more than the content: each zstd frame counts at least a minimum (see {@link readZstd}). */
+export type Decoded =
+  | { bytes: Uint8Array; note?: string; counted?: number }
+  | { unsupported: string; counted?: number };
 
 /** The file's content with its compression undone, or why it cannot be read. `maxBytes` bounds
  * the decompressed size. */
@@ -43,14 +46,15 @@ export function decodeContainer(bytes: Uint8Array, maxBytes: number): Decoded {
   if (startsWith(bytes, GZIP)) decoded = gunzip(bytes, maxBytes);
   else if (isZstd(bytes)) decoded = unzstd(bytes, maxBytes);
   if ("unsupported" in decoded) return decoded;
+  const { counted } = decoded;
   if (decoded.bytes !== bytes) {
     if (startsWith(decoded.bytes, GZIP) || isZstd(decoded.bytes))
-      return { unsupported: "a file compressed twice; decompress it first" };
-    if (!decoded.bytes.byteLength) return { unsupported: "the file is empty" };
+      return { unsupported: "a file compressed twice; decompress it first", counted };
+    if (!decoded.bytes.byteLength) return { unsupported: "the file is empty", counted };
   }
   // An archive is read where the walk finds it on disk; one inside another is not opened.
   if (isZipSignature(decoded.bytes))
-    return { unsupported: "a ZIP archive inside the input; extract it first" };
+    return { unsupported: "a ZIP archive inside the input; extract it first", counted };
   return decoded;
 }
 
@@ -195,13 +199,36 @@ function withoutChecks(frame: Uint8Array, window: number): Buffer {
   ]);
 }
 
+/** What each zstd frame counts against the bound at least, whatever it decompresses to. Every
+ * frame costs a decompression of its own, so the bound also limits how many are read. */
+const MIN_FRAME_BYTES = 1024;
+/** What a zstd frame that does not decompress counts against the bound at least. Decompressing it
+ * up to its damage can cost as much as the bound, so repeated damage soon exhausts it. */
+const MIN_DAMAGED_BYTES = 1024 * 1024;
+/** zstd's errors for what a frame read without its checks ({@link withoutChecks}) leaves out: its
+ * checksum, its declared size (reported as corruption) and a single segment's window. */
+const CHECK_ERRORS = new Set([
+  "ZSTD_error_checksum_wrong",
+  "ZSTD_error_corruption_detected",
+  "ZSTD_error_frameParameter_windowTooLarge",
+]);
+
+/** Whether reading a frame without its checks can succeed where reading it whole failed: the frame
+ * declares a size, a single segment or a checksum, and failed with an error one of them causes. */
+const checkable = (frame: Uint8Array, error: unknown) =>
+  (frame[4]! & 0xe4) !== 0 &&
+  CHECK_ERRORS.has((error as NodeJS.ErrnoException | undefined)?.code ?? "");
+
 /** zstd content read frame by frame, each decompressed on its own: Node.js decompresses only the
  * first frame of what it is given, Bun every one. */
 export type ZstdRead =
   | {
       kind: "read";
-      parts: Buffer[];
-      /** The bytes the frames read decompressed to. */
+      /** What the frames read decompressed to. */
+      bytes: Buffer;
+      /** What the frames read count against the bound: what each decompressed to, at least
+       * {@link MIN_FRAME_BYTES}, and the frame read stopped at for its damage at least
+       * {@link MIN_DAMAGED_BYTES}. */
       size: number;
       frames: number;
       /** Where the frames read end, and why reading stopped there when it stopped early: bytes
@@ -209,58 +236,75 @@ export type ZstdRead =
       end: number;
       stop?: "trailing" | "truncated" | "damaged";
     }
-  /** The frames decompress to more than the bound. */
+  /** The frames count for more than the bound. */
   | { kind: "oversized" }
   /** A frame's blocks decompress whole to content its checksum or declared size does not match;
-   * `size` counts that content with the frames before it. */
+   * `size` counts that content, at least {@link MIN_DAMAGED_BYTES}, with the frames before it. */
   | { kind: "mismatched"; size: number };
 
-/** Every frame of zstd content, skippable frames passed over, together decompressing to at most
+/** Every frame of zstd content, skippable frames passed over, together counting for at most
  * `maxBytes`. A frame that fails to decompress is read again without the checks of its content
- * (see {@link withoutChecks}): content that then decompresses whole, and so does not match its
- * checksum or declared size, is `mismatched`, as a gzip member that fails its trailer is
- * damaged; blocks that still do not decompress stop the read there. */
+ * (see {@link withoutChecks}) when they could be why: content that then decompresses whole, and so
+ * does not match its checksum or declared size, is `mismatched`, as a gzip member that fails its
+ * trailer is damaged; blocks that do not decompress stop the read there. */
 export function readZstd(bytes: Uint8Array, maxBytes: number): ZstdRead {
-  const parts: Buffer[] = [];
+  // Node.js returns a small output as a view of its 16 KiB working chunk, and holding each output,
+  // or a copy of each, costs memory per frame, so the outputs are copied into one buffer that
+  // grows as it fills.
+  let content: Buffer = Buffer.alloc(0);
+  let length = 0;
   let size = 0;
   let pos = 0;
   let frames = 0;
+  const read = (end: number, stop?: "trailing" | "truncated" | "damaged"): ZstdRead => ({
+    kind: "read",
+    bytes: content.subarray(0, length),
+    size: stop === "damaged" ? size + MIN_DAMAGED_BYTES : size,
+    frames,
+    end,
+    ...(stop ? { stop } : {}),
+  });
   while (pos < bytes.byteLength) {
     const end = frameEnd(bytes, pos);
     if (end === "other" || end === "truncated")
-      return {
-        kind: "read",
-        parts,
-        size,
-        frames,
-        end: pos,
-        stop: end === "other" ? "trailing" : "truncated",
-      };
+      return read(pos, end === "other" ? "trailing" : "truncated");
     if (!skippable(bytes, pos)) {
       const frame = bytes.subarray(pos, end);
       const budget = maxBytes - size;
+      if (budget < MIN_FRAME_BYTES) return { kind: "oversized" };
       let output: Buffer;
       try {
         output = zlib.zstdDecompressSync(frame, { maxOutputLength: budget });
       } catch (error) {
         if (tooLarge(error)) return { kind: "oversized" };
+        if (!checkable(frame, error)) return read(pos, "damaged");
         try {
           output = zlib.zstdDecompressSync(withoutChecks(frame, budget), {
             maxOutputLength: budget,
           });
         } catch (unchecked) {
-          if (tooLarge(unchecked)) return { kind: "oversized" };
-          return { kind: "read", parts, size, frames, end: pos, stop: "damaged" };
+          return tooLarge(unchecked) ? { kind: "oversized" } : read(pos, "damaged");
         }
-        return { kind: "mismatched", size: size + output.byteLength };
+        return { kind: "mismatched", size: size + Math.max(output.byteLength, MIN_DAMAGED_BYTES) };
       }
-      parts.push(output);
-      size += output.byteLength;
+      if (!length) content = output;
+      else {
+        if (length + output.byteLength > content.byteLength) {
+          const grown = Buffer.alloc(
+            Math.min(maxBytes, Math.max(2 * content.byteLength, length + output.byteLength)),
+          );
+          content.copy(grown, 0, 0, length);
+          content = grown;
+        }
+        output.copy(content, length);
+      }
+      length += output.byteLength;
+      size += Math.max(output.byteLength, MIN_FRAME_BYTES);
       frames++;
     }
     pos = end;
   }
-  return { kind: "read", parts, size, frames, end: pos };
+  return read(pos);
 }
 
 /** zstd, every frame of it. Bytes after the last frame, a frame that breaks off and one whose
@@ -275,8 +319,8 @@ function unzstd(bytes: Uint8Array, maxBytes: number): Decoded {
     };
   const read = readZstd(bytes, maxBytes);
   if (read.kind === "oversized") return oversized("zstd", maxBytes);
-  if (read.kind === "mismatched") return { unsupported: "a damaged zstd file" };
-  const { parts, frames, stop, end: pos } = read;
+  if (read.kind === "mismatched") return { unsupported: "a damaged zstd file", counted: read.size };
+  const { frames, stop, end: pos, size: counted } = read;
   if (!frames)
     return {
       unsupported:
@@ -285,6 +329,7 @@ function unzstd(bytes: Uint8Array, maxBytes: number): Decoded {
           : stop
             ? "a damaged zstd file"
             : "a zstd file without data",
+      ...(counted ? { counted } : {}),
     };
   const note =
     stop === "trailing"
@@ -294,7 +339,7 @@ function unzstd(bytes: Uint8Array, maxBytes: number): Decoded {
         : stop === "damaged"
           ? "the zstd file is damaged; what follows the damage was not read"
           : undefined;
-  return { bytes: Buffer.concat(parts), ...(note ? { note } : {}) };
+  return { bytes: read.bytes, ...(note ? { note } : {}), counted };
 }
 
 /** One JSON value read from a file: the whole document, or one line of JSON Lines. */

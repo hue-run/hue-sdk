@@ -527,7 +527,8 @@ that no format reads whole, and each message of a length-prefixed protobuf file 
 its own. CSV and Parquet are not read: export JSON or JSON Lines.
 
 Damage stays local. A gzip or zstd file that breaks off, or holds bytes after its last member or
-frame, is read up to the break and the rest named in `files.notes`; one whose content fails its
+frame, is read up to the break and the rest named in `files.notes`, as is a zstd message of a
+length-prefixed protobuf file with bytes after its last frame; one whose content fails its
 checksum or the size its member or frame declares is not read. A line that is not UTF-8 is named and
 the other lines read. A bare `NaN`, `Infinity` or `-Infinity` (Python's `json.dumps` writes them) is
 read as null and named in `files.notes`. A value nested more than 512 levels deep is named and not
@@ -581,9 +582,11 @@ exactly as recorded, and the spans of one trace split between files of these for
 one trace. A span that two files hold is read once when the copies differ only in encoding: key
 order, an int64 or a uint32 as a number or decimal text, an enum by name or number, a double as a
 number or text, bytes or an id as hex or as standard or URL-safe base64, padded or not, or a field
-at its default written or left out. A trace or span id that is not an OpenTelemetry id (an
-exporter's UUID, for example) is mapped to one derived from it by SHA-256, with the original kept
-as `hue.import.original_trace_id` or `hue.import.original_span_id`.
+at its default written or left out, and the user and conversation are read alike from either
+copy, as Hue reads them. A trace or span id that is not an OpenTelemetry id (an exporter's UUID,
+for example) is mapped to one derived from it by SHA-256, with the original kept as
+`hue.import.original_trace_id` or `hue.import.original_span_id`; base64 without its padding is
+read as an id only as an encoder writes the id's bytes.
 
 - Jaeger UI JSON, Zipkin v2 and Phoenix spans are written as the OTLP spans they were, as the
   OpenTelemetry Collector converts Jaeger and Zipkin spans. Attributes keep their own names
@@ -618,7 +621,7 @@ as `hue.import.original_trace_id` or `hue.import.original_span_id`.
   it, and a tool span per call with the result that answers it. The agent's reply is the answer
   logged with the request, else the last turn when the conversation ends with it; a conversation
   that goes on past its last turn, as a request logged without its response does, is the agent's
-  input whole and has no reply.
+  input whole and has no reply, as is a Responses request logged with an empty `output`.
 - A vendor's own evaluation recorded inside a production trace is read as such, not as the
   agent's work: a Braintrust span with `purpose: "scorer"` or of type `score`, `automation`,
   `facet`, `classifier`, `preprocessor` or `review` (online scoring adds them to production
@@ -639,9 +642,11 @@ Rules shared by the row formats:
 - Copies: a record exported more than once keeps its latest copy, by the field the format records
   it in (Braintrust's `_xact_id`, Langfuse's `updatedAt`, Opik's `last_updated_at`, Helicone's
   `updated_at`, the ended copy of a LangSmith run, a Weave call, an OpenAI Agents span or a
-  Raindrop event). Copies of a span with no such field must agree, or the trace is refused. A
-  record identical to one read elsewhere (a repeated line of a chat JSONL file, an overlap of two
-  exports) is read once, and the value that added nothing new is named in `files.notes`.
+  Raindrop event). Copies of a span with no such field must agree, or the trace is refused; an
+  MLflow trace's `info`, which a later export may extend, is not compared, and one export's is
+  kept, the same whichever file is read first. A record identical to one read elsewhere (a
+  repeated line of a chat JSONL file, an overlap of two exports) is read once, and the value that
+  added nothing new is named in `files.notes`.
 - Token counts follow the GenAI conventions: input includes cached input and output includes
   reasoning, with the cached, cache-write and reasoning counts also kept on their own. Helicone
   stores `prompt_tokens` without `prompt_cache_read_tokens` and `prompt_cache_write_tokens`, and
@@ -693,10 +698,10 @@ LangSmith, Braintrust, Mastra and OpenInference metadata), except that `user.id`
 `user.account_uuid` names a Claude Code installation and is passed over. The conversation the
 manifest declares is the one Hue's trace list shows: that of the trace's root span (the earliest
 span with no parent; without one, the only span whose parent is outside the trace, when that span
-runs an agent, an agent step or a workflow), else that of the earliest span that names one, spans
-ordered by their start in milliseconds, then by span id. The manifest declares none when that span
-is a tool span or beneath one, or when Hue does not show the id as it is: one longer than 2,048
-bytes of UTF-8, or holding a NUL or an unpaired surrogate.
+runs an agent or a workflow), else that of the earliest span that names one, spans ordered by
+their start in milliseconds, then by span id. The manifest declares none when that span is a tool
+span or beneath one, or when Hue does not show the id as it is: one longer than 2,048 bytes of
+UTF-8, or holding a NUL or an unpaired surrogate.
 
 **`--user-key` and `--session-key`.** For an export whose user sits under a key of its own,
 `--user-key <key>` names it, and `--session-key <key>` names the conversation the same way. The key
@@ -736,7 +741,9 @@ repeat more than 64 MiB of conversation (each turn's model span holds the conver
 An input of more than 25,000 traces, more than 256 MiB decompressed (every trace is held until all
 are read; prepare a larger export in parts, each to its own `--out`), or whose manifest would exceed
 32 MiB (4 MiB compressed), is refused whole. The messages of one length-prefixed protobuf file share
-the 64 MiB a file may decompress to.
+the 64 MiB a file may decompress to. Each zstd frame counts at least 1 KiB against these bounds,
+and a frame that does not decompress at least 1 MiB: 65,536 tiny frames fill one file's bound, and
+256 damaged zstd files the input's.
 
 **Report.** `prepare` reports what it read and what it could not, down to the line; `--json` prints
 the report as one object:

@@ -104,20 +104,24 @@ export class ImportReader {
     };
   }
 
-  /** Reads one file's bytes; returns the size of its decoded content. */
+  /** Reads one file's bytes; returns the size of its decoded content, or what decompressing it
+   * counted when more (see {@link decodeContainer}). */
   read(file: string, raw: Uint8Array): number {
     const decoded = decodeContainer(raw, this.options.maxFileBytes);
+    // What decompressing the file counted, damage and zstd's per-frame minimum included.
+    const counted = decoded.counted ?? 0;
     if ("unsupported" in decoded) {
       this.result.unsupported.push({ file, reason: decoded.unsupported });
-      return raw.byteLength;
+      return Math.max(raw.byteLength, counted);
     }
     const binary = binaryValues(decoded.bytes, this.options.maxFileBytes);
     const parsed = binary ?? parseValues(decoded.bytes);
     if ("unsupported" in parsed) {
       this.result.unsupported.push({ file, reason: parsed.unsupported });
-      return decoded.bytes.byteLength;
+      return Math.max(decoded.bytes.byteLength, counted);
     }
-    const size = () => ("bytes" in parsed ? parsed.bytes() : decoded.bytes.byteLength);
+    const size = () =>
+      Math.max("bytes" in parsed ? parsed.bytes() : decoded.bytes.byteLength, counted);
     const digest = sha256Hex(decoded.bytes);
     const skipped = new Reported(file);
     const notes = new Reported(file);

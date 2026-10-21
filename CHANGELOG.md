@@ -18,19 +18,29 @@ refuses to publish a version without a matching entry below.
   format, and a Helicone request body with such an `input` was kept as raw JSON.
 - **Wire** A chat transcript (OpenAI chat or Responses, Anthropic Messages) that goes on past its
   last assistant turn, as a request logged without its response does, has the whole conversation
-  as its agent's input and no reply. Its last assistant turn was read as the reply, and the
+  as its agent's input and no reply, and so does a Responses request logged with an empty
+  `output`, whatever its `input` ends with. Its last assistant turn was read as the reply, and the
   messages after it, the request among them, were on no span. No model call stands for the
   response the source lacks.
 - **Wire** A dotted `--user-key` or `--session-key` finds a key an MLflow trace records in a span's
   own attributes or in the trace's tags, not only in its metadata: a span's attributes first, then
   the trace's metadata, then its tags. A JSONPath or JSON Pointer reads the trace's `info` on each
-  of its root spans, a span whose parent is outside the export included.
+  of its root spans, a span whose parent is outside the export included. Two exports of one MLflow
+  trace whose `info` differs, as when a tag was added between them, are read once, keeping one
+  export's `info`, the same whichever file is read first; when the trace's root had no parent, the
+  trace was refused with `span … appears with different content`.
 - A zstd file with a frame whose content fails its checksum, or is longer or shorter than the frame
   declares, is not read, as a gzip file with a member that fails its trailer is not; the frames
   before it were read and the damage only noted. A zstd file that breaks off, or whose frame does
   not decompress, is still read up to the damage. Each zstd message of a length-prefixed protobuf
-  file is read frame by frame, where Node.js read only its first frame, and a damaged one counts
-  what its frames decompressed to against the file's 64 MiB bound.
+  file is read frame by frame, where Node.js read only its first frame, bytes after its last frame
+  (zero padding) are named in `files.notes`, and a damaged one counts what its frames decompressed
+  to against the file's 64 MiB bound. Each zstd frame counts at least 1 KiB against that bound, so
+  the bound also limits how many frames a file or message holds, and a file of many tiny frames is
+  held in memory at its size, not 16 KiB a frame. A frame that does not decompress counts at least
+  1 MiB, against the input's 256 MiB bound as well, so repeated damage ends the read instead of
+  being decompressed copy after copy. A frame is read again without its checksum and declared size
+  only when they could be the damage.
 - A gzip file that breaks off inside a member's 8-byte trailer is not read when the CRC-32 it holds
   does not match the member's data; it was read up to the break.
 - **Wire** Once `--user-key` decides a converted trace's user, or that it has none, no span's
@@ -42,10 +52,15 @@ refuses to publish a version without a matching entry below.
   text, an enum by name or number, a double as a number or text, bytes or an id as hex or as
   standard or URL-safe base64, padded or not, or a field at its default written or left out. Its
   trace was refused with `span … appears with different content`. The copy kept does not depend on
-  the order the files are read in.
+  the order the files are read in, and the user and conversation are read alike from any of these
+  spellings, as Hue reads them: a double as decimal text (`"42"`), an int64 with leading zeros,
+  bytes in URL-safe or unpadded base64. A double user id written as text was read as none.
 - **Wire** A binary OTLP double that is NaN or infinite is written as OTLP/JSON names it (`"NaN"`,
-  `"Infinity"`, `"-Infinity"`), not as `null`. A trace or span id written as URL-safe base64 is read
-  as the id it encodes; it was mapped to an id derived from its text.
+  `"Infinity"`, `"-Infinity"`), not as `null`. A trace or span id written as URL-safe base64, or as
+  base64 without its padding, is read as the id it encodes; it was mapped to an id derived from its
+  text. Without padding, an id is read so only as an encoder writes its bytes, and other text of
+  that length is mapped as before, so two ids that differ only in bits base64 leaves unused stay
+  two.
 - **Wire** Each `execute_tool` span of a chat transcript keeps the block that holds its result,
   else its call, as `hue.import.source_record` rather than the whole message, so a message of many
   parallel calls is not copied into every call's span. Each result answers one call, the first
@@ -56,12 +71,14 @@ refuses to publish a version without a matching entry below.
   span's, else the earliest span's that names one), and none when a tool span or a span beneath one
   names it, or when the id is longer than 2,048 bytes of UTF-8, which Hue does not show as it is.
   It could name a tool's conversation, or another span's in place of a long id. A span whose
-  parent is outside the trace is its root when it runs an agent by any name Hue reads, an agent
-  step or MLflow's `AGENT` among them, and a tool span is one any instrumentation convention Hue
-  reads takes as a call (MLflow, Braintrust, Genkit, LangSmith, Spring AI, Claude Code and
-  VoltAgent tool spans too), for the owner as for the conversation. `--session-key` adds its
-  conversation to a trace whose agent spans name none, starting before any tool span that names
-  one so that the trace list shows it.
+  parent is outside the trace is its root when it runs an agent by any name Hue reads, MLflow's
+  `AGENT` among them, and a tool span is one any instrumentation convention Hue reads takes as a
+  call (MLflow, Braintrust, Genkit, LangSmith, Spring AI, Claude Code and VoltAgent tool spans
+  too), for the owner as for the conversation. As Hue does, it reads a span's operation and tool
+  keys from text values only, never a number or bytes, and the JSON of `braintrust.span_attributes`
+  and `mlflow.spanType` only while it nests at most 32 levels deep and holds only finite numbers
+  and safe integers. `--session-key` adds its conversation to a trace whose agent spans name none,
+  starting before any tool span that names one so that the trace list shows it.
 
 ### [0.22.0] - 2026-10-21
 

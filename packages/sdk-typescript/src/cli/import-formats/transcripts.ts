@@ -30,8 +30,9 @@ import { nanosFrom, readRecords, type SpanRow } from "./rows.js";
  * `is_error`). The agent's reply is a logged answer (a response object, or `output` beside a
  * request's `input`), which is the last turn and carries the token usage the source records, else
  * the last turn when the conversation ends with it. A conversation that goes on past its last
- * turn is a request logged without its reply: the agent's input is all of it, and it has no
- * reply. A transcript whose turns together repeat more than 64 MiB of conversation is refused.
+ * turn, and a Responses request logged with an empty `output`, is a request logged without its
+ * reply: the agent's input is all of it, and it has no reply. A transcript whose turns together
+ * repeat more than 64 MiB of conversation is refused.
  *
  * - Ids: a response's own id (`msg_…`, `resp_…`) names the trace; otherwise the trace id derives
  *   from the SHA-256 of the value's canonical JSON, so the same transcript is the same trace.
@@ -205,6 +206,9 @@ interface Transcript {
   tools?: JsonValue;
   user?: string;
   session?: string;
+  /** Logged with an empty answer (a request's empty `output`), so the conversation has no reply,
+   * whatever it ends with. */
+  unanswered?: true;
 }
 
 interface Turn {
@@ -297,9 +301,10 @@ function transcriptRows(traceKey: string, transcript: Transcript): SpanRow[] {
   const system = transcript.system;
   const last = turns.at(-1);
   // The reply is the logged answer, else the last turn when the conversation ends with it. A
-  // conversation that goes on past its last turn, or has none, is a request logged without its
-  // reply: the agent's input is all of it, so its last message is the request.
-  const replied = answerItems !== undefined || last?.end === history.length;
+  // conversation that goes on past its last turn, or has none, or was logged with an empty answer,
+  // is a request logged without its reply: the agent's input is all of it.
+  const replied =
+    answerItems !== undefined || (!transcript.unanswered && last?.end === history.length);
   const input = replied ? items.slice(0, turns[0]?.at ?? history.length) : items;
   const reply = answerItems ?? (replied && last ? items.slice(last.at, last.end) : undefined);
   const rows: SpanRow[] = [
@@ -656,6 +661,7 @@ export const openaiResponses: ImportAdapter = {
           Array.isArray(fields.output) && (isResponseObject(fields) || !noOutput(fields.output))
             ? fields.output
             : undefined;
+        const unanswered = !isResponseObject(fields) && "output" in fields && !output;
         const input =
           fields.input === undefined || fields.input === null
             ? []
@@ -696,6 +702,7 @@ export const openaiResponses: ImportAdapter = {
           ...(fields.tools !== undefined ? { tools: fields.tools } : {}),
           ...(user !== undefined ? { user } : {}),
           ...(session !== undefined ? { session } : {}),
+          ...(unanswered ? { unanswered: true } : {}),
         };
       },
       (fields) => (isResponseObject(fields) ? text(fields.id) : undefined),

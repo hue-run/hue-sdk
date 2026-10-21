@@ -607,6 +607,37 @@ describe("MLflow traces", () => {
       user: "tag-customer",
     });
   });
+
+  test("reads once a trace two exports hold though the later one adds to its info", async () => {
+    const monday = JSON.parse(await fixture("mlflow-trace.json")) as Record<string, any>;
+    const tuesday = structuredClone(monday);
+    tuesday.info.tags.reviewed = "true";
+    for (const parent of [undefined, Buffer.from("1122334455667788", "hex").toString("base64")]) {
+      // A root without a parent, then one whose parent is outside the export.
+      for (const trace of [monday, tuesday]) trace.data.spans[0].parent_span_id = parent;
+      const prepared = [];
+      for (const [first, second] of [
+        [monday, tuesday],
+        [tuesday, monday],
+      ]) {
+        const report = await prepareFiles({
+          "a.json": JSON.stringify(first),
+          "b.json": JSON.stringify(second),
+        });
+        expect(report.traces.refused).toEqual([]);
+        expect(report.files.notes).toEqual([
+          { file: "b.json", reason: "the same records as a.json, read once" },
+        ]);
+        prepared.push(await bundle(report.output_directory));
+      }
+      // One export's info is kept, the same whichever is read first.
+      expect(prepared[1]!.batches()).toEqual(prepared[0]!.batches());
+      const agent = named(await prepared[0]!.spans(MLFLOW_TRACE), "support_agent");
+      expect((json(agent, "hue.import.source_record") as { info: unknown }).info).toEqual(
+        tuesday.info,
+      );
+    }
+  });
 });
 
 describe("MLflow span links", () => {

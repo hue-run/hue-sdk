@@ -406,6 +406,58 @@ if (typeof zlib.zstdCompressSync === "function") {
   )
     throw new Error("Installed hue traces import prepare did not read every frame of a zstd file");
   console.log("traces import: every frame of a two-frame zstd file read under Node.js");
+  // So does each zstd message of a length-prefixed binary OTLP file (the Collector's file
+  // exporter): one ExportTraceServiceRequest of four spans, compressed as two frames.
+  const varint = (value) => {
+    const bytes = [];
+    for (; value > 0x7f; value >>>= 7) bytes.push((value & 0x7f) | 0x80);
+    return Buffer.from([...bytes, value]);
+  };
+  const field = (number, payload) =>
+    Buffer.concat([varint(number * 8 + 2), varint(payload.byteLength), payload]);
+  const fixed64 = (number, value) => {
+    const bytes = Buffer.alloc(9);
+    bytes[0] = number * 8 + 1;
+    bytes.writeBigUInt64LE(value, 1);
+    return bytes;
+  };
+  const span = (index) =>
+    field(
+      2,
+      Buffer.concat([
+        field(1, Buffer.from(index.toString(16).padStart(32, "0"), "hex")),
+        field(2, Buffer.from("0000000000000001", "hex")),
+        field(5, Buffer.from("turn")),
+        fixed64(7, 1760000000000000000n),
+        fixed64(8, 1760000000001000000n),
+      ]),
+    );
+  const request = field(1, field(2, Buffer.concat([1, 2, 3, 4].map(span))));
+  const message = Buffer.concat([
+    zlib.zstdCompressSync(request.subarray(0, 40)),
+    zlib.zstdCompressSync(request.subarray(40)),
+  ]);
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(message.byteLength);
+  const collector = join(exports, "collector.binpb");
+  await writeFile(collector, Buffer.concat([length, message]));
+  const preparedMessages = spawnSync(
+    join(minimal, "node_modules", ".bin", "hue"),
+    ["traces", "import", "prepare", collector, "--out", join(exports, "messages"), "--json"],
+    { cwd: exports, encoding: "utf8", timeout: 10000, env: process.env },
+  );
+  const messages = preparedMessages.status === 0 ? JSON.parse(preparedMessages.stdout) : undefined;
+  if (
+    !messages ||
+    messages.totals.traces !== 4 ||
+    messages.files.unsupported.length ||
+    messages.files.skipped.length ||
+    messages.files.notes.length
+  )
+    throw new Error(
+      "Installed hue traces import prepare did not read every frame of a zstd OTLP message",
+    );
+  console.log("traces import: every frame of a two-frame zstd OTLP message read under Node.js");
 } else console.log("traces import: zstd frame check skipped (this Node.js has no zstd)");
 // Without --auth, the installed CLI signs Claude Code in unless HUE_MCP_KEY is set, and names its
 // choice on stderr so --print stays a snippet; it checks the variable's presence, never prints it.

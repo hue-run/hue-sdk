@@ -946,14 +946,19 @@ describe("chat transcripts", () => {
     ];
     const responses = { model: "gpt-4.1-mini", input: asked };
     const empty = { model: "gpt-4.1-mini", input: "Hello", output: [] };
+    // Logged with an empty output, whatever its input ends with: an assistant message there is a
+    // turn of the conversation sent, never the reply.
+    const unanswered = { model: "gpt-4.1-mini", input: asked.slice(0, 2), output: [] };
     const chat = { model: "gpt-4.1-mini", messages: asked };
     expect(claims(empty)).toEqual(["openai_responses"]);
     const report = await prepare(
       await scratch({
-        "requests.jsonl": [responses, empty, chat].map((line) => JSON.stringify(line)).join("\n"),
+        "requests.jsonl": [responses, empty, unanswered, chat]
+          .map((line) => JSON.stringify(line))
+          .join("\n"),
       }),
     );
-    expect(report.formats).toEqual({ openai_responses: 2, openai_chat: 1 });
+    expect(report.formats).toEqual({ openai_responses: 3, openai_chat: 1 });
     const { spans } = await bundle(report);
     const sent = asked.map(({ role, content }) => ({ role, parts: [{ type: "text", content }] }));
     for (const [format, request] of [
@@ -971,6 +976,13 @@ describe("chat transcripts", () => {
     const alone = await spans(derived("openai_responses", sha256(canonical(empty))));
     expect(alone.map((span) => span.name)).toEqual(["invoke_agent"]);
     expect(attr(alone[0]!, "gen_ai.output.messages")).toBeUndefined();
+    const [agent, turn, ...rest] = await spans(
+      derived("openai_responses", sha256(canonical(unanswered))),
+    );
+    expect(json(agent!, "gen_ai.input.messages")).toEqual(sent.slice(0, 2));
+    expect(attr(agent!, "gen_ai.output.messages")).toBeUndefined();
+    expect(json(turn!, "gen_ai.output.messages")).toEqual([sent[1]]);
+    expect(rest).toEqual([]);
   });
 
   test("reads a Helicone request body whose Responses input is untyped messages", async () => {

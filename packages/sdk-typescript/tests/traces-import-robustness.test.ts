@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
@@ -8,7 +8,8 @@ import { Writable } from "node:stream";
 import * as zlib from "node:zlib";
 import { runTracesCommand } from "../src/cli/traces-import.js";
 import type { TraceImportManifest } from "../src/cli/traces-import-convert.js";
-import { decodeContainer, parseValues } from "../src/cli/import-formats/containers.js";
+import { decodeContainer, parseValues, readZstd } from "../src/cli/import-formats/containers.js";
+import { ImportReader } from "../src/cli/import-formats/reader.js";
 import { RowTraceCollector, type SpanRow } from "../src/cli/import-formats/rows.js";
 
 // Damaged, deep, huge and malformed inputs: each refuses only what it damages, never the run.
@@ -449,8 +450,11 @@ describe("damaged containers", () => {
       const second = zlib.zstdCompressSync(Buffer.from(lines(4, 7)), checksummed);
       const corrupt = Buffer.from(second);
       corrupt[corrupt.byteLength - 1]! ^= 0xff;
+      // Each frame counts at least 1 KiB against the bound, and a damaged one at least 1 MiB.
+      const damage = 1024 + 1024 * 1024;
       expect(decodeContainer(Buffer.concat([first, corrupt]), 1 << 20)).toEqual({
         unsupported: "a damaged zstd file",
+        counted: damage,
       });
       // A frame whose content is one byte longer or shorter than its header declares, with a
       // checksum or without one, as gzip's size field: the low byte of the declared size.
@@ -461,6 +465,7 @@ describe("damaged containers", () => {
           resized[5 + ((descriptor >> 5) & 1 ? 0 : 1) + [0, 1, 2, 4][descriptor & 3]!]! ^= flip;
           expect(decodeContainer(Buffer.concat([first, resized]), 1 << 20)).toEqual({
             unsupported: "a damaged zstd file",
+            counted: damage,
           });
         }
       // A frame whose blocks do not decompress (literals that name a table the frame never
@@ -469,12 +474,66 @@ describe("damaged containers", () => {
       expect(decodeContainer(Buffer.concat([first, damaged, second]), 1 << 20)).toEqual({
         bytes: Buffer.from(lines(1, 3)),
         note: "the zstd file is damaged; what follows the damage was not read",
+        counted: damage,
       });
       // A frame that breaks off is still read up to the break.
       expect(decodeContainer(Buffer.concat([first, second.subarray(0, -2)]), 1 << 20)).toEqual({
         bytes: Buffer.from(lines(1, 3)),
         note: "the zstd file breaks off; what follows the last complete frame was not read",
+        counted: 1024,
       });
+    },
+  );
+
+  test.skipIf(typeof zlib.zstdCompressSync !== "function")(
+    "counts each zstd frame at least 1 KiB and holds a tiny one at its size",
+    () => {
+      const tiny = (count: number) =>
+        Buffer.concat(
+          Array.from({ length: count }, () => zlib.zstdCompressSync(Buffer.from("\n"))),
+        );
+      const read = readZstd(tiny(500), 1 << 20);
+      if (read.kind !== "read") throw new Error(`read as ${read.kind}`);
+      expect(read.frames).toBe(500);
+      expect(read.size).toBe(500 * 1024);
+      // zlib decompresses each frame into a 16 KiB chunk; only the byte it holds is kept.
+      expect(read.bytes.toString()).toBe("\n".repeat(500));
+      expect(read.bytes.buffer.byteLength).toBeLessThan(65_536);
+      // The bound limits how many frames a file holds, whatever they decompress to.
+      expect(decodeContainer(tiny(1_025), 1 << 20)).toEqual({
+        unsupported: "a zstd file that decompresses to more than 1048576 bytes",
+      });
+    },
+  );
+
+  test.skipIf(typeof zlib.zstdCompressSync !== "function")(
+    "reads a zstd frame again without its checks only when they could be its damage",
+    () => {
+      const checksummed = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } };
+      const mismatched = zlib.zstdCompressSync(Buffer.from(lines(1, 3)), checksummed);
+      mismatched[mismatched.byteLength - 1]! ^= 0xff;
+      // Blocks that do not decompress, in a frame that declares no size, no single segment and
+      // no checksum, and in one with a checksum, which the damage comes before.
+      const blocks = [0x25, 0, 0, 0x03, 0, 0, 0];
+      const bare = Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0, 0, ...blocks]);
+      const checked = Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 4, 0, ...blocks, 0, 0, 0, 0]);
+      const decompress = spyOn(zlib, "zstdDecompressSync");
+      try {
+        const reads = (frame: Buffer) => {
+          decompress.mockClear();
+          const read = readZstd(frame, 1 << 22);
+          return [read.kind, decompress.mock.calls.length];
+        };
+        expect(reads(mismatched)).toEqual(["mismatched", 2]);
+        expect(reads(bare)).toEqual(["read", 1]);
+        expect(reads(checked)).toEqual(["read", 1]);
+      } finally {
+        decompress.mockRestore();
+      }
+      // A file that does not decompress counts at least 1 MiB against the input's bound, so
+      // many of them stop the run instead of each costing a decompression.
+      const reader = new ImportReader({ maxFileBytes: 64 * 1024 * 1024 });
+      expect(reader.read("damaged.jsonl.zst", bare)).toBe(1024 * 1024);
     },
   );
 });
