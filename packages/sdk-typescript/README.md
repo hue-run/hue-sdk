@@ -563,8 +563,11 @@ npx -y @hue-run/sdk@0.21.1 import langfuse --env-path .env.langfuse --from 2026-
   `langfuse.observation.*` and `langfuse.trace.*` attributes Hue reads, the user, session, release
   and environment, and the model and token counts as GenAI attributes. Hex ids are kept and other
   ids derived from them, so running the same command again resumes an import without duplicates.
-- Langfuse's environment is also sent, as recorded, as `hue.import.source_environment`; only
-  traces Langfuse recorded in `production` add to a user's World.
+- Langfuse's environment is also sent, as recorded, as `hue.import.source_environment`.
+  Ended traces with a resolved user can contribute to that user's World with any environment
+  value or without an environment declaration. Traces linked to Hue runs, World instances, or
+  run executions never contribute. Hue's evaluation and simulation evidence and deliberately
+  excluded traces also stay excluded.
 - Spans are exported by the SDK's transport with its content-capture default; `--no-content`
   sends metadata only.
 - With `--media`, files that Langfuse media references point to are downloaded and uploaded under
@@ -609,8 +612,8 @@ npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authoriza
   read, each line or record of a file it could not read (the rest of the file is read), what it
   read with a repair (a compressed file read up to a break, `NaN` read as null) or read once though
   the input held it twice, the traces refused (a malformed record refuses only its trace), the instants filled in by a fixed rule,
-  invalid vendor ids mapped to OpenTelemetry ids, and the traces without a history owner, read from
-  the spans as Hue reads them. Nothing about a file's name or place reaches a span.
+  invalid vendor ids mapped to OpenTelemetry ids, and the traces without a declared history owner,
+  read from the spans as Hue reads them. Nothing about a file's name or place reaches a span.
 - `upload` registers the manifest, sends each trace's large values and batches in order, two
   requests at a time, checks every span's receipt, reconciles and completes the import. Interrupted,
   run it again: it resumes from `progress.json` in the bundle. An expired authorization is renewed

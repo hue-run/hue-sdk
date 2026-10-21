@@ -110,9 +110,12 @@ await hue.withSpan("assistant request", () =>
 await hue.shutdownSafe();
 ```
 
-An attached client uses your application's existing OpenTelemetry resource; configure production
-provenance there. Mark faithful production traffic accurately. Eval, simulation and excluded
-traffic cannot populate a live user's World. Historical imports require separate trusted admission.
+An attached client uses your application's existing OpenTelemetry resource. Ended traces with a
+resolved user can contribute to that user's World with any environment value or without an
+environment declaration. Historical records sent over OTLP follow the same rule. The
+[verified import route](https://docs.hue.run/guides/import-traces) retains the recorded origin and
+follows the same rule after verification. Traces linked to Hue runs, World instances, or run executions never contribute.
+Hue's evaluation and simulation evidence and deliberately excluded traces also stay excluded.
 
 Use the same fields with your framework's tool-span hook. A parent-only account label cannot
 resolve several accounts used by different tool calls. Account IDs and resource IDs stay separate;
