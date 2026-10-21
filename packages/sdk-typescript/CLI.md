@@ -544,9 +544,10 @@ or re-zipped copy of the bundle prepares to byte-identical batches and the same 
 The report (`--json` prints it as one object) names `manifest_digest`, `totals` (traces, batches,
 spans, blobs, bytes) and `source`, which `prepare_trace_import` takes as given; the formats
 recognized and the traces each file held; the files it could not read, with the reason; the traces
-and spans it refused; the traces without a history owner (a root `user.id`, a Langfuse `userId`, an
-ATIF `extra.user_id`, or an explicit `hue.world.entity.namespace` and `hue.world.entity.id`), which
-import like any other trace but leave a gap in continuous history; the origin each source recorded
+and spans it refused; the traces without a declared history owner (a root `user.id`, a Langfuse
+`userId`, an ATIF `extra.user_id`, or an explicit `hue.world.entity.namespace` and
+`hue.world.entity.id`), which import like any other trace and can contribute to a World if Hue
+resolves their owner from the imported records; the origin each source recorded
 (`production`, `evaluation`, `simulation` or `unknown`; evaluation and simulation traffic is
 imported and kept out of production history); and the traces whose vendor ids were mapped. An
 existing `--out` directory is accepted only while it holds nothing but an earlier preparation and

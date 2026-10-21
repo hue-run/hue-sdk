@@ -596,8 +596,8 @@ npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authoriza
 
 - `prepare` writes each trace as gzip OTLP/JSON batches beside a manifest and reports the
   manifest's digest and totals, the formats recognized, the files it could not read, invalid vendor
-  ids it mapped to OpenTelemetry ids, and the traces without a history owner (a root `user.id` or an
-  explicit entity). Nothing about a file's name or place reaches a span.
+  ids it mapped to OpenTelemetry ids, and the traces without a declared history owner (a root
+  `user.id` or an explicit entity). Nothing about a file's name or place reaches a span.
 - `upload` registers the manifest, sends each trace's large values and batches in order, two
   requests at a time, checks every span's receipt, reconciles and completes the import. Interrupted,
   run it again: it resumes from `progress.json` in the bundle. An expired authorization is renewed

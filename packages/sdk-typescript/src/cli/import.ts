@@ -99,8 +99,10 @@ Copy traces from a Langfuse project into Hue. The import runs on this machine wi
 Langfuse keys, which are sent only to Langfuse. Each observation becomes a span with the
 langfuse.* attributes Hue reads; ids are kept, so running the same command again resumes an
 import without duplicating what was already sent. Langfuse's environment is also sent, as
-recorded, as hue.import.source_environment; only traces Langfuse recorded in production add to
-a user's World.
+recorded, as hue.import.source_environment. Ended traces with a resolved user can contribute to
+that user's World regardless of deployment environment. Traces linked to Hue runs, World instances,
+or run executions never contribute. Hue's evaluation and simulation evidence and deliberately
+excluded traces also stay excluded.
 
 Langfuse (keys from the environment or --env-path; the secret key never from the command line):
   LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY  The Langfuse project's API keys
