@@ -110,13 +110,12 @@ await hue.withSpan("assistant request", () =>
 await hue.shutdownSafe();
 ```
 
-An attached client uses your application's existing OpenTelemetry resource; declare its environment
-there. Missing or empty environment declarations and the exact value `production` can contribute
-to a user's World. Any explicit nonproduction declaration prevents capture, even if another
-declaration says `production`. Eval, simulation and excluded traffic cannot populate a live user's
-World. Historical records sent over OTLP follow the same environment rule. The
+An attached client uses your application's existing OpenTelemetry resource. Ended traces with a
+resolved user can contribute to that user's World with any environment value or without an
+environment declaration. Historical records sent over OTLP follow the same rule. The
 [verified import route](https://docs.hue.run/guides/import-traces) retains the recorded origin and
-follows the same environment rule. Verification does not override an explicit nonproduction declaration.
+follows the same rule after verification. Traces linked to Hue runs, World instances, or run executions never contribute.
+Hue's evaluation and simulation evidence and deliberately excluded traces also stay excluded.
 
 Use the same fields with your framework's tool-span hook. A parent-only account label cannot
 resolve several accounts used by different tool calls. Account IDs and resource IDs stay separate;

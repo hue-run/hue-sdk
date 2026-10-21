@@ -564,9 +564,10 @@ npx -y @hue-run/sdk@0.21.1 import langfuse --env-path .env.langfuse --from 2026-
   and environment, and the model and token counts as GenAI attributes. Hex ids are kept and other
   ids derived from them, so running the same command again resumes an import without duplicates.
 - Langfuse's environment is also sent, as recorded, as `hue.import.source_environment`.
-  Missing or empty environment declarations and the exact value `production` can contribute to
-  a user's World. Any explicit nonproduction declaration prevents capture, even if another
-  declaration says `production`. Evaluation and simulation traffic never contributes.
+  Ended traces with a resolved user can contribute to that user's World with any environment
+  value or without an environment declaration. Traces linked to Hue runs, World instances, or
+  run executions never contribute. Hue's evaluation and simulation evidence and deliberately
+  excluded traces also stay excluded.
 - Spans are exported by the SDK's transport with its content-capture default; `--no-content`
   sends metadata only.
 - With `--media`, files that Langfuse media references point to are downloaded and uploaded under

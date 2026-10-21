@@ -433,11 +433,10 @@ instrumentation scope `@hue-run/sdk/import/langfuse`.
 **Environment and Worlds.** A span whose observation, or v1 trace, records an environment also
 carries it as recorded in `hue.import.source_environment`, which marks the trace as imported; one
 that records none carries neither attribute, and the resource never declares
-`deployment.environment.name`, since one import can mix environments. Missing or empty environment
-declarations and the exact value `production` can contribute to a user's World. Hue reads the
-root's `langfuse.environment` as the trace's deployment environment. Any explicit nonproduction
-declaration, such as Langfuse's `default`, prevents capture, even if another declaration says
-`production`. Evaluation and simulation traffic never contributes.
+`deployment.environment.name`, since one import can mix environments. Ended traces with a resolved
+user can contribute to that user's World with any environment value or without an environment
+declaration. Traces linked to Hue runs, World instances, or run executions never contribute.
+Hue's evaluation and simulation evidence and deliberately excluded traces also stay excluded.
 
 **Ids and resuming.** A Langfuse id that already is an OpenTelemetry id (32 lowercase hex digits for
 a trace, 16 for an observation, as Langfuse's OpenTelemetry SDKs write them) is kept; any other id,
