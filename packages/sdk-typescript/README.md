@@ -580,12 +580,7 @@ mapping, media handling, limits and exit codes.
 
 `hue traces import` brings exports you already hold into Hue in two steps, with no project key.
 `prepare` converts the bundle on your machine and sends nothing; a Hue MCP connection authorizes
-the delivery with `prepare_trace_import`; `upload` delivers it with that authorization. Sources
-are files, directories or ZIP archives of OTLP/JSON and OTLP protobuf trace exports (OpenTelemetry
-Collector file exporter output included), Langfuse exports (API answers, UI downloads and
-blob-storage files), text ATIF v1.7 and v1.8 exports, Braintrust span rows, Jaeger and Zipkin
-traces, Arize Phoenix span exports and Datadog LLM Observability spans, as JSON documents, arrays
-or JSON Lines, gzip or zstd compressed or not, recognized by content:
+the delivery with `prepare_trace_import`; `upload` delivers it with that authorization:
 
 ```sh
 npx -y @hue-run/sdk@latest traces import prepare ./exports --out ./exports.hue-import --json
@@ -594,28 +589,35 @@ npx -y @hue-run/sdk@latest traces import prepare ./exports --out ./exports.hue-i
 npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authorization-file ./authorization.json --json
 ```
 
-- LangSmith runs (`list_runs` dumps, query pages, bulk-export rows as JSON Lines), MLflow traces
-  (`Trace.to_dict()`, `mlflow traces search --output json`), Opik's `opik export` files and span
-  pages, and W&B Weave calls are read as rows of their traces, with their model calls, tool calls,
-  token counts, end user and conversation.
-- `prepare` writes each trace as gzip OTLP/JSON batches beside a manifest and reports the
-  manifest's digest and totals, the formats recognized, the files, lines and records it could not
-  read, invalid vendor ids it mapped to OpenTelemetry ids, and the traces without a history owner,
-  read from the spans as Hue reads them. `--user-key` and `--session-key` name the user and
-  conversation of an export that records them under keys of its own. Nothing about a file's name or
-  place reaches a span.
+- Sources are files, directories or ZIP archives, gzip or zstd compressed or not, holding JSON
+  documents, arrays, JSON Lines or binary OTLP. Each file is recognized by its content, never its
+  name, in these formats: OTLP/JSON, OTLP protobuf and OpenTelemetry Collector file exports,
+  Jaeger, Zipkin v2, Langfuse (API answers, UI downloads and blob-storage files), Braintrust span
+  rows, LangSmith runs, Arize Phoenix spans, MLflow traces, Opik exports, W&B Weave calls, Datadog
+  LLM Observability spans, OpenAI Agents SDK traces, Raindrop events, Helicone requests, ATIF
+  v1.7 and v1.8, and OpenAI chat, OpenAI Responses and Anthropic Messages transcripts.
+- `prepare` writes each trace as gzip OTLP/JSON batches beside a manifest. Spans of OTLP exports
+  (Jaeger API v3 answers included) are kept as recorded, and Jaeger, Zipkin and Phoenix spans
+  become the OTLP spans they were. Every other record becomes the GenAI spans Hue reads, with its
+  model and tool calls, token usage and errors, and keeps its whole source record. Each trace's end
+  user and conversation are read where the source names them, never from a tool's arguments or
+  result, and a converted record carries them as `user.id` and `gen_ai.conversation.id` on the
+  trace's root. `--user-key` and `--session-key` name them for an export that records them under
+  keys of its own.
+- The report gives the manifest's digest and totals, the traces per format, the files it could not
+  read, each line or record of a file it could not read (the rest of the file is read), the traces
+  refused (a malformed record refuses only its trace), the instants filled in by a fixed rule,
+  invalid vendor ids mapped to OpenTelemetry ids, and the traces without a history owner, read from
+  the spans as Hue reads them. Nothing about a file's name or place reaches a span.
 - `upload` registers the manifest, sends each trace's large values and batches in order, two
   requests at a time, checks every span's receipt, reconciles and completes the import. Interrupted,
   run it again: it resumes from `progress.json` in the bundle. An expired authorization is renewed
   by calling `prepare_trace_import` again with the same digest and totals.
 - The authorization (`hue_it_…`) is read only from the file and never printed.
-- `prepare` also reads OpenAI Agents SDK trace and span records, Raindrop events (track payloads
-  and Query API answers), Helicone request exports, and OpenAI chat, OpenAI Responses and
-  Anthropic Messages transcripts. A transcript without a time is placed at 2000-01-01T00:00:00Z,
-  and `--user-key` names the user of one whose request carries no end-user field.
 
-See [Import a bundle of existing traces](CLI.md#import-a-bundle-of-existing-traces) for the
-formats, the report, what Hue refuses and the exit codes.
+See [Import a bundle of existing traces](CLI.md#import-a-bundle-of-existing-traces) for how each
+format is recognized and where its user and conversation come from, the report, what Hue refuses
+and the exit codes.
 
 ## Sub-agents
 
@@ -744,6 +746,27 @@ globally registered integrations for that call**. Global registration remains in
 but those integrations do not receive that call's events. To keep an existing
 OpenTelemetry exporter, attach Hue's transport to the same provider using the
 [existing-provider recipe](#existing-opentelemetry-providers).
+
+The end user and conversation can also come from AI SDK 7's runtime context. `hueTelemetry(hue)`
+records the call's `runtimeContext.userId` as `user.id`, and `runtimeContext.sessionId` (else
+`threadId`) as `gen_ai.conversation.id`, on every span of the call; a value that is neither a
+non-empty string nor a finite number is ignored. The returned options name those keys in `includeRuntimeContext`,
+because AI SDK withholds runtime context from telemetry unless a key is named there; no other
+runtime-context value is recorded. An enclosing `withSpan`'s `userId` or `sessionId` takes
+precedence:
+
+```ts
+const result = await generateText({
+  model,
+  prompt,
+  runtimeContext: { userId: user.id, sessionId: chat.id },
+  telemetry: hueTelemetry(hue),
+});
+```
+
+For other keys, pass `hueTelemetry(hue, { userKey: "accountId", sessionKey: ["chatId"] })`;
+`false` records none from runtime context. An application that sets its own
+`includeRuntimeContext` keeps these keys by spreading the returned one into it.
 
 Reuse the client across server requests. Await stream completion before flushing;
 returning a streaming `Response` does not mean its stream has finished. The

@@ -12,6 +12,7 @@ An application creates a client with `createHue`, records spans and tools, and r
 - `ts-media` inspects bounded, nonempty media and exports exact digests and blob entries.
 - `ts-file-upload` covers opt-in `recordFile` uploads and name validation.
 - `ts-attachment` places `Attachment` in recorded values and uploads it under `<attribute>#<pointer>` or `body#<pointer>`.
+- `ts-ai-sdk` records AI SDK 7 calls through `hueTelemetry(hue)`, with the end user and conversation from the call's runtime context (`userId`, then `sessionId` or `threadId`, or the keys `HueTelemetryOptions` names) as `user.id` and `gen_ai.conversation.id`.
 
 ## How to get to it (user POV)
 
@@ -47,6 +48,7 @@ Preconditions:
 
   Expected: `project 00000000-0000-4000-8000-000000000001`, a trace ID, and `flush {"acceptedSpans":2,...,"failedSpans":0,...}`. The stub log gains `GET /api/v1/projects/current` and `POST /api/v1/otlp/v1/traces` with status 200.
 - **Behavior test.** `cd packages/sdk-typescript && bun test tests/sdk.test.ts -t "redaction happens before export"`. Expected: `1 pass`, `0 fail` in under 1 s. Swap the pattern for the behavior you changed (`grep -n 'test(' tests/sdk.test.ts`).
+- **AI SDK 7 runtime context (`ts-ai-sdk`).** `cd packages/sdk-typescript && bun test tests/sdk.test.ts -t "runtime context|runtime-context keys"`. Expected: `2 pass`, `0 fail` in under a second: every span of a call (tool span included) carries the runtime-context user and conversation, custom keys, unusable values ignored, an enclosing `withSpan` identity winning, no other runtime-context value exported, and both mappings off leaving the options as before.
 - **Sub-agents (`ts-subagent`).** `cd packages/sdk-typescript && bun test tests/sdk.test.ts -t subagent`. Expected: `3 pass`, `0 fail`: attributes, kind, parentage, nesting, error status, metadata-only mode and continuation from W3C headers through a second client.
 
 ## Gotchas

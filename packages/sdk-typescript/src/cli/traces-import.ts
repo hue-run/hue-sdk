@@ -30,6 +30,21 @@ export interface TracesCommandIo extends UploadIo {
   cwd?: string;
 }
 
+/** The format ids, wrapped to the usage text's width under its indent. */
+function formatList(indent: string, width = 98): string {
+  const lines: string[] = [];
+  let line = "";
+  for (const id of importAdapters.map((adapter) => adapter.id)) {
+    const next = line ? `${line}, ${id}` : id;
+    if (line && indent.length + next.length + 1 > width) {
+      lines.push(`${line},`);
+      line = id;
+    } else line = next;
+  }
+  lines.push(line);
+  return lines.map((text) => indent + text).join("\n");
+}
+
 export const TRACES_USAGE = `Usage: hue traces import prepare <path> [--out <directory>] [--user-key <key>] [--session-key <key>] [--json]
        hue traces import upload <directory> --authorization-file <file> [--import-url <url>] [--json]
 
@@ -37,19 +52,19 @@ Import a bundle of existing traces into Hue. Nothing leaves this machine until t
 and no project key is involved: a Hue MCP connection authorizes the delivery.
 
 prepare  Reads a file, a directory or a ZIP archive and recognizes each file by its content,
-         never its name: one JSON document, a JSON array of records or JSON Lines, gzip or zstd
-         compressed or not, in these formats:
-           ${importAdapters.map((adapter) => adapter.id).join(", ")}
+         never its name: one JSON document, a JSON array of records, JSON Lines or binary OTLP,
+         gzip or zstd compressed or not, in these formats:
+${formatList("           ")}
          Every trace becomes gzip OTLP/JSON batches written to --out (default <path>.hue-import)
          with manifest.json. The report names the manifest_digest and totals that
-         prepare_trace_import takes, the files and records it could not read, invalid vendor ids
-         it mapped to OpenTelemetry ids, traces without a history owner and the origin each
-         source recorded.
+         prepare_trace_import takes, the files, lines and records it could not read, invalid
+         vendor ids it mapped to OpenTelemetry ids, traces without a history owner and the origin
+         each source recorded.
   --out <directory>    Where the bundle is written (created with mode 0700)
-  --user-key <key>     Where each trace's end user is recorded, when no attribute Hue reads names
-                       it: an attribute or metadata key (app.customer_id), or a JSON path into
-                       each source record ($.metadata.customer.id or /metadata/customer/id)
-  --session-key <key>  Where each trace's conversation is recorded, the same way
+  --user-key <key>     Where the export records each trace's end user under a key of its own: an
+                       attribute or metadata key (app.customer_id), or a JSON path into each
+                       source record ($.metadata.customer.id or /metadata/customer/id)
+  --session-key <key>  Where the export records each trace's conversation, the same way
   --json               Print the report as one JSON object
 
 upload   Registers the manifest, then sends each trace's values and batches in order, two

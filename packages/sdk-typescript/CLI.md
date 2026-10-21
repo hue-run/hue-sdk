@@ -503,16 +503,12 @@ stopped.
 
 ## Import a bundle of existing traces
 
-`hue traces import` brings historical traces into Hue from exports you already hold: OTLP/JSON
-trace exports (a `{"resourceSpans": […]}` document, a list of them, or one per line), Langfuse
-exports (public API answers, UI downloads and blob-storage files), text ATIF v1.7 and
-v1.8 exports, embedded subagents included, Braintrust span rows (a UI download, the fetch or
-query API's answer, `bt sync pull` JSON Lines or a cloud-storage export), binary OTLP (a protobuf
-`ExportTraceServiceRequest`, or OpenTelemetry Collector file exporter output), Jaeger (the API v3
-answer or stream, and the UI's or `/api/traces` JSON), Zipkin v2 JSON, Arize Phoenix span exports
-(`/spans/otlpv1` and `/spans`) and Datadog LLM Observability spans (the export API's answer). It
-needs no project key. `prepare` runs on the machine that holds the exports and sends nothing; a
-Hue MCP connection then authorizes the delivery
+`hue traces import` brings historical traces into Hue from exports you already hold: OpenTelemetry
+exports (OTLP/JSON, binary OTLP and OpenTelemetry Collector files, Jaeger, Zipkin), the exports of
+LLM observability tools (Langfuse, Braintrust, LangSmith, Arize Phoenix, MLflow, Opik, W&B Weave,
+Datadog LLM Observability, Helicone, Raindrop), OpenAI Agents SDK traces, ATIF trajectories and
+plain chat transcripts. It needs no project key. `prepare` runs on the machine that holds the
+exports and sends nothing; a Hue MCP connection then authorizes the delivery
 (`prepare_trace_import`); `upload` delivers the bundle with that authorization, and
 `get_trace_import` reports what arrived.
 
@@ -525,185 +521,178 @@ npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authoriza
 in memory; encrypted members, unsafe paths and nested archives are listed, not read) and
 recognizes each file by its content, never by its name. A file may be gzip or zstd compressed
 (zstd needs Node.js 22.15 or later; at most 64 MiB decompressed) and hold one JSON document, a JSON
-array of records or JSON Lines; each line and each record of an array is recognized on its own, and
-one that cannot be read is reported with its line or position while the rest of the file is read.
-A malformed record refuses its trace, never the file: an OTLP trace with a malformed span is
-refused rather than imported without it. Every trace becomes gzip OTLP/JSON batches
-of at most 3 MiB decoded and 900 KiB on the wire, written to `--out` (default `<path>.hue-import`,
-created with mode 0700) beside `manifest.json`, which declares each trace's id, span count, batches
-(by the SHA-256 of each gzip body), large values, history owner and origin. A text value over 1 MiB
-is stored as a value of its own and listed in `hue.blobs`, as the exporter lists the values it
-uploads. OTLP spans are kept as recorded; a trace or span id that is not an OpenTelemetry id (an
-exporter's UUID, for example) is mapped to one derived from it by SHA-256, with the original kept
-as `hue.import.original_trace_id` or `hue.import.original_span_id`. In the Langfuse observation list
-Hue documents (a `data` or native `observations` envelope whose observations carry no `projectId`),
-a Langfuse observation becomes one span keeping its whole record (`hue.import.source_record`) beside
-the `langfuse.*` and GenAI attributes Hue reads; an id that is no OpenTelemetry id is mapped as
-`hue import langfuse` maps it, so an export and a live import of the same trace agree. Everything
-Langfuse itself writes is read as rows instead: `GET /api/public/traces/{id}`, v1 trace and
-observation pages, Observations API v2 pages, `GET /api/public/sessions/{id}`, UI downloads of the
-traces, observations and events tables (a JSON array or JSON Lines) and blob-storage files of the
-`traces`, `observations` and `observations_v2` tables (snake_case columns, gzip by default). Records
-are joined by trace across files: a trace record becomes the trace's root span `t-<trace id>` (the
-id Langfuse gives it) with the trace's `userId`, `sessionId`, name and tags, and the observations
-without a parent go under it, so a trace page and an observation page of one trace make one trace.
-An observation whose parent was not exported (an app root) is a root of its trace. A `GENERATION` is
-a model call with its messages, model and token usage (`usageDetails`: input and output as Langfuse
-totals them, cached and reasoning tokens included, with cache reads and reasoning also on their
-own), a `TOOL` a tool call, and `level` `ERROR` an error status. An instant without a zone
-(ClickHouse's `YYYY-MM-DD HH:MM:SS.ffffff`) is UTC; Langfuse's `default` environment names no
-deployment environment, and its experiment and evaluator environments (`sdk-experiment`,
-`langfuse-…`) are declared evaluation traffic. Copies of a record keep the latest `updatedAt`. These
-traces are labelled `hue.import.format` `langfuse` and declared `otlp_json`. CSV and Parquet
-downloads are not read: export JSON or JSON Lines. An ATIF export becomes one trace: an agent
-span for the run, a model span per agent step with the conversation so far, a tool span per call,
-each embedded subagent as its own agent span under the call that spawned it, and the export's
-`extra.user_id` as the trace's `user.id`; its spans carry `hue.import.format` `atif` under the
-instrumentation scope `hue.import.atif`, and the run's agent span is named `invoke_agent
-<agent.name>` from the export's own agent. ATIF records instants, not durations, so model and tool
-spans are points in time, and a tool's result is kept as text with no error status of the
-importer's making. A Braintrust row becomes one span of its trace (`root_span_id`) under the
-GenAI conventions Hue reads: an `llm` row a model call with its messages, model, provider and
-token usage, a `tool` row a tool call with its name, call id, arguments and result, the times from
-`metrics` (or `created`), the error as an error status and the whole row as
-`hue.import.source_record`; `log` rows are events of the span they belong to, rows exported more
-than once keep the highest `_xact_id`, and an experiment's rows are declared evaluation traffic.
-A Datadog LLM Observability span becomes one span likewise: its `span_kind` the operation, its
-messages (with their tool calls and tool results) GenAI message parts, its `metrics` token usage, a
-tool span's input and output values its arguments and result, `session_id` the conversation, a
-`user_id` (or `usr.id`) tag the end user, the `env` tag the deployment environment and the
-`service` tag the service. Its `start_ns` and `duration` are nanoseconds; a `start_ns` too small to
-be nanoseconds is read as milliseconds or microseconds by its size and the rule named
-(`start_ns_read_as_ms`, `start_ns_read_as_us`). Chat content in the common shapes (OpenAI chat
-messages and choices, OpenAI Responses items, Anthropic content blocks, LangChain messages, plain
-strings) is written as GenAI message parts; any other content is kept as `input.value` and
-`output.value`. These traces are labelled `hue.import.format` with their format (`braintrust`,
-`datadog_llmobs`) and declared `otlp_json` in the manifest's `source.formats`, the encoding Hue
-receives. Binary OTLP is read as OTLP/JSON is and its spans kept as recorded: one protobuf request
-per file, or the Collector file exporter's length-prefixed messages (`format: proto`, or
-`compression: zstd` around protobuf or JSON), whose message number the report gives as its `line`;
-Jaeger's API v3 answers and NDJSON streams are OTLP/JSON inside `{"result": …}` and are kept as
-recorded too. Jaeger UI JSON, Zipkin v2 and Phoenix spans are written as the OTLP spans they were,
-as the OpenTelemetry Collector converts Jaeger and Zipkin spans: attributes kept under their own
-names (Phoenix's OpenInference attributes among them), the process or local endpoint as the
-resource, the kind, status, scope, events and links from the tags, references and annotations Jaeger
-and Zipkin write them as, and the source span whole as `hue.import.source_record`, labelled
-`jaeger`, `zipkin`, `phoenix_otlp` or `phoenix_spans`. A 64-bit Jaeger or Zipkin trace id is
-zero-padded to 128 bits as the Collector pads it, the original kept, and a Zipkin server span that
-shares its client's id becomes the client's child under an id derived from it. A vendor id that
-is not an OpenTelemetry id is mapped by SHA-256 with the original kept, and a parent the export
-does not hold leaves the span a root of its trace, the
-original kept as `hue.import.original_parent_span_id`. An instant the source did not record is
-filled in by a fixed rule named on the span (`hue.import.timing`) and counted in the report: a
-span without a start starts at its end, else with its parent, else with the trace's earliest
-instant; one without an end ends with its last child, else at its start; and a trace that records
-no instant at all is placed at 2000-01-01T00:00:00Z, a millisecond per record. The same trace in two files is one trace when the copies agree and a refusal
-when they differ; a trace with more than 100,000 spans, 512 batches or 10,000 values is refused and
-named, and an input of more than 25,000 traces, or whose manifest would exceed 32 MiB (4 MiB
-compressed), is refused whole. Nothing about where a file sat or what it was called reaches a span: a renamed, reordered
-or re-zipped copy of the bundle prepares to byte-identical batches and the same manifest digest.
+array of records, JSON Lines or binary OTLP. Each line of JSON Lines, each record of a JSON array
+that no format reads whole, and each message of a length-prefixed protobuf file is recognized on
+its own. CSV and Parquet are not read: export JSON or JSON Lines.
 
-**LangSmith, MLflow, Opik and W&B Weave.** These exports are read as rows of their traces by the
-same emitter as Braintrust rows, labelled `hue.import.format` `langsmith_runs`, `mlflow_traces`,
-`opik_traces` or `weave_calls`. A dotted `--user-key` or `--session-key` looks in a LangSmith run's
-metadata, an MLflow trace's metadata, an Opik record's metadata or a Weave call's `attributes`.
+Every trace becomes gzip OTLP/JSON batches of at most 3 MiB decoded and 900 KiB on the wire,
+written to `--out` (default `<path>.hue-import`, created with mode 0700) beside `manifest.json`,
+which declares each trace's id, span count, batches (by the SHA-256 of each gzip body), large
+values, history owner and origin. A text value over 1 MiB is stored as a value of its own and
+listed in `hue.blobs`, as the exporter lists the values it uploads. Nothing about where a file sat
+or what it was called reaches a span: a renamed, reordered or re-zipped copy of the bundle prepares
+to byte-identical batches and the same manifest digest.
 
-- LangSmith runs: a `list_runs` dump (a JSON array or JSON Lines), the runs query page
-  (`{"runs": […]}`) or its v2 page (`{"items": […]}`), a run with its `child_runs` nested, or bulk
-  export rows converted from Parquet to JSON Lines, whose `inputs`, `outputs` and `extra` are JSON
-  text. A run time without a zone is UTC. `llm`, `tool`, `embedding` and `retriever` runs become
-  model, tool, embedding and retrieval spans; token counts are read from `llm` runs alone, since
-  `list_runs` sums a chain's over its children. The user and conversation come from the run's
-  metadata (`user_id`, `thread_id`, `session_id`, `conversation_id`) or the v2 `thread_id`, never
-  from the run's own `session_id`, which names the tracing project. A run exported before and after
-  it ended keeps the ended copy; a run with a `reference_example_id` is evaluation traffic.
-- MLflow traces: `Trace.to_dict()` (`mlflow traces get`, `trace.to_json()`), a list or JSON Lines of
-  them, or `mlflow traces search --output json`, MLflow 2's form included. Base64 ids become the
-  OpenTelemetry ids they encode, and the JSON-encoded attributes are decoded: `mlflow.spanType`
-  names the kind, `mlflow.spanInputs` and `mlflow.spanOutputs` the content, `mlflow.chat.tokenUsage`
-  the token counts. The user and conversation are the trace's `mlflow.trace.user` and
-  `mlflow.trace.session`; the root span keeps the trace's `info` in its source record. A trace
-  tagged `mlflow.eval.requestId` or `mlflow.trace.sourceScorer` is evaluation traffic, and a trace
-  exported without its spans is refused.
-- Opik: the files `opik export … project …` writes, one per trace, or spans alone (the spans API
-  page or JSON Lines). The trace becomes the root span; `llm` and `tool` spans become model and tool
-  spans, with token counts from `usage`. The conversation is the trace's `thread_id` and the user a
-  metadata field; `environment` is the deployment environment, and a trace from an experiment,
-  evaluator, optimization or the playground is evaluation traffic. A record exported twice keeps
-  the copy updated last.
-- W&B Weave calls: the calls stream's JSON Lines, a list of calls or `{"calls": […]}`. The op's
-  kind (`attributes.weave.kind`) names the span, token counts come from an `llm` call's
-  `summary.usage`, the conversation is `thread_id` and the user an `attributes` field; `wb_user_id`,
-  the W&B account that logged the call, is never the user. A trace with a scorer or an
-  `Evaluation.*` op is evaluation traffic.
+**Formats.** Each value is read by the first format whose rule it matches, in the order
+`hue traces --help` lists them; each rule asks for keys the other formats' records lack. The format
+id is the key of the report's `formats`, and every span converted from a source record carries it
+as `hue.import.format`; spans kept as recorded and spans of the documented Langfuse list carry
+none. The last column is where the format finds the trace's end user (written as `user.id`) and
+conversation (`gen_ai.conversation.id`); a tool span, tool row or tool call never names either.
 
-**Agent runtimes, event logs and transcripts.** `prepare` also reads OpenAI Agents SDK traces,
-Raindrop events, Helicone request exports and plain chat transcripts. Each is labelled with its
-own `hue.import.format` (`openai_agents`, `raindrop`, `helicone`, `openai_chat`,
-`openai_responses`, `anthropic_messages`) and declared `otlp_json` in the manifest.
+| Format id | Source | Recognized by | User and conversation |
+| --- | --- | --- | --- |
+| `otlp_json` | OTLP/JSON trace export: one document, a list of them, or one per line | a `resourceSpans` (or `resource_spans`) list | the spans' own attributes, read as Hue reads them |
+| `otlp_protobuf` | Binary OTLP: one protobuf `ExportTraceServiceRequest` (an OTLP/HTTP body, a `.pb` or `.binpb` file), or Collector file exporter output (`format: proto`, or `compression: zstd` around protobuf or JSON) | content that decodes as an OTLP trace request, or as messages each prefixed with its 4-byte big-endian length | the spans' own attributes |
+| `jaeger_api_v3` | Jaeger API v3 answer and NDJSON stream | `{"result": {"resourceSpans": …}}` (or `result.spans`), the stream's `{"end": true}` and `{"error": {"httpCode": …}}` lines | the spans' own attributes |
+| `jaeger` | Jaeger `/api/traces` answer, the UI's trace download, one trace, or a span with its process | a trace's `spans` holding a span with `spanID`, `operationName` and `startTime` | span tags, kept as attributes |
+| `zipkin` | Zipkin v2 JSON: a list of spans, a list of such lists, one span per line, or one span | hex `traceId` and `id` with a field only a span records (`timestamp`, `duration`, `localEndpoint`, `kind`, `annotations`, `tags`), and none of `type`, `startTime`, `spanId`, `traceID`, `span_id` | span tags, kept as attributes |
+| `phoenix_otlp` | Arize Phoenix `GET /v1/projects/{project}/spans/otlpv1`, or one such span per line | `trace_id`, `span_id` and `start_time_unix_nano` or `end_time_unix_nano`, without `context` or `root_span_id` | the spans' attributes, OpenInference `user.id` and `session.id` among them |
+| `phoenix_spans` | Arize Phoenix `GET /v1/projects/{project}/spans` | `context.trace_id`, `context.span_id` and `start_time` or `span_kind` | the spans' attributes, OpenInference `user.id` and `session.id` among them |
+| `datadog_llmobs` | Datadog LLM Observability export API answer, one span, or one per line | `"type": "span"` with `attributes.span_id` and `attributes.trace_id` | the `user_id`, `user.id` or `usr.id` tag, or `user_id` in `metadata`; `session_id` |
+| `langfuse_observations` | The Langfuse observation list Hue documents | a `data` or `observations` list whose every record is an observation (`id`, `traceId`, `type`, `startTime`) without `projectId` | the observations' `userId` and `sessionId`, as `langfuse.user.id` and `langfuse.session.id` |
+| `langfuse` | Everything Langfuse writes: `GET /api/public/traces/{id}`, v1 trace and observation pages, Observations API v2 pages, `GET /api/public/sessions/{id}`, UI downloads of the traces, observations and events tables, blob-storage files of the `traces`, `observations` and `observations_v2` tables | a trace (`id`, `timestamp`, `bookmarked`, `public`), an observation (`id`, `type`, `startTime`, `traceId`) or a blob-storage observation row (`start_time`, `trace_id`, `parent_observation_id`), alone or in `data`, `observations` or `traces` | the trace's `userId` and `sessionId`, else each observation's |
+| `atif` | ATIF v1.7 and v1.8 exports, embedded subagents included | `schema_version` starting with `ATIF-` | `extra.user_id`; the run's `session_id` |
+| `braintrust` | Braintrust span rows: a UI download, the fetch or query API's answer, `bt sync pull` JSON Lines or a cloud-storage export | `span_id` and `root_span_id`, alone or in `events` or `data` | `metadata` (`user_id`, `userId`; `session_id`, `thread_id`, `conversation_id`, …), Mastra's `resourceId`, an OpenAI Agents row's `group_id` |
+| `langsmith_runs` | LangSmith runs: a `list_runs` dump, the runs query page or its v2 page, a run with its `child_runs`, bulk-export rows converted from Parquet to JSON Lines | `id`, a LangSmith `run_type` (`chain`, `llm`, `tool`, `embedding`, `retriever`, `prompt`, `parser`) and `start_time` or `dotted_order`, alone or in `runs` or `items` | run metadata (`user_id`; `thread_id`, `session_id`, `conversation_id`, …) and the v2 `thread_id`; never the run's own `session_id` (the tracing project) or `ls_user_id` |
+| `mlflow_traces` | MLflow `Trace.to_dict()` (`mlflow traces get`, `trace.to_json()`), a list or JSON Lines of them, `mlflow traces search --output json`, MLflow 2's form included | `info` with `trace_id` or `request_id`, and `data.spans`, alone or in `traces` | `mlflow.trace.user` and `mlflow.trace.session` metadata, else a span's `user.id` and `session.id`; never `mlflow.user` |
+| `opik_traces` | The files `opik export … project …` writes, or spans alone (the spans API page or JSON Lines) | `trace` (with `id` and `start_time`) beside `spans`; or a span with `id`, `trace_id`, an Opik `type` (`general`, `tool`, `llm`, `guardrail`) and `start_time`, alone or in `content` | metadata (`user_id`, `userId`, …); the trace's `thread_id`, else its metadata's; never `created_by` |
+| `weave_calls` | W&B Weave calls: the calls stream's JSON Lines, a list of calls, `{"calls": […]}` or `{"call": …}` | `id`, `trace_id`, `op_name` and `started_at` | `attributes` (`user_id`, `userId`, …); `thread_id`, else in `attributes`; never `wb_user_id` |
+| `openai_agents` | OpenAI Agents SDK `Trace.export()` and `Span.export()` records, one per line or in a list, or the `{"data": […]}` body its exporter posts | `"object": "trace"` with `id`, or `"object": "trace.span"` with `trace_id` | the trace metadata's `user_id` (or `userId`); `group_id`, else a conversation field of the metadata |
+| `raindrop` | Raindrop events: elements of a `POST /v1/events/track` payload, or a Query API `GET /v1/events` answer | `event` with `ai_data` (or with `event_id` and `user_id`), or `event_name` with `user_input` and `assistant_output`, alone or in `data` | `user_id`; `convo_id` |
+| `helicone` | Helicone requests: `npx @helicone/export` JSON or JSON Lines (`--include-body` for the bodies), or the `query-clickhouse` API answer | `request_id` and `request_created_at` with `response_status`, `request_user_id` or `request_properties`, alone or in `data` | `request_user_id`, never `helicone_user` (the Helicone account); the `Helicone-Session-Id` property |
+| `openai_chat` | An OpenAI Chat Completions request, or a line of a chat JSONL file (a fine-tuning or eval dataset) | a `messages` list holding a `{role}` message, without `object` and without anything only Anthropic sends | `safety_identifier`, else `user` |
+| `openai_responses` | An OpenAI Responses `response` object, a request (with its `output` when it was logged with it), or a bare list of input and output items | `"object": "response"` with an `output` list; a value of request fields only, with an item list as `input`; or a list of Responses items | `safety_identifier`, else `user`; `conversation` |
+| `anthropic_messages` | An Anthropic Messages request or response | a response (`"type": "message"`, `"role": "assistant"`, `content`, `model`), or a `messages` request carrying something only Anthropic sends (`system`, `anthropic_version`, `stop_sequences`, an `input_schema` tool, a `tool_use` or other Anthropic content block) and nothing only OpenAI sends | `metadata.user_id` |
 
-- OpenAI Agents SDK records are `Trace.export()` and `Span.export()` as a tracing processor writes
-  them, one per line or in a list, or the `{"data": […]}` body the SDK's exporter posts. Each
-  `trace_id` is one trace. The trace record is its root span, named by `workflow_name`, with
-  `group_id` as `gen_ai.conversation.id` and a `user_id` in its metadata as `user.id`. An `agent`
-  span is an agent invocation, a `generation` span a model call with its messages, model and token
-  usage, a `response` span a model call with its response id and usage (the SDK exports no content
-  for it), and a `function` span a tool call with its arguments and result. The trace record has
-  no instants, so it spans its spans. A span written when it started and again when it ended is
-  read from its ended copy.
-- A Raindrop event is an element of a `POST /v1/events/track` payload or an event of a Query API
-  `GET /v1/events` answer. Each event is one trace: an agent span named for the event with its
-  model, input and output, `user_id` as `user.id` and `convo_id` as the conversation, and a tool
-  span per tool call. An event without `ai_data` records no agent turn and is reported, not
-  imported, and an event sent while pending (`is_pending`) and again finished is read from the
-  finished copy.
-- A Helicone request is a record of `npx @helicone/export` JSON or JSON Lines (with
-  `--include-body` for the bodies) or of the `query-clickhouse` API answer. Each request is one
-  model call span, and requests sharing a `Helicone-Session-Id` property are one trace.
-  `request_user_id` is the user; `helicone_user`, the Helicone account, never is. A request with
-  no response time ends `delay_ms` after it starts (`end_from_latency`). The CSV export is not
-  read.
-- A chat transcript is a line of an OpenAI chat JSONL file (a fine-tuning or eval dataset, a
-  logged request), an OpenAI Responses `response` object, request or bare item list, or an
-  Anthropic Messages request or response. Each is one trace: an `invoke_agent` span keeping the
-  whole value, a `chat` span per assistant turn with the conversation so far as its input, and an
-  `execute_tool` span per call, paired with its result by `tool_call_id`, `call_id` or
-  `tool_use_id`. An Anthropic `is_error` result is an error status. The trace id is a response's
-  own id, or else derives from the SHA-256 of the value's canonical JSON, so the same transcript in
-  two files is one trace. Transcripts record no instants apart from a Responses object's
-  `created_at`, so the untimed rule places them at 2000-01-01T00:00:00Z. Their user is the
-  request's own end-user field (OpenAI `safety_identifier` or `user`, Anthropic
-  `metadata.user_id`); a transcript without one needs `--user-key`, or imports without an owner.
+**How each kind of format is converted.** OTLP/JSON, binary OTLP and Jaeger API v3 spans are kept
+exactly as recorded. A trace or span id that is not an OpenTelemetry id (an exporter's UUID, for
+example) is mapped to one derived from it by SHA-256, with the original kept as
+`hue.import.original_trace_id` or `hue.import.original_span_id`.
+
+- Jaeger UI JSON, Zipkin v2 and Phoenix spans are written as the OTLP spans they were, as the
+  OpenTelemetry Collector converts Jaeger and Zipkin spans. Attributes keep their own names
+  (Phoenix's OpenInference attributes among them). The process or local endpoint is the resource.
+  The kind, status, scope, events and links come from the tags, references and annotations Jaeger
+  and Zipkin write them as, and the source span is kept whole as `hue.import.source_record`. A
+  64-bit Jaeger or Zipkin trace id is zero-padded to 128 bits as the Collector pads it, the
+  original kept, and a Zipkin server span that shares its client's id becomes the client's child
+  under an id derived from it.
+- A Langfuse observation of the documented list becomes one span keeping its whole record
+  (`hue.import.source_record`) beside the `langfuse.*` and GenAI attributes Hue reads; an id that
+  is no OpenTelemetry id is mapped as `hue import langfuse` maps it, so an export and a live import
+  of the same trace agree.
+- An ATIF export becomes one trace: an agent span for the run (`invoke_agent <agent.name>`), a
+  model span per agent step with the conversation so far, a tool span per call, and each embedded
+  subagent as its own agent span under the call that spawned it, under the instrumentation scope
+  `hue.import.atif`. ATIF records instants, not durations, so model and tool spans are points in
+  time, and a tool's result is kept as text with no error status of the importer's making.
+- Every other format is read as rows: each record becomes one span of its trace, written by one
+  emitter under the GenAI conventions Hue reads. A model call carries `gen_ai.operation.name`
+  `chat`, its model, provider, messages and token usage; a tool call `execute_tool` with the tool's
+  name, call id, arguments and result; an agent `invoke_agent`. Chat content in the common shapes
+  (OpenAI chat messages and choices, OpenAI Responses items, Anthropic content blocks, LangChain
+  messages, plain strings) becomes GenAI message parts; any other content is kept as `input.value`
+  and `output.value`. An error is an error status with its message. The trace's user and
+  conversation go on its root spans (never a tool's), and each span keeps its whole source record
+  as `hue.import.source_record`.
+
+Rules shared by the row formats:
+
+- Ids: a vendor's 32-hex trace id and 16-hex span id are kept (MLflow's base64 ids are read as the
+  hex they encode); any other id is mapped by SHA-256, the original kept as
+  `hue.import.original_trace_id` or `hue.import.original_span_id`. A parent
+  the export does not hold leaves the span a root of its trace, the original kept as
+  `hue.import.original_parent_span_id`. A Raindrop event without an `event_id` and a transcript
+  without an id of its own are named by the SHA-256 of the record's canonical JSON, so the same
+  record in two files is one trace.
+- Copies: a record exported more than once keeps its latest copy, by the field the format records
+  it in (Braintrust's `_xact_id`, Langfuse's `updatedAt`, Opik's `last_updated_at`, Helicone's
+  `updated_at`, the ended copy of a LangSmith run, a Weave call, an OpenAI Agents span or a
+  Raindrop event). Copies of a span with no such field must agree, or the trace is refused.
+- Origin: Braintrust experiment rows, LangSmith runs with a `reference_example_id`, MLflow traces
+  tagged `mlflow.eval.requestId` or `mlflow.trace.sourceScorer`, Opik traces from an experiment,
+  evaluator, optimization or the playground, Weave traces with a scorer or an `Evaluation.*` op,
+  Datadog `experiment` spans and Langfuse's `sdk-experiment` and `langfuse-…` environments are
+  declared evaluation traffic.
+- Instants: Datadog's `start_ns` and `duration` are nanoseconds, and a `start_ns` too small to be
+  nanoseconds is read as milliseconds or microseconds by its size (`start_ns_read_as_ms`,
+  `start_ns_read_as_us`). An ISO instant without a zone (LangSmith, Langfuse's ClickHouse
+  `YYYY-MM-DD HH:MM:SS.ffffff`) is UTC. Where a source records no instant, a fixed rule fills it
+  in, names it on the span (`hue.import.timing`) and counts it in the report (`traces.timing`):
+  - a span without a start starts at its end (`start_at_end`), else with its parent
+    (`start_from_parent`), else with the trace's earliest instant (`start_from_trace`);
+  - a span without an end ends with its last child (`end_from_children`), else at its start
+    (`end_at_start`);
+  - a trace that records no instant at all is placed at 2000-01-01T00:00:00Z, a millisecond per
+    record in source order (`untimed_trace`); plain transcripts record none except a Responses
+    object's `created_at`;
+  - a format that takes an instant from another field names that too: Braintrust's `created`
+    (`start_from_created`), a LangSmith run's `dotted_order` (`start_from_dotted_order`) and a
+    Helicone request's `delay_ms` (`end_from_latency`);
+  - an event recorded without a time (a Braintrust log row, an MLflow span event) is placed at its
+    span's start (`event_at_span_start`).
+
+  The same rules fill in the instants a Zipkin or Phoenix span was exported without.
 
 **History owner.** A trace's owner is read from its spans as Hue reads it: the trace's local roots
 (spans with no parent, or one outside the trace) first, then its other spans, never a tool span or
 anything beneath one, and every span that names one must agree. An explicit
-`hue.world.entity.namespace` and `hue.world.entity.id` wins over a user; a user is the first of
+`hue.world.entity.namespace` and `hue.world.entity.id` wins over a user. A user is the first of
 `user.id`, `enduser.id` and the other attributes and metadata fields Hue reads (OpenTelemetry,
 Vercel AI SDK, OpenLLMetry, Langfuse, LangSmith, Braintrust, Mastra and OpenInference metadata),
 except that `user.id` beside `user.account_uuid` names a Claude Code installation and is passed
-over. For an export whose user sits under a key of its own, `--user-key <key>` names it: a dotted
-key, looked up as an attribute of each span and then in its source record and metadata, or a JSON
-path into the source record (`$.metadata.customer.id` or `/metadata/customer/id`); `--session-key`
-names the conversation the same way. A tool span's key is never read. For a row format such as
-Braintrust or Datadog the key's value becomes the root's `user.id` (or `gen_ai.conversation.id`). A
-trace kept as recorded or converted span for span (OTLP, Langfuse, ATIF, Jaeger, Zipkin, Phoenix)
-that names no owner gains one child span of its earliest root, `hue.import.user` with the single
-attribute `user.id` (or `hue.import.session` with
-`gen_ai.conversation.id`), so its recorded spans keep their bytes and a trace also sent live does
-not conflict; an owner the spans already name is kept.
+over.
 
-The report (`--json` prints it as one object) names `manifest_digest`, `totals` (traces, batches,
-spans, blobs, bytes) and `source`, which `prepare_trace_import` takes as given; the formats
-recognized and the traces each file held; the files it could not read, with the reason; the lines
-and records of a file it read that it could not (`files.skipped`, with `line` or `record`); the
-traces and records it refused, with the file, line and trace where known; the traces whose
-instants a rule supplied, per rule (`traces.timing`); the traces without a history owner, which
-import like any other trace but leave a gap in continuous history; the origin each source recorded
-(`production`, `evaluation`, `simulation` or `unknown`; evaluation and simulation traffic is
-imported and kept out of production history); and the traces whose vendor ids were mapped. An
-existing `--out` directory is accepted only while it holds nothing but an earlier preparation and
-no upload has started in it.
+**`--user-key` and `--session-key`.** For an export whose user sits under a key of its own,
+`--user-key <key>` names it, and `--session-key <key>` names the conversation the same way. The key
+is one of:
+
+- a dotted key such as `app.customer_id`, looked up as an attribute of each span or its resource,
+  then in the record's metadata (the exact key, then as a dotted path), then in the record itself;
+- a JSONPath of members and indexes into the source record: `$.metadata.customer.id`,
+  `$.metadata["customer.id"]` or `$.tags[0]`;
+- a JSON Pointer into the source record: `/metadata/customer/id`.
+
+The key is read on the agent's spans as the owner is: the roots' value when they name one, else the
+other spans', never a tool span's, and spans that disagree name nobody. For a row format the key's
+value is written as the root's `user.id` (or `gen_ai.conversation.id`) in place of the user the
+record names. A trace kept as recorded or converted span for span (OTLP, Jaeger, Zipkin, Phoenix,
+the documented Langfuse list, ATIF) that names no owner gains one child span of its earliest root,
+`hue.import.user` with the single attribute `user.id` (or `hue.import.session` with
+`gen_ai.conversation.id`), so its recorded spans keep their bytes and a trace also sent live does
+not conflict. An owner the spans already name is kept.
+
+**Limits and refusals.** A malformed record refuses its trace, never the file: an OTLP trace with a
+malformed span is refused rather than imported without it. The same trace in two files is one trace
+when the copies agree and a refusal when they differ. A trace with more than 100,000 spans, 512
+batches or 10,000 values is refused and named. An input of more than 25,000 traces, or whose
+manifest would exceed 32 MiB (4 MiB compressed), is refused whole.
+
+**Report.** `prepare` reports what it read and what it could not, down to the line; `--json` prints
+the report as one object:
+
+- `manifest_digest`, `totals` (traces, batches, spans, blobs, bytes) and `source`, which
+  `prepare_trace_import` takes as given;
+- `formats`: the traces prepared per format id;
+- `files.supported`: each file read, with its format and the traces it held;
+- `files.unsupported`: each file of which nothing could be read, with the reason (not JSON, a JSON
+  document of no recognized format, an OTLP logs or metrics export, an export page with no
+  records, an encrypted or nested ZIP member);
+- `files.skipped`: each line of JSON Lines (`line`), record of a JSON array (`record`) or message
+  of a length-prefixed protobuf file (`line`) that could not be read, with the reason; the rest of
+  the file is read, and past 100 in one file the rest are counted in one entry;
+- `traces.refused`: each trace or record refused, with its `file`, `line`, `record` and `trace_id`
+  where known and the reason;
+- `traces.timing`: the traces whose instants a rule supplied, per rule;
+- `traces.without_identity`: the traces without a history owner, which import like any other trace
+  but leave a gap in continuous history;
+- `traces.by_origin`: the origin each source recorded (`production`, `evaluation`, `simulation` or
+  `unknown`); evaluation and simulation traffic is imported and kept out of production history;
+- `traces.remapped`: the traces and spans whose vendor ids were mapped.
+
+An existing `--out` directory is accepted only while it holds nothing but an earlier preparation
+and no upload has started in it.
 
 **Authorize.** Call `prepare_trace_import` over the Hue MCP with the report's `manifest_digest`,
 `totals` and `source`. It answers the import id, `upload_url` and an `authorization` (`hue_it_` and
