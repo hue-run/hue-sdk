@@ -22,7 +22,6 @@ import {
 import {
   BatchSpanProcessor,
   type ReadableSpan,
-  type Span,
   type SpanProcessor,
 } from "@opentelemetry/sdk-trace";
 import {
@@ -115,6 +114,7 @@ interface ExportSink {
   ): void;
   placeholderMarkers(record: RecordValue): Attributes | undefined;
   placeholderSettled(record: RecordValue): boolean;
+  deferPlaceholders(records: RecordValue[]): boolean;
   sendsPlaceholders(): boolean;
   withDroppedRecords(span: ReadableSpan): ReadableSpan;
   consumeDroppedRecords(counts: ReadonlyMap<string, number>): void;
@@ -361,7 +361,9 @@ export class HueTransport {
   // Admitted placeholder snapshots and the marker attributes added after redaction.
   private placeholders = new WeakMap<RecordValue, Attributes>();
   // The running span each admitted placeholder announces, so one it has outlived is not sent.
-  private placeholderSources = new WeakMap<RecordValue, { readonly ended: boolean }>();
+  private placeholderSources = new WeakMap<RecordValue, ReadableSpan>();
+  private forcedSpanDrains = 0;
+  private completedSpanDrains = 0;
   private batchSpans?: BatchSpanProcessor;
   // What the receiver accepts, as it last advertised; the limits of this release until it does.
   private limits: ReceiverLimits = DEFAULT_RECEIVER_LIMITS;
@@ -521,10 +523,15 @@ export class HueTransport {
       // The spans are sent first, then the uploads queued so far are waited for, unless a
       // flush sends them: that flush waits for the uploads after its send.
       forceFlush: async () => {
+        const finish = this.beginSpanDrain();
         try {
           await spans.forceFlush();
         } finally {
-          if (!this.sendingRecords.getStore()) await this.drainUploads();
+          try {
+            if (!this.sendingRecords.getStore()) await this.drainUploads();
+          } finally {
+            finish();
+          }
         }
       },
       shutdown: async () => {
@@ -570,10 +577,15 @@ export class HueTransport {
         }
       },
       forceFlush: async () => {
+        const finish = this.beginSpanDrain();
         try {
           await logs.forceFlush();
         } finally {
-          if (!this.sendingRecords.getStore()) await this.drainUploads();
+          try {
+            if (!this.sendingRecords.getStore()) await this.drainUploads();
+          } finally {
+            finish();
+          }
         }
       },
       shutdown: async () => {
@@ -678,11 +690,10 @@ export class HueTransport {
     }
   }
 
-  private track(span: Span): void {
+  private track(span: ReadableSpan): void {
     try {
       if (!this.liveSpans || this.live.size >= MAX_LIVE_SPANS) return;
-      if (!(span.spanContext().traceFlags & 1) || !span.isRecording() || !announcesLiveSpan(span))
-        return;
+      if (!(span.spanContext().traceFlags & 1) || span.ended || !announcesLiveSpan(span)) return;
       this.live.add(span);
       if (!this.liveTimer) {
         const timer = setInterval(() => this.announceLiveSpans(), LIVE_SPAN_INTERVAL_MILLIS);
@@ -696,6 +707,7 @@ export class HueTransport {
 
   /** Placeholders are built lazily, so input set right after a span starts is included. */
   private announceLiveSpans(): void {
+    if (this.forcedSpanDrains) return;
     for (const span of this.live) {
       this.live.delete(span);
       try {
@@ -741,6 +753,26 @@ export class HueTransport {
   /** @internal Exporter callback: whether a placeholder's span has ended, so it announces nothing. */
   placeholderSettled(record: RecordValue): boolean {
     return this.placeholderSources.get(record)?.ended === true;
+  }
+
+  private beginSpanDrain(): () => void {
+    const completed = [...this.spans.keys()].some((span) => !this.placeholders.has(span));
+    this.forcedSpanDrains++;
+    if (completed) this.completedSpanDrains++;
+    return () => {
+      this.forcedSpanDrains--;
+      if (completed) this.completedSpanDrains--;
+    };
+  }
+
+  /** @internal A forced drain sends completed spans without another advisory round trip. */
+  deferPlaceholders(records: RecordValue[]): boolean {
+    if (!this.completedSpanDrains) return false;
+    for (const record of records) {
+      const source = this.placeholderSources.get(record);
+      if (!this.closed && source) this.track(source);
+    }
+    return true;
   }
 
   /** @internal Exporter callback: false once the receiver refused placeholders; queued ones are then dropped. */
@@ -1416,13 +1448,19 @@ export class HueTransport {
     report: Promise<ExportReport>;
   } {
     const from = this.observedSequence;
-    const join = () => this.sendRecords();
+    let finish: (() => void) | undefined;
+    const join = () => {
+      finish = this.beginSpanDrain();
+      return this.sendRecords();
+    };
     const sent = providers ? this.sendingRecords.run(true, providers).then(join, join) : join();
-    const report = sent.then(async (processors) => {
-      // Exports the processors did not start (a timer's, still in flight) queued uploads too.
-      await this.drainUploads();
-      return this.flushReport(from, processors);
-    });
+    const report = sent
+      .then(async (processors) => {
+        // Exports the processors did not start (a timer's, still in flight) queued uploads too.
+        await this.drainUploads();
+        return this.flushReport(from, processors);
+      })
+      .finally(() => finish?.());
     return { sent, report };
   }
 
@@ -2167,7 +2205,13 @@ class ReportingExporter<T extends RecordValue> {
     // records' acknowledgements may have just shown, nor after this export's completed records were
     // refused or unanswered: a receiver that just refused or timed out gets no second request with
     // its own retries. A record this side could not send keeps the placeholders going out.
-    if (pending.length && !refused && this.transport.sendsPlaceholders()) await pack(pending, true);
+    if (
+      pending.length &&
+      !refused &&
+      this.transport.sendsPlaceholders() &&
+      !this.transport.deferPlaceholders(records)
+    )
+      await pack(pending, true);
     if (failed) throw new Error("Hue telemetry export failed");
   }
 

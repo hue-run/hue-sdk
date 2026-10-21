@@ -9,6 +9,10 @@ An application creates a client with `createHue`, records spans and tools, and r
 - `ts-capture` honors `captureContent` and redaction before export.
 - `ts-ack` reports accepted, rejected and failed records truthfully from the receiver's acknowledgement.
 - `ts-lifecycle` covers `flush`, `shutdown` and the fail-open `*Safe` variants.
+  A drain with completed spans defers advisory live placeholders until the drain and its uploads
+  finish, without waiting for a second acknowledgement. Verify with
+  `bun test tests/live-spans.test.ts -t "flushSafe defers|in-flight export|batch boundary"`
+  and `bun test tests/blobs.test.ts -t "live parent stays deferred"`.
 - `ts-media` inspects bounded, nonempty media and exports exact digests and blob entries.
 - `ts-file-upload` covers opt-in `recordFile` uploads and name validation.
 - `ts-attachment` places `Attachment` in recorded values and uploads it under `<attribute>#<pointer>` or `body#<pointer>`.
