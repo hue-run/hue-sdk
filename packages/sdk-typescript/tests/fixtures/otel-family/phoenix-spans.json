@@ -1,0 +1,96 @@
+{
+ "data": [
+  {
+   "id": "U3BhbjoxMjM=",
+   "name": "support-agent",
+   "context": {
+    "trace_id": "9d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60",
+    "span_id": "aa11bb22cc33dd44"
+   },
+   "span_kind": "AGENT",
+   "parent_id": null,
+   "start_time": "2026-10-20T14:03:11.402000Z",
+   "end_time": "2026-10-20T14:03:23.877000Z",
+   "status_code": "OK",
+   "status_message": "",
+   "attributes": {
+    "input.value": "Where is order 12?",
+    "input.mime_type": "text/plain",
+    "output.value": "Order 12 ships tomorrow.",
+    "user.id": "user-42",
+    "session.id": "conversation-7",
+    "metadata": "{\"plan\":\"pro\"}"
+   },
+   "events": []
+  },
+  {
+   "id": "U3BhbjoxMjQ=",
+   "name": "ChatCompletion",
+   "context": {
+    "trace_id": "9d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60",
+    "span_id": "bb22cc33dd44ee55"
+   },
+   "span_kind": "LLM",
+   "parent_id": "aa11bb22cc33dd44",
+   "start_time": "2026-10-20T14:03:12.010000Z",
+   "end_time": "2026-10-20T14:03:15.233000Z",
+   "status_code": "OK",
+   "status_message": "",
+   "attributes": {
+    "llm.model_name": "gpt-5",
+    "llm.provider": "openai",
+    "llm.system": "openai",
+    "llm.input_messages.0.message.role": "system",
+    "llm.input_messages.0.message.content": "You help with orders.",
+    "llm.input_messages.1.message.role": "user",
+    "llm.input_messages.1.message.content": "Where is order 12?",
+    "llm.output_messages.0.message.role": "assistant",
+    "llm.output_messages.0.message.tool_calls.0.tool_call.id": "call_1",
+    "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "lookup_order",
+    "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments": "{\"id\": 12}",
+    "llm.token_count.prompt": 1834,
+    "llm.token_count.completion": 96,
+    "llm.token_count.total": 1930,
+    "llm.invocation_parameters": "{\"temperature\": 0.2}",
+    "input.value": "{\"messages\": []}",
+    "input.mime_type": "application/json"
+   },
+   "events": [
+    {
+     "name": "gen_ai.choice",
+     "timestamp": "2026-10-20T14:03:15.200000Z",
+     "attributes": {
+      "finish_reason": "tool_calls"
+     }
+    }
+   ]
+  },
+  {
+   "id": "U3BhbjoxMjU=",
+   "name": "lookup_order",
+   "context": {
+    "trace_id": "9d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60",
+    "span_id": "cc33dd44ee55ff66"
+   },
+   "span_kind": "TOOL",
+   "parent_id": "aa11bb22cc33dd44",
+   "start_time": "2026-10-20T14:03:15.300000+00:00",
+   "end_time": "2026-10-20T14:03:15.900000+00:00",
+   "status_code": "ERROR",
+   "status_message": "carrier timeout",
+   "attributes": {
+    "tool.name": "lookup_order",
+    "tool.parameters": "{\"id\": 12, \"user_id\": \"account-the-tool-touched\"}",
+    "input.value": "{\"id\": 12, \"user_id\": \"account-the-tool-touched\"}",
+    "output.value": "{\"status\": \"shipped\"}",
+    "user.id": "account-the-tool-touched",
+    "tag.tags": [
+     "orders",
+     "beta"
+    ]
+   },
+   "events": []
+  }
+ ],
+ "next_cursor": "U3BhbjoxMjY="
+}

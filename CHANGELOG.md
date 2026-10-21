@@ -8,6 +8,59 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.22.0] - 2026-10-21
+
+#### Added
+
+- `hue traces import prepare` reads many more export formats, each recognized by its content:
+  binary OTLP (a protobuf `ExportTraceServiceRequest`, or OpenTelemetry Collector file exporter
+  output), Jaeger (API v3 answers and streams, `/api/traces` and UI JSON), Zipkin v2, every
+  Langfuse export shape (public API answers, UI downloads of the traces, observations and events
+  tables, blob-storage files), Braintrust span rows, LangSmith runs, Arize Phoenix spans
+  (`/spans/otlpv1` and `/spans`), MLflow traces, Opik exports, W&B Weave calls, Datadog LLM
+  Observability spans, OpenAI Agents SDK traces, Raindrop events and span rows, Helicone requests,
+  and OpenAI
+  chat, OpenAI Responses and Anthropic Messages transcripts. `hue traces --help` lists the format
+  ids. Converted spans carry the id as `hue.import.format` and keep their source record as
+  `hue.import.source_record`; a trace's end user and conversation are written as `user.id` and
+  `gen_ai.conversation.id` on its root, never taken from a tool's arguments or result. A vendor's
+  experiment, dataset and evaluator traffic is declared evaluation traffic, and its own scoring
+  inside a production trace (Braintrust online scoring, a Langfuse `EVALUATOR`) is never read as
+  the agent's model calls nor names the trace's user. The manifest declares these traces
+  `otlp_json`.
+- `prepare --user-key <key>` and `--session-key <key>` name the end user and conversation of an
+  export that records them under a key of its own: a dotted attribute or metadata key, a JSONPath
+  or a JSON Pointer into the source record. A converted record's spans name the key's user or
+  conversation, or none when they disagree, in place of the one they record. A trace kept as
+  recorded gains a `hue.import.user` or `hue.import.session` child span rather than a changed root.
+- `prepare` reads gzip and zstd files (every member and frame), UTF-16 text, and JSON Lines and
+  JSON arrays record by record. A line or record no format can read is listed in `files.skipped`
+  with its `line` or `record` while the rest of the file is read, and a malformed record refuses
+  only its trace (`traces.refused`, with the file, line, record and trace id where known), as does
+  a protobuf span that does not decode. A compressed file that breaks off is read up to the break,
+  and `files.notes` names it, along with `NaN` read as null and records read once though the input
+  held them twice. Instants a source does not record are filled in by fixed rules, named on the span
+  as `hue.import.timing` and counted in `traces.timing`.
+- **Wire** `hueTelemetry(hue, options)` records the end user and conversation an application puts
+  in AI SDK 7's runtime context: `userId` as `user.id`, and `sessionId` (else `threadId`) as
+  `gen_ai.conversation.id`, on every span of the call. `HueTelemetryOptions` names other keys
+  (`userKey`, `sessionKey`) or turns either off with `false`. The returned options name those keys
+  in `includeRuntimeContext`; no other runtime-context value is recorded, and an enclosing
+  `withSpan`'s user or session takes precedence. A call whose runtime context holds none of the
+  keys exports the same spans as before.
+
+#### Changed
+
+- `prepare` reads a trace's history owner as Hue reads it: the trace's local roots first, then the
+  agent's other spans, never a tool span or anything beneath one, with every span that names one
+  agreeing, from the attributes and metadata fields Hue reads (a Claude Code installation's
+  `user.id` is passed over). The manifest's identity and the report's `without_identity` can
+  differ from earlier versions' for the same export.
+- `prepare` reads at most 256 MiB of decompressed input in one run (1 GiB before), which a default
+  Node.js heap holds; prepare a larger export in parts. The messages of a length-prefixed protobuf
+  file now share the 64 MiB one file may decompress to, and a transcript whose turns together
+  repeat more than 64 MiB of conversation is refused.
+
 ### [0.21.1] - 2026-10-20
 
 #### Changed

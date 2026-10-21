@@ -3,7 +3,7 @@ name: hue
 description: "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction."
 metadata:
   author: hue-run
-  version: "0.8.19"
+  version: "0.8.20"
 ---
 
 # Hue
@@ -57,7 +57,7 @@ Install the exact version below, which [Install the SDK](https://docs.hue.run/qu
 
 ```sh
 # TypeScript: run in the application directory.
-npm install --save-exact @hue-run/sdk@0.21.1
+npm install --save-exact @hue-run/sdk@0.22.0
 ```
 
 ```sh
@@ -89,7 +89,7 @@ Tracing must not change what the application does:
 
 Follow [Traces and spans](https://docs.hue.run/guides/traces). Instrument every request path that calls a model or a tool, not only one:
 
-- **Request span:** `withSpan()` in TypeScript or `span()` in Python around the whole request, with the user's real request as input and the reply the user saw as output, and the application's session and user identifiers. When the application creates its own root span, record them as `input.value` and `output.value`. A case built from the trace uses this input as its task. Hue uses the trace's resolved user ID to build that user's [World](https://docs.hue.run/worlds/overview), regardless of deployment environment. Traces linked to Hue runs, World instances, or run executions never contribute. Hue's evaluation and simulation evidence and deliberately excluded traces also stay excluded.
+- **Request span:** `withSpan()` in TypeScript or `span()` in Python around the whole request, with the user's real request as input and the reply the user saw as output, and the application's session and user identifiers. When the application creates its own root span, record them as `input.value` and `output.value`. A case built from the trace uses this input as its task. Hue uses the trace's resolved user ID to build that user's [World](https://docs.hue.run/worlds/overview), regardless of deployment environment. Traces linked to Hue runs, World instances, or run executions never contribute. Hue's evaluation and simulation evidence and deliberately excluded traces also stay excluded. With AI SDK 7, when the installed `@hue-run/sdk/ai-sdk` exports `HueTelemetryOptions`, `hueTelemetry(hue)` also records the call's `runtimeContext` `userId` as the user and `sessionId` (else `threadId`) as the session; with an older package, pass them to `withSpan`.
 - **Model spans:** `model()` around each direct provider call, recording the messages sent and received and provider-reported usage. Leave unknown token counts and costs absent. For tools the provider runs itself, such as hosted MCP or web search, call `recordProviderToolCalls` / `record_provider_tool_calls` inside the model span.
 - **Tool spans:** `tool()` around each tool call, with the arguments and the result the agent actually read. When wrapping MCP tools, pass `mcp: client.getServerVersion()` in TypeScript or `mcp=` in Python so the span names the server; do not infer the server from a generic tool name.
 - **Context:** preserve propagated parent context, use `inject` / `extract` across processes, and keep spans from existing instrumentation under the request span.
@@ -181,7 +181,7 @@ These pages own their procedures. Read the page with curl, adding `.md` to its U
 | Investigate production: what needs attention, failed or is slow | [Recipes](https://docs.hue.run/agents/mcp-tools#recipes); the MCP's `load_hue_guide` with `production` returns the same guide                                                                |
 | Understand findings, intents, request answers or trace checks   | [Classifiers](https://docs.hue.run/classifiers/overview)                                                                                                                                     |
 | Turn a trace into a case or eval set                            | [Create a case](https://docs.hue.run/evaluations/case-from-trace)                                                                                                                            |
-| Import existing traces from OTLP JSON, Langfuse or ATIF exports | [Bulk import existing traces](https://docs.hue.run/guides/import-traces); the MCP's `load_hue_guide` with `import` returns the same guide                                                    |
+| Import existing traces from another tool's exports              | [Bulk import existing traces](https://docs.hue.run/guides/import-traces); the MCP's `load_hue_guide` with `import` returns the same guide                                                    |
 | Run or regression-test the agent against cases with `hue eval`  | [Run your agent](https://docs.hue.run/evaluations/run-your-agent)                                                                                                                            |
 | Point the agent's own app clients at a World during evaluations | [Connect your agent](https://docs.hue.run/evaluations/eval-ready-agent), with [Worlds](https://docs.hue.run/worlds/overview) and [Simulations](https://docs.hue.run/evaluations/simulations) |
 | Evaluate a function in-process or in CI                         | [Local evaluations](https://docs.hue.run/evaluations/first-evaluation)                                                                                                                       |

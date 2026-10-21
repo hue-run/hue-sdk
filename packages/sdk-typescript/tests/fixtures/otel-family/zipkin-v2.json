@@ -1,0 +1,88 @@
+[
+  {
+    "traceId": "463ac35c9f6413ad",
+    "id": "4a1b2c3d4e5f6071",
+    "name": "invoke_agent support-agent",
+    "timestamp": 1792504991402000,
+    "duration": 12475000,
+    "localEndpoint": { "serviceName": "support-agent", "ipv4": "10.0.0.5" },
+    "tags": {
+      "otel.scope.name": "support-agent",
+      "gen_ai.operation.name": "invoke_agent",
+      "user.id": "user-42",
+      "gen_ai.conversation.id": "conversation-7",
+      "deployment.environment.name": "production",
+      "telemetry.sdk.language": "python"
+    }
+  },
+  {
+    "traceId": "463ac35c9f6413ad",
+    "parentId": "4a1b2c3d4e5f6071",
+    "id": "5b2c3d4e5f607182",
+    "kind": "CLIENT",
+    "name": "chat gpt-5",
+    "timestamp": 1792504992010000,
+    "duration": 3223000,
+    "localEndpoint": { "serviceName": "support-agent", "ipv4": "10.0.0.5" },
+    "remoteEndpoint": { "serviceName": "model-gateway", "ipv4": "10.0.0.9", "port": 8443 },
+    "annotations": [{ "timestamp": 1792504995200000, "value": "gen_ai.choice" }],
+    "tags": {
+      "otel.scope.name": "support-agent",
+      "gen_ai.operation.name": "chat",
+      "gen_ai.provider.name": "openai",
+      "gen_ai.request.model": "gpt-5",
+      "gen_ai.input.messages": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Where is order 12?\"}]}]",
+      "gen_ai.output.messages": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_1\",\"name\":\"lookup_order\",\"arguments\":{\"id\":12}}],\"finish_reason\":\"tool_call\"}]",
+      "gen_ai.usage.input_tokens": "1834",
+      "gen_ai.usage.output_tokens": "96"
+    }
+  },
+  {
+    "traceId": "463ac35c9f6413ad",
+    "parentId": "4a1b2c3d4e5f6071",
+    "id": "5b2c3d4e5f607182",
+    "kind": "SERVER",
+    "name": "post /v1/chat/completions",
+    "timestamp": 1792504992050000,
+    "duration": 3100000,
+    "shared": true,
+    "localEndpoint": { "serviceName": "model-gateway", "ipv4": "10.0.0.9", "port": 8443 },
+    "tags": { "http.method": "POST", "http.route": "/v1/chat/completions" }
+  },
+  {
+    "traceId": "463ac35c9f6413ad",
+    "parentId": "5b2c3d4e5f607182",
+    "id": "6c3d4e5f60718293",
+    "name": "route provider",
+    "timestamp": 1792504992060000,
+    "duration": 40000,
+    "localEndpoint": { "serviceName": "model-gateway" },
+    "tags": { "provider": "openai" }
+  },
+  {
+    "traceId": "463ac35c9f6413ad",
+    "parentId": "4a1b2c3d4e5f6071",
+    "id": "7d4e5f6071829304",
+    "name": "execute_tool lookup_order",
+    "timestamp": 1792504995300000,
+    "duration": 600000,
+    "localEndpoint": { "serviceName": "support-agent" },
+    "tags": {
+      "gen_ai.operation.name": "execute_tool",
+      "gen_ai.tool.name": "lookup_order",
+      "gen_ai.tool.call.id": "call_1",
+      "gen_ai.tool.call.arguments": "{\"id\":12,\"user_id\":\"account-the-tool-touched\"}",
+      "gen_ai.tool.call.result": "{\"status\":\"shipped\"}",
+      "user.id": "account-the-tool-touched",
+      "error": "carrier timeout, retried"
+    }
+  },
+  {
+    "traceId": "463ac35c9f6413ad",
+    "parentId": "4a1b2c3d4e5f6071",
+    "id": "8e5f607182930415",
+    "name": "cache lookup",
+    "localEndpoint": { "serviceName": "support-agent" },
+    "tags": { "cache.hit": "false" }
+  }
+]

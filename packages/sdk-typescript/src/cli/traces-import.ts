@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { parseKeyPath, type IdentityKeys } from "./import-formats/identity.js";
+import { importAdapters } from "./import-formats/registry.js";
 import { parseHueOrigin } from "./login.js";
 import { PrepareError, prepareTraceBundle, type PrepareReport } from "./traces-import-prepare.js";
 import {
@@ -15,9 +17,9 @@ import {
 /**
  * `hue traces import`: imports a bundle of existing traces into Hue in two steps that keep the
  * payloads on this machine until the agent has authorized their delivery. `prepare` converts a
- * file, directory or ZIP archive of OTLP/JSON, Langfuse observation or ATIF exports into a
- * bundle and prints its manifest digest and totals; `prepare_trace_import` (Hue MCP) takes
- * those and answers an import authorization; `upload` delivers the bundle with it.
+ * file, directory or ZIP archive of trace exports (`import-formats/registry.ts`) into a bundle
+ * and prints its manifest digest and totals; `prepare_trace_import` (Hue MCP) takes those and
+ * answers an import authorization; `upload` delivers the bundle with it.
  */
 
 /** Streams and seams for {@link runTracesCommand}; tests inject these. */
@@ -28,22 +30,42 @@ export interface TracesCommandIo extends UploadIo {
   cwd?: string;
 }
 
-export const TRACES_USAGE = `Usage: hue traces import prepare <path> [--out <directory>] [--json]
+/** The format ids, wrapped to the usage text's width under its indent. */
+function formatList(indent: string, width = 98): string {
+  const lines: string[] = [];
+  let line = "";
+  for (const id of importAdapters.map((adapter) => adapter.id)) {
+    const next = line ? `${line}, ${id}` : id;
+    if (line && indent.length + next.length + 1 > width) {
+      lines.push(`${line},`);
+      line = id;
+    } else line = next;
+  }
+  lines.push(line);
+  return lines.map((text) => indent + text).join("\n");
+}
+
+export const TRACES_USAGE = `Usage: hue traces import prepare <path> [--out <directory>] [--user-key <key>] [--session-key <key>] [--json]
        hue traces import upload <directory> --authorization-file <file> [--import-url <url>] [--json]
 
 Import a bundle of existing traces into Hue. Nothing leaves this machine until the upload step,
 and no project key is involved: a Hue MCP connection authorizes the delivery.
 
-prepare  Reads a file, a directory or a ZIP archive and recognizes each file by its content:
-         OTLP/JSON trace exports ({"resourceSpans": […]}, also one per line), complete Langfuse
-         observation exports (the data or observations envelope) and text ATIF v1.7/v1.8 exports.
+prepare  Reads a file, a directory or a ZIP archive and recognizes each file by its content,
+         never its name: one JSON document, a JSON array of records, JSON Lines or binary OTLP,
+         gzip or zstd compressed or not, in these formats:
+${formatList("           ")}
          Every trace becomes gzip OTLP/JSON batches written to --out (default <path>.hue-import)
          with manifest.json. The report names the manifest_digest and totals that
-         prepare_trace_import takes, the files it could not read, invalid vendor ids it mapped
-         to OpenTelemetry ids, traces without a declared history owner and the origin each source
-         recorded.
-  --out <directory>   Where the bundle is written (created with mode 0700)
-  --json              Print the report as one JSON object
+         prepare_trace_import takes, the files, lines and records it could not read, invalid
+         vendor ids it mapped to OpenTelemetry ids, traces without a declared history owner and
+         the origin each source recorded.
+  --out <directory>    Where the bundle is written (created with mode 0700)
+  --user-key <key>     Where the export records each trace's end user under a key of its own: an
+                       attribute or metadata key (app.customer_id), or a JSON path into each
+                       source record ($.metadata.customer.id or /metadata/customer/id)
+  --session-key <key>  Where the export records each trace's conversation, the same way
+  --json               Print the report as one JSON object
 
 upload   Registers the manifest, then sends each trace's values and batches in order, two
          requests at a time, checks every span's receipt, reconciles and completes. Progress is
@@ -108,6 +130,8 @@ function parsePrepareArguments(argv: string[]) {
       strict: true,
       options: {
         out: { type: "string" },
+        "user-key": { type: "string" },
+        "session-key": { type: "string" },
         json: { type: "boolean", default: false },
       },
     });
@@ -130,10 +154,25 @@ async function prepare(
         : "Name the file, directory or archive to prepare",
     );
   const input = resolve(cwd, positionals[0]!);
+  const keys: IdentityKeys = {};
+  for (const [flag, kind] of [
+    ["user-key", "user"],
+    ["session-key", "session"],
+  ] as const) {
+    const text = values[flag];
+    if (text === undefined) continue;
+    const path = parseKeyPath(text);
+    if (!path)
+      throw new UsageError(
+        `--${flag} must be an attribute or metadata key, or a JSON path such as $.metadata.user_id or /metadata/user_id`,
+      );
+    keys[kind] = path;
+  }
   let report: PrepareReport;
   try {
     report = await prepareTraceBundle(input, {
       ...(values.out !== undefined ? { out: resolve(cwd, values.out) } : {}),
+      ...(keys.user || keys.session ? { keys } : {}),
     });
   } catch (error) {
     if (error instanceof PrepareError) {
@@ -172,10 +211,22 @@ async function prepare(
     out(
       `Mapped invalid vendor ids to OpenTelemetry ids in ${plural(report.traces.remapped.traces, "trace")} (${plural(report.traces.remapped.spans, "span")}).`,
     );
+  for (const [rule, count] of Object.entries(report.traces.timing))
+    out(`Instants the source did not record (${rule}): ${plural(count, "trace")}.`);
+  const where = (item: { file?: string; line?: number; record?: number }) =>
+    [
+      item.file,
+      item.line !== undefined ? `line ${item.line}` : undefined,
+      item.record !== undefined ? `record ${item.record}` : undefined,
+    ]
+      .filter(Boolean)
+      .join(" ");
   for (const file of report.files.unsupported) warn(`Not read: ${file.file}: ${file.reason}.`);
+  for (const record of report.files.skipped) warn(`Not read: ${where(record)}: ${record.reason}.`);
+  for (const note of report.files.notes) warn(`Note: ${where(note)}: ${note.reason}.`);
   for (const refusal of report.traces.refused)
     warn(
-      `Not converted: ${[refusal.file, refusal.trace_id ? `trace ${refusal.trace_id}` : undefined].filter(Boolean).join(" ")}: ${refusal.reason}.`,
+      `Not converted: ${[where(refusal), refusal.trace_id ? `trace ${refusal.trace_id}` : undefined].filter(Boolean).join(" ")}: ${refusal.reason}.`,
     );
   out(
     "Next: call prepare_trace_import with manifest_digest, totals and source, write the authorization to a private file and run hue traces import upload.",

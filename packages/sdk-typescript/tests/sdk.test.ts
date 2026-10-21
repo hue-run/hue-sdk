@@ -20,7 +20,7 @@ import {
 } from "../src/index.js";
 import { hueTelemetry } from "../src/ai-sdk.js";
 import { OpenTelemetry } from "@ai-sdk/otel";
-import { generateText, jsonSchema, streamText, tool } from "ai";
+import { generateText, isStepCount, jsonSchema, streamText, tool } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import hostedFixtures from "./fixtures/hosted-tool-calls.json" with { type: "json" };
@@ -4416,6 +4416,154 @@ describe("Vercel AI SDK integration", () => {
     } finally {
       await hue.shutdown();
       await endpoint.server.stop(true);
+    }
+  });
+
+  test("records the end user and conversation the app puts in AI SDK 7 runtime context", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "runtime-context",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    // One tool call, then an answer: invoke_agent, two steps, two chat spans and execute_tool.
+    const model = () => {
+      let call = 0;
+      return new MockLanguageModelV4({
+        doGenerate: async () => ({
+          content:
+            call++ === 0
+              ? [
+                  {
+                    type: "tool-call",
+                    toolCallId: "call-1",
+                    toolName: "lookup",
+                    input: '{"accountId":"tool-argument-user"}',
+                  },
+                ]
+              : [{ type: "text", text: "Done" }],
+          finishReason:
+            call === 1
+              ? { unified: "tool-calls", raw: "tool_calls" }
+              : { unified: "stop", raw: "stop" },
+          usage,
+          warnings: [],
+        }),
+      });
+    };
+    const tools = {
+      lookup: tool({
+        inputSchema: jsonSchema<{ accountId: string }>({
+          type: "object",
+          properties: { accountId: { type: "string" } },
+        }),
+        execute: async () => ({ owner: "tool-result-user" }),
+      }),
+    };
+    const call = (
+      functionId: string,
+      runtimeContext: Record<string, unknown>,
+      telemetry = hueTelemetry(hue),
+    ) =>
+      generateText({
+        model: model(),
+        prompt: "Synthetic prompt",
+        tools,
+        stopWhen: isStepCount(2),
+        runtimeContext,
+        telemetry: { ...telemetry, functionId },
+      });
+    try {
+      await call("defaults", {
+        userId: "user-7",
+        threadId: "thread-7",
+        apiToken: "synthetic-runtime-secret",
+      });
+      await call("session-first", { userId: 42, sessionId: "session-1", threadId: "thread-1" });
+      await call(
+        "custom-keys",
+        { accountId: "account-9", chatId: "chat-9", userId: "ignored" },
+        hueTelemetry(hue, { userKey: "accountId", sessionKey: "chatId" }),
+      );
+      await call("unusable", { userId: "", sessionId: { id: "nested" }, threadId: "bad\u0000id" });
+      await call("none", { tenant: "tenant-1" });
+      await hue.withSpan(
+        "request",
+        () => call("scoped", { userId: "context-user", sessionId: "context-session" }),
+        { userId: "scope-user", sessionId: "scope-session" },
+      );
+      await hue.flush();
+      const spans = endpoint.requests.flatMap((request) => request.records);
+      const traceOf = (functionId: string) => {
+        const root = spans.find(
+          (span) => attr(span, "gen_ai.agent.name")?.stringValue === functionId,
+        )!;
+        return spans.filter((span) => span.traceId === root.traceId && span.name !== "request");
+      };
+      const identity = (functionId: string) => {
+        const trace = traceOf(functionId);
+        expect(trace.map((span) => span.name)).toEqual(
+          expect.arrayContaining(["execute_tool lookup", "chat mock-model-id"]),
+        );
+        expect(trace.length).toBe(6);
+        return [
+          ...new Set(
+            trace.map((span) =>
+              JSON.stringify([
+                attr(span, "user.id")?.stringValue,
+                attr(span, "gen_ai.conversation.id")?.stringValue,
+              ]),
+            ),
+          ),
+        ].map((value) => JSON.parse(value) as unknown);
+      };
+      // Every span of the call, tool span included, carries the same identity.
+      expect(identity("defaults")).toEqual([["user-7", "thread-7"]]);
+      expect(identity("session-first")).toEqual([["42", "session-1"]]);
+      expect(identity("custom-keys")).toEqual([["account-9", "chat-9"]]);
+      expect(identity("unusable")).toEqual([[null, null]]);
+      expect(identity("none")).toEqual([[null, null]]);
+      // An enclosing withSpan's identity wins over runtime context.
+      expect(identity("scoped")).toEqual([["scope-user", "scope-session"]]);
+      // No other runtime-context value, and no tool argument or result, is exported.
+      const raw = endpoint.requests.map((request) => request.raw).join(" ");
+      expect(raw).not.toContain("synthetic-runtime-secret");
+      expect(raw).not.toContain("tenant-1");
+      expect(raw).not.toContain("tool-argument-user");
+      expect(raw).not.toContain("tool-result-user");
+      expect(
+        spans.some((span) => span.attributes?.some((a) => a.key.startsWith("ai.settings.context"))),
+      ).toBe(false);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("hueTelemetry names only the runtime-context keys it reads and rejects an empty key", async () => {
+    const hue = createHue({ apiKey, serviceName: "runtime-context-options" });
+    try {
+      expect(hueTelemetry(hue).includeRuntimeContext).toEqual({
+        userId: true,
+        sessionId: true,
+        threadId: true,
+      });
+      expect(
+        hueTelemetry(hue, { userKey: "accountId", sessionKey: ["chatId", "accountId"] })
+          .includeRuntimeContext,
+      ).toEqual({ accountId: true, chatId: true });
+      // With both mappings off, the options are exactly what they were before the mapping existed.
+      expect(Object.keys(hueTelemetry(hue, { userKey: false, sessionKey: false })).sort()).toEqual([
+        "integrations",
+        "isEnabled",
+        "recordInputs",
+        "recordOutputs",
+      ]);
+      expect(() => hueTelemetry(hue, { userKey: "" })).toThrow(TypeError);
+      expect(() => hueTelemetry(hue, { sessionKey: ["sessionId", ""] })).toThrow(TypeError);
+    } finally {
+      await hue.shutdown();
     }
   });
 });

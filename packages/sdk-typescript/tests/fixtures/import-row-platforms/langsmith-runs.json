@@ -1,0 +1,325 @@
+{
+  "runs": [
+    {
+      "session_id": "5b0d3c1e-7a2f-4e8b-9c6d-2f1a0e9b8c7d",
+      "trace_id": "1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e01",
+      "reference_example_id": null,
+      "feedback_stats": {},
+      "first_token_time": null,
+      "status": "success",
+      "error": null,
+      "s3_urls": {},
+      "id": "1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e01",
+      "name": "support-agent",
+      "run_type": "chain",
+      "start_time": "2026-10-20T14:03:11.402000",
+      "end_time": "2026-10-20T14:03:23.877000",
+      "extra": {
+        "metadata": {
+          "user_id": "user-42",
+          "thread_id": "thread-7",
+          "revision_id": "1.4.0"
+        },
+        "runtime": {
+          "sdk": "langsmith-py",
+          "sdk_version": "0.14.9"
+        }
+      },
+      "events": [
+        {
+          "name": "start",
+          "time": "2026-10-20T14:03:11.402000"
+        },
+        {
+          "name": "end",
+          "time": "2026-10-20T14:03:23.877000"
+        }
+      ],
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Where is order 12?"
+          }
+        ]
+      },
+      "outputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Where is order 12?"
+          },
+          {
+            "role": "assistant",
+            "content": "Order 12 shipped and arrives tomorrow."
+          }
+        ]
+      },
+      "parent_run_id": null,
+      "parent_run_ids": [],
+      "dotted_order": "20261020T140311402000Z1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e01",
+      "tags": [
+        "beta"
+      ],
+      "prompt_tokens": 1834,
+      "completion_tokens": 96,
+      "total_tokens": 1930,
+      "prompt_cost": 0.0023,
+      "completion_cost": 0.00096,
+      "total_cost": 0.00326,
+      "app_path": "/o/00000000-0000-4000-8000-000000000000/projects/p/5b0d3c1e-7a2f-4e8b-9c6d-2f1a0e9b8c7d/r/1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e01"
+    },
+    {
+      "session_id": "5b0d3c1e-7a2f-4e8b-9c6d-2f1a0e9b8c7d",
+      "trace_id": "1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e01",
+      "reference_example_id": null,
+      "feedback_stats": {},
+      "first_token_time": null,
+      "status": "success",
+      "error": null,
+      "s3_urls": {},
+      "id": "1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e02",
+      "name": "ChatOpenAI",
+      "run_type": "llm",
+      "start_time": "2026-10-20T14:03:12.010000",
+      "end_time": "2026-10-20T14:03:15.233000",
+      "extra": {
+        "invocation_params": {
+          "model": "gpt-5",
+          "_type": "openai-chat",
+          "stream": false,
+          "tools": [
+            {
+              "type": "function",
+              "function": {
+                "name": "lookup_order",
+                "description": "Look up an order by id.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "options": {
+          "stop": null
+        },
+        "batch_size": 1,
+        "metadata": {
+          "user_id": "user-42",
+          "thread_id": "thread-7",
+          "revision_id": "1.4.0",
+          "ls_provider": "openai",
+          "ls_model_name": "gpt-5",
+          "ls_model_type": "chat",
+          "usage_metadata": {
+            "input_tokens": 1834,
+            "output_tokens": 96,
+            "total_tokens": 1930,
+            "input_token_details": {
+              "cache_read": 1024
+            },
+            "output_token_details": {
+              "reasoning": 64
+            }
+          }
+        }
+      },
+      "events": [
+        {
+          "name": "start",
+          "time": "2026-10-20T14:03:12.010000"
+        },
+        {
+          "name": "end",
+          "time": "2026-10-20T14:03:15.233000"
+        }
+      ],
+      "inputs": {
+        "messages": [
+          [
+            {
+              "lc": 1,
+              "type": "constructor",
+              "id": [
+                "langchain",
+                "schema",
+                "messages",
+                "SystemMessage"
+              ],
+              "kwargs": {
+                "content": "You help customers with their orders.",
+                "type": "system"
+              }
+            },
+            {
+              "lc": 1,
+              "type": "constructor",
+              "id": [
+                "langchain",
+                "schema",
+                "messages",
+                "HumanMessage"
+              ],
+              "kwargs": {
+                "content": "Where is order 12?",
+                "type": "human"
+              }
+            }
+          ]
+        ]
+      },
+      "outputs": {
+        "generations": [
+          [
+            {
+              "text": "",
+              "generation_info": {
+                "finish_reason": "tool_calls"
+              },
+              "type": "ChatGeneration",
+              "message": {
+                "lc": 1,
+                "type": "constructor",
+                "id": [
+                  "langchain",
+                  "schema",
+                  "messages",
+                  "AIMessage"
+                ],
+                "kwargs": {
+                  "content": "",
+                  "type": "ai",
+                  "tool_calls": [
+                    {
+                      "name": "lookup_order",
+                      "args": {
+                        "id": 12
+                      },
+                      "id": "call_1",
+                      "type": "tool_call"
+                    }
+                  ],
+                  "usage_metadata": {
+                    "input_tokens": 1834,
+                    "output_tokens": 96,
+                    "total_tokens": 1930,
+                    "input_token_details": {
+                      "cache_read": 1024
+                    },
+                    "output_token_details": {
+                      "reasoning": 64
+                    }
+                  },
+                  "response_metadata": {
+                    "model_name": "gpt-5-2025-08-07",
+                    "finish_reason": "tool_calls"
+                  },
+                  "invalid_tool_calls": []
+                }
+              }
+            }
+          ]
+        ],
+        "llm_output": {
+          "model_name": "gpt-5-2025-08-07"
+        },
+        "run": null,
+        "type": "LLMResult"
+      },
+      "parent_run_id": "1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e01",
+      "parent_run_ids": [
+        "1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e01"
+      ],
+      "dotted_order": "20261020T140311402000Z1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e01.20261020T140312010000Z1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e02",
+      "tags": [
+        "seq:step:1"
+      ],
+      "prompt_tokens": 1834,
+      "completion_tokens": 96,
+      "total_tokens": 1930,
+      "prompt_token_details": {
+        "cache_read": 1024
+      },
+      "completion_token_details": {
+        "reasoning": 64
+      },
+      "prompt_cost": 0.0023,
+      "completion_cost": 0.00096,
+      "total_cost": 0.00326,
+      "app_path": "/o/00000000-0000-4000-8000-000000000000/projects/p/5b0d3c1e-7a2f-4e8b-9c6d-2f1a0e9b8c7d/r/1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e02"
+    },
+    {
+      "session_id": "5b0d3c1e-7a2f-4e8b-9c6d-2f1a0e9b8c7d",
+      "trace_id": "1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e01",
+      "reference_example_id": null,
+      "feedback_stats": {},
+      "first_token_time": null,
+      "status": "success",
+      "error": null,
+      "s3_urls": {},
+      "id": "1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e03",
+      "name": "lookup_order",
+      "run_type": "tool",
+      "start_time": "2026-10-20T14:03:15.300000",
+      "end_time": "2026-10-20T14:03:15.900000",
+      "extra": {
+        "color": "green",
+        "tool_call_id": "call_1",
+        "metadata": {
+          "user_id": "account-the-tool-touched",
+          "thread_id": "thread-7",
+          "revision_id": "1.4.0"
+        }
+      },
+      "events": [
+        {
+          "name": "start",
+          "time": "2026-10-20T14:03:15.300000"
+        },
+        {
+          "name": "end",
+          "time": "2026-10-20T14:03:15.900000"
+        }
+      ],
+      "inputs": {
+        "id": 12
+      },
+      "outputs": {
+        "output": {
+          "content": "{\"status\":\"shipped\",\"eta\":\"tomorrow\"}",
+          "additional_kwargs": {},
+          "response_metadata": {},
+          "type": "tool",
+          "name": "lookup_order",
+          "tool_call_id": "call_1",
+          "status": "success"
+        }
+      },
+      "parent_run_id": "1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e01",
+      "parent_run_ids": [
+        "1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e01"
+      ],
+      "dotted_order": "20261020T140311402000Z1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e01.20261020T140315300000Z1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e03",
+      "tags": [],
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "prompt_cost": null,
+      "completion_cost": null,
+      "total_cost": null,
+      "app_path": "/o/00000000-0000-4000-8000-000000000000/projects/p/5b0d3c1e-7a2f-4e8b-9c6d-2f1a0e9b8c7d/r/1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e03"
+    }
+  ],
+  "cursors": {
+    "next": null
+  }
+}
