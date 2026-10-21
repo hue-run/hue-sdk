@@ -379,6 +379,22 @@ describe("Langfuse exports", () => {
     expect(identity(traceIdOf(page.data[0].traceId))).toEqual({ user: "c-9" });
   });
 
+  test("--user-key reads a resource attribute Langfuse kept in metadata", async () => {
+    const trace = copy(fixture.traceWithObservations);
+    trace.userId = null;
+    trace.metadata = { resourceAttributes: { "app.customer_id": "customer-9" } };
+    const { identity, spans } = await bundleOf(
+      { "trace.json": JSON.stringify(trace) },
+      "--user-key",
+      "app.customer_id",
+    );
+    const traceId = traceIdOf(trace.id);
+    expect(identity(traceId)).toMatchObject({ user: "customer-9" });
+    const root = named(await spans(traceId), trace.name);
+    expect(root.resource["app.customer_id"]).toBe("customer-9");
+    expect(str(root, "user.id")).toBe("customer-9");
+  });
+
   test("--user-key replaces the user a Langfuse trace names, on its root", async () => {
     const trace = copy(fixture.traceWithObservations);
     trace.userId = "own-user";

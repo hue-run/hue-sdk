@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { parseArgs } from "node:util";
-import { zstdCompressSync } from "node:zlib";
+// A namespace import: Node.js 22.12 to 22.14 have no zstd, and a missing named export fails loading.
+import * as zlib from "node:zlib";
 
 const { values } = parseArgs({
   options: {
@@ -373,7 +374,7 @@ if (
   throw new Error("Installed hue mcp install did not preserve the project pin");
 // The installed CLI under Node.js reads every frame of a zstd file: Node's zlib decompresses only
 // a file's first frame on its own, which Bun's tests cannot show. zstd is in node:zlib from 22.15.
-if (typeof zstdCompressSync === "function") {
+if (typeof zlib.zstdCompressSync === "function") {
   const exports = await mkdtemp(join(destination, "traces-import-"));
   const spans = (from, count) =>
     Array.from({ length: count }, (_, index) =>
@@ -388,7 +389,7 @@ if (typeof zstdCompressSync === "function") {
   const input = join(exports, "spans.jsonl.zst");
   await writeFile(
     input,
-    Buffer.concat([zstdCompressSync(spans(1, 3)), zstdCompressSync(spans(4, 7))]),
+    Buffer.concat([zlib.zstdCompressSync(spans(1, 3)), zlib.zstdCompressSync(spans(4, 7))]),
   );
   const prepared = spawnSync(
     join(minimal, "node_modules", ".bin", "hue"),

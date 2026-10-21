@@ -19,7 +19,15 @@ import {
   type TraceImportOrigin,
 } from "../traces-import-convert.js";
 import type { ConvertContext, Location, TraceCollector } from "./adapter.js";
-import { decideKey, namesIdentity, resolveKey, subtreeIds, type IdentityKeys } from "./identity.js";
+import {
+  decideKey,
+  namesIdentity,
+  resolveKey,
+  subtreeIds,
+  withoutIdentity,
+  type IdentityKeys,
+  type IdentityKind,
+} from "./identity.js";
 import { genAiMessages } from "./messages.js";
 
 /**
@@ -366,16 +374,26 @@ export class RowTraceCollector implements TraceCollector {
       path &&
       resolveKey(
         path,
-        { attributes: new Map(Object.entries(span.row.attributes ?? {})) },
+        {
+          attributes: new Map(Object.entries(span.row.attributes ?? {})),
+          resource: new Map(Object.entries(span.row.resource ?? {})),
+        },
         span.row.record,
         span.row.metadata,
       );
     const decide = (path: IdentityKeys["user"], own: (row: SpanRow) => string | undefined) => {
       const fromKey = path ? decideKey(spans, tool, (span) => keyed(path, span)) : { found: false };
-      return fromKey.found ? fromKey.value : decideKey(spans, tool, (span) => own(span.row)).value;
+      return fromKey.found
+        ? { keyed: true, value: fromKey.value }
+        : { keyed: false, value: decideKey(spans, tool, (span) => own(span.row)).value };
     };
     const user = decide(this.keys.user, (row) => row.user);
     const session = decide(this.keys.session, (row) => row.session);
+    // What a key decided, a user or none, is the trace's: no span keeps a recorded attribute Hue
+    // would read another from.
+    const keyedKinds: IdentityKind[] = [];
+    if (user.keyed) keyedKinds.push("user");
+    if (session.keyed) keyedKinds.push("session");
     const blobs = new BlobSink();
     let origin: TraceImportOrigin = "unknown";
     const order = (a: string, b: string) => {
@@ -403,9 +421,16 @@ export class RowTraceCollector implements TraceCollector {
       else if (row.origin === "simulation" && origin !== "evaluation") origin = "simulation";
       else if (row.environment === "production" && origin === "unknown") origin = "production";
       const attributes = new AttributeList(blobs);
+      const own: [string, JsonValue][] = [];
+      for (const [name, value] of Object.entries(row.attributes ?? {})) {
+        let kept: JsonValue | undefined = value;
+        for (const kind of keyedKinds)
+          if (kept !== undefined) kept = withoutIdentity(kind, name, kept);
+        if (kept !== undefined) own.push([name, kept]);
+      }
       // An attribute the source recorded under its own name is kept as recorded; the emitter
       // adds none of the same name beside it.
-      const recorded = new Set(Object.keys(row.attributes ?? {}));
+      const recorded = new Set(own.map(([name]) => name));
       const add = (name: string, value: JsonValue) => {
         if (!recorded.has(name)) attributes.add(name, value);
       };
@@ -417,8 +442,8 @@ export class RowTraceCollector implements TraceCollector {
         if (row.provider) add("gen_ai.provider.name", row.provider);
         if (row.agentName) add("gen_ai.agent.name", row.agentName);
         if (root && row.kind !== "tool") {
-          if (user !== undefined) add("user.id", user);
-          if (session !== undefined) add("gen_ai.conversation.id", session);
+          if (user.value !== undefined) add("user.id", user.value);
+          if (session.value !== undefined) add("gen_ai.conversation.id", session.value);
         }
       }
       addContent(add, row, scoring);
@@ -434,7 +459,7 @@ export class RowTraceCollector implements TraceCollector {
           add(name, count);
       }
       if (row.error?.type) add("error.type", row.error.type);
-      for (const [name, value] of Object.entries(row.attributes ?? {})) {
+      for (const [name, value] of own) {
         if (name.startsWith("hue.import."))
           throw new ConversionError("Source attributes use reserved import keys");
         // A scorer's metadata may name a user; Hue never reads one from the vendor's evaluation.

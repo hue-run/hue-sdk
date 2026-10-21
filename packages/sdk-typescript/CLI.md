@@ -577,9 +577,10 @@ conversation (`gen_ai.conversation.id`); a tool span, tool row or tool call neve
 | `anthropic_messages` | An Anthropic Messages request or response | a response (`"type": "message"`, `"role": "assistant"`, `content`, `model`), or a `messages` request carrying something only Anthropic sends (`system`, `anthropic_version`, `stop_sequences`, an `input_schema` tool, a `tool_use` or other Anthropic content block) and nothing only OpenAI sends | `metadata.user_id` |
 
 **How each kind of format is converted.** OTLP/JSON, binary OTLP and Jaeger API v3 spans are kept
-exactly as recorded. A trace or span id that is not an OpenTelemetry id (an exporter's UUID, for
-example) is mapped to one derived from it by SHA-256, with the original kept as
-`hue.import.original_trace_id` or `hue.import.original_span_id`.
+exactly as recorded, and the spans of one trace split between files of these formats are read as
+one trace. A trace or span id that is not an OpenTelemetry id (an exporter's UUID, for example) is
+mapped to one derived from it by SHA-256, with the original kept as `hue.import.original_trace_id`
+or `hue.import.original_span_id`.
 
 - Jaeger UI JSON, Zipkin v2 and Phoenix spans are written as the OTLP spans they were, as the
   OpenTelemetry Collector converts Jaeger and Zipkin spans. Attributes keep their own names
@@ -607,7 +608,8 @@ example) is mapped to one derived from it by SHA-256, with the original kept as
   and `output.value`. An error is an error status with its message. The trace's user and
   conversation go on its root spans (never a tool's), and each span keeps its whole source record
   as `hue.import.source_record`. An attribute the source recorded under its own name (a Raindrop
-  span's `gen_ai.*`, for example) is kept as recorded, with none of the same name added beside it.
+  span's `gen_ai.*`, for example) is kept as recorded, with none of the same name added beside it,
+  unless it names a user or conversation that `--user-key` or `--session-key` replaces.
 - A vendor's own evaluation recorded inside a production trace is read as such, not as the
   agent's work: a Braintrust span with `purpose: "scorer"` or of type `score`, `automation`,
   `facet`, `classifier`, `preprocessor` or `review` (online scoring adds them to production
@@ -694,13 +696,14 @@ is one of:
 The key is read on the agent's spans as the owner is: the roots' value when they name one, else the
 other spans', never a tool span's, and spans that disagree name nobody. For a row format (the
 `langfuse` format among them) the key's value is written as the root's `user.id` (or
-`gen_ai.conversation.id`) in place of the user the record names. A trace kept as recorded or
-converted span for span (OTLP, Jaeger, Zipkin, Phoenix, the documented Langfuse list, ATIF) that
-names no owner gains one child span of the agent's earliest local root (never a tool span),
-`hue.import.user` with the single attribute `user.id` (or `hue.import.session` with
-`gen_ai.conversation.id`), so its recorded spans keep their bytes and a trace also sent live does
-not conflict. An owner the spans already name is kept, and a trace with no root but tool spans
-gains nothing.
+`gen_ai.conversation.id`) in place of the user the record names, and no span keeps an attribute it
+recorded that Hue would read another user (or conversation) from, so the trace names the key's
+value, or nobody when its spans disagree. A trace kept as recorded or converted span for span (OTLP,
+Jaeger, Zipkin, Phoenix, the documented Langfuse list, ATIF) that names no owner gains one child
+span of the agent's earliest local root (never a tool span), `hue.import.user` with the single
+attribute `user.id` (or `hue.import.session` with `gen_ai.conversation.id`), so its recorded spans
+keep their bytes and a trace also sent live does not conflict. An owner the spans already name is
+kept, and a trace with no root but tool spans gains nothing.
 
 **Limits and refusals.** A malformed record refuses its trace, never the file: an OTLP trace with a
 malformed span (an attribute value of no OTLP shape, a protobuf span that does not decode) or whose
@@ -708,11 +711,12 @@ parents close on themselves is refused rather than imported without it, and the 
 traces are read. A page of the documented Langfuse list holding an integer too large to represent
 exactly refuses only the traces of the observations that hold one. The same trace in two files is
 one trace when the copies agree and a refusal when they differ. A trace with more than 100,000
-spans, 512 batches or 10,000 values is refused and named. An input of more than 25,000 traces, more
-than 256 MiB decompressed (every trace is held until all are read; prepare a larger export in
-parts, each to its own `--out`), or whose manifest would exceed 32 MiB (4 MiB compressed), is
-refused whole. The messages of one length-prefixed protobuf file share the 64 MiB a file may
-decompress to.
+spans, 512 batches or 10,000 values is refused and named, as is a transcript whose turns together
+repeat more than 64 MiB of conversation (each turn's model span holds the conversation before it).
+An input of more than 25,000 traces, more than 256 MiB decompressed (every trace is held until all
+are read; prepare a larger export in parts, each to its own `--out`), or whose manifest would exceed
+32 MiB (4 MiB compressed), is refused whole. The messages of one length-prefixed protobuf file share
+the 64 MiB a file may decompress to.
 
 **Report.** `prepare` reports what it read and what it could not, down to the line; `--json` prints
 the report as one object:

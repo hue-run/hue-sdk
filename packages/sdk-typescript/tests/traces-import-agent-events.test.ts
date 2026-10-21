@@ -432,6 +432,54 @@ describe("Raindrop span rows", () => {
     expect(tool.endTimeUnixNano).toBe("1792317601620000000");
     expect(attr(tool, "user.id")).toBeUndefined();
   });
+
+  test("--user-key decides the user over one the spans record, a user or none", async () => {
+    const answer = JSON.parse(await fixture("raindrop-traces.json")) as Record<string, any>;
+    const [root, llm, tool] = answer.data as Record<string, any>[];
+    const recorded = {
+      "user.id": "old-user",
+      "traceloop.association.properties.user_id": "old-user",
+    };
+    const rows = (customers: string[]) => [
+      ...customers.map((customer, index) => ({
+        ...root,
+        span_id: `00f067aa0ba902b${index}`,
+        attributes: { ...root!.attributes, ...recorded, "app.customer_id": customer },
+      })),
+      {
+        ...llm,
+        parent_span_id: "00f067aa0ba902b0",
+        attributes: { ...llm!.attributes, ...recorded },
+      },
+      { ...tool, attributes: { ...tool!.attributes, ...recorded } },
+    ];
+    const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const userIds = (spans: Span[]) =>
+      spans.flatMap((span) =>
+        span.attributes
+          .filter((item) => item.key === "user.id" || item.key.endsWith(".user_id"))
+          .map((item) => `${span.name}:${item.key}=${item.value.stringValue}`),
+      );
+
+    const one = await prepare(
+      await scratch({ "traces.json": JSON.stringify({ data: rows(["new-user"]) }) }),
+      "--user-key",
+      "app.customer_id",
+    );
+    const named = await bundle(one);
+    expect(named.trace(traceId).identity).toEqual({ user: "new-user", session: "convo-2c7e91" });
+    expect(userIds(await named.spans(traceId))).toEqual(["support.reply:user.id=new-user"]);
+
+    // Two roots that name different customers name nobody, whatever the spans record.
+    const two = await prepare(
+      await scratch({ "traces.json": JSON.stringify({ data: rows(["new-user", "other-user"]) }) }),
+      "--user-key",
+      "app.customer_id",
+    );
+    const unnamed = await bundle(two);
+    expect(unnamed.trace(traceId).identity).toEqual({ session: "convo-2c7e91" });
+    expect(userIds(await unnamed.spans(traceId))).toEqual([]);
+  });
 });
 
 describe("Helicone", () => {
@@ -727,6 +775,44 @@ describe("chat transcripts", () => {
     expect(trace(traceId).identity).toEqual({ user: "customer-9" });
     const [agent] = await spans(traceId);
     expect(str(agent!, "user.id")).toBe("customer-9");
+  });
+
+  test("refuses a transcript whose turns together repeat more than 64 MiB of conversation", async () => {
+    const conversation = (turns: number, text: string) => ({
+      messages: Array.from({ length: turns }, (_, turn) => [
+        { role: "user", content: `${turn} ${text}` },
+        { role: "assistant", content: `${turn} ${text}` },
+      ]).flat(),
+    });
+    // 300 turns of 1,000 characters: each turn's span holds the conversation before it, about
+    // 90 MB together from a file of 600 KB.
+    const long = conversation(300, "x".repeat(1000));
+    const short = conversation(2, "hello");
+    // 10,000 short turns: refused from their sizes alone, before a hundred million copies.
+    const many = conversation(10_000, "hi");
+    const root = await scratch({
+      "chats.jsonl": [long, short, many].map((record) => JSON.stringify(record)).join("\n"),
+    });
+    const started = performance.now();
+    const report = await prepare(root);
+    expect(performance.now() - started).toBeLessThan(10_000);
+    const reason =
+      "a transcript whose turns together repeat more than 67108864 bytes of conversation";
+    expect(report.traces.refused).toEqual([
+      {
+        file: "chats.jsonl",
+        line: 1,
+        trace_id: derived("openai_chat", sha256(canonical(long))),
+        reason,
+      },
+      {
+        file: "chats.jsonl",
+        line: 3,
+        trace_id: derived("openai_chat", sha256(canonical(many))),
+        reason,
+      },
+    ]);
+    expect(report.totals.traces).toBe(1);
   });
 });
 

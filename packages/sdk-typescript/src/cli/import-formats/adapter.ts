@@ -76,6 +76,8 @@ export interface ConvertContext {
   /** Reports a record that could not be read. With the record's `traceKey`, that trace is
    * refused whole and named; without one, the record alone is reported. */
   refuse(reason: string, traceKey?: string): void;
-  /** This format's run-wide collector, created on first use by `create`. */
-  collector<T extends TraceCollector>(create: () => T): T;
+  /** This format's run-wide collector, created on first use by `create`. Formats that name the
+   * same `shared` key share one collector, so a trace whose spans they split between files is
+   * gathered as one; a shared collector names each trace's format itself. */
+  collector<T extends TraceCollector>(create: () => T, shared?: string): T;
 }

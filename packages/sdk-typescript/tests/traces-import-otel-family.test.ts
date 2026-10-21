@@ -862,4 +862,135 @@ describe("OTLP protobuf", () => {
       expect(read.bytes()).toBeGreaterThan(800_000);
     },
   );
+
+  test.skipIf(typeof zlib.zstdCompressSync !== "function")(
+    "counts what a damaged zstd message decompressed to against the file's bound",
+    () => {
+      // Each decompresses to about 400 KB and then reads as neither JSON nor protobuf.
+      const notJson = zlib.zstdCompressSync(Buffer.from(`{${"x".repeat(400_000)}`));
+      const notProtobuf = zlib.zstdCompressSync(Buffer.alloc(400_000, 0xff));
+      const read = binaryValues(
+        lengthPrefixed(notJson, notProtobuf, notJson, notProtobuf),
+        1_000_000,
+      );
+      if (!read || "unsupported" in read) throw new Error("not read as binary OTLP");
+      expect([...read.values]).toEqual([]);
+      expect(read.problems).toEqual([
+        { line: 1, reason: "not an OTLP trace message: a message that is not JSON" },
+        { line: 2, reason: "not an OTLP trace message: a protobuf varint over ten bytes" },
+        {
+          line: 3,
+          reason:
+            "the messages decompress to more than 1000000 bytes; this message and the 1 after it were not read",
+        },
+      ]);
+      expect(read.bytes()).toBeGreaterThan(800_000);
+    },
+  );
+});
+
+describe("One trace across files of several formats", () => {
+  const traceId = "3c5e7f9081a2b3c4d5e6f708192a3b4c";
+  /** The fixture request holding only `spans`. */
+  const part = (request: any, spans: unknown[]) => ({
+    resourceSpans: [
+      {
+        ...request.resourceSpans[0],
+        scopeSpans: [{ ...request.resourceSpans[0].scopeSpans[0], spans }],
+      },
+    ],
+  });
+
+  test("joins a trace whose spans are split across OTLP/JSON, binary OTLP and Jaeger API v3", async () => {
+    const request = await fixtureJson("otlp-request.json");
+    const [first, second, third] = request.resourceSpans[0].scopeSpans[0].spans;
+    const whole = await prepareFile("whole.json", JSON.stringify(request));
+    const directory = await scratch();
+    await writeFiles(directory, {
+      "agent.json": JSON.stringify(part(request, [first])),
+      "chat.binpb": encodeRequest(part(request, [second])),
+      "tool.jsonl": `${JSON.stringify({ result: part(request, [third]) })}\n{"end":true}\n`,
+      // The same span in an OTLP/JSON file: a copy that agrees is read once.
+      "tool-copy.json": JSON.stringify(part(request, [third])),
+    });
+    const { code, report, stderr } = await prepare(directory);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(report.traces.refused).toEqual([]);
+    expect(report.totals).toMatchObject({ traces: 1, spans: 3 });
+    expect(report.formats).toEqual({ otlp_json: 1 });
+    expect(report.files.supported).toEqual([
+      { file: "agent.json", format: "otlp_json", traces: 1 },
+      { file: "chat.binpb", format: "otlp_protobuf", traces: 1 },
+      { file: "tool-copy.json", format: "otlp_json", traces: 1 },
+      { file: "tool.jsonl", format: "jaeger_api_v3", traces: 1 },
+    ]);
+    const out = report.output_directory as string;
+    const manifest = JSON.parse(
+      await readFile(join(out, "manifest.json"), "utf8"),
+    ) as TraceImportManifest;
+    expect(manifest.traces[0]).toMatchObject({
+      trace_id: traceId,
+      span_count: 3,
+      identity: { user: "user-42", session: "conversation-7" },
+    });
+    const spans: Record<string, unknown>[] = [];
+    for (const batch of manifest.traces[0]!.batches) {
+      const body = await readFile(join(out, `${traceId}.${batch.sha256}.json.gz`));
+      const decoded = JSON.parse(zlib.gunzipSync(body).toString("utf8"));
+      for (const group of decoded.resourceSpans)
+        for (const scope of group.scopeSpans)
+          for (const span of scope.spans)
+            spans.push({ ...span, resource: group.resource?.attributes ?? [], scope: scope.scope });
+    }
+    // The spans the trace's one-file export holds.
+    expect(spans).toEqual(await whole.spans(traceId));
+  });
+
+  test("refuses the trace when two formats hold one span with different content", async () => {
+    const request = await fixtureJson("otlp-request.json");
+    const [first, second] = request.resourceSpans[0].scopeSpans[0].spans;
+    const directory = await scratch();
+    await writeFiles(directory, {
+      "agent.json": JSON.stringify(part(request, [first, second])),
+      "chat.jsonl": JSON.stringify({ result: part(request, [{ ...second, name: "renamed" }]) }),
+    });
+    const { code, stderr } = await prepare(directory);
+    expect(code).not.toBe(0);
+    expect(stderr).toContain(`span ${second.spanId} appears with different content`);
+  });
+
+  test("leaves out a trace one format refuses after another read it whole", async () => {
+    const request = await fixtureJson("otlp-request.json");
+    const other = "4d6f8091a2b3c4d5e6f708192a3b4c5d";
+    const [first] = request.resourceSpans[0].scopeSpans[0].spans;
+    const zipkinSpan = (id: string, parentId: string) => ({
+      traceId,
+      id,
+      parentId,
+      name: "cycle",
+      timestamp: 1_792_504_991_402_000,
+      duration: 5,
+    });
+    const directory = await scratch();
+    await writeFiles(directory, {
+      "trace.json": JSON.stringify(part(request, request.resourceSpans[0].scopeSpans[0].spans)),
+      "other.json": JSON.stringify(part(request, [{ ...first, traceId: other }])),
+      // Zipkin spans of the same trace whose parents close on themselves: the trace is refused.
+      "zipkin.json": JSON.stringify([
+        zipkinSpan("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        zipkinSpan("bbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaa"),
+      ]),
+    });
+    const { code, report } = await prepare(directory);
+    expect(code).toBe(0);
+    expect(report.traces.refused).toEqual([
+      { trace_id: traceId, reason: "The source hierarchy contains a cycle" },
+    ]);
+    const manifest = JSON.parse(
+      await readFile(join(report.output_directory, "manifest.json"), "utf8"),
+    ) as TraceImportManifest;
+    expect(manifest.traces.map((trace) => trace.trace_id)).toEqual([other]);
+    expect(report.formats).toEqual({ otlp_json: 1 });
+  });
 });

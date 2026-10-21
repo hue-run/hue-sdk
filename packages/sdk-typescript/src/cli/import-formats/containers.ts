@@ -58,7 +58,8 @@ const oversized = (format: string, maxBytes: number) => ({
 });
 
 /** gzip, every member of it. A file that breaks off, or holds bytes after its last member, is
- * read member by member up to the break, the rest named. */
+ * read member by member up to the break, the rest named; a member that fails its checksum leaves
+ * the file unread. */
 function gunzip(bytes: Uint8Array, maxBytes: number): Decoded {
   try {
     return { bytes: zlib.gunzipSync(bytes, { maxOutputLength: maxBytes }) };
@@ -98,10 +99,17 @@ function gunzip(bytes: Uint8Array, maxBytes: number): Decoded {
       note = "the gzip file breaks off; what follows the last complete line was not read";
       break;
     }
+    // A member whose data does not match its trailer is damaged, and none of the file is trusted.
+    const trailer = new DataView(bytes.buffer, bytes.byteOffset + end - 8, 8);
+    if (
+      trailer.getUint32(0, true) !== zlib.crc32(inflated.buffer) ||
+      trailer.getUint32(4, true) !== inflated.buffer.byteLength >>> 0
+    )
+      return { unsupported: "a damaged gzip file" };
     pos = end;
   }
-  // A file that reads whole yet failed to decompress (a checksum that does not match) is damaged
-  // somewhere this cannot see: none of it is trusted.
+  // A file that reads whole, every member matching its trailer, yet failed to decompress is
+  // damaged somewhere this cannot see: none of it is trusted.
   if (!note || !size)
     return {
       unsupported: note?.includes("breaks off") ? "a truncated gzip file" : "a damaged gzip file",

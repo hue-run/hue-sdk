@@ -456,6 +456,8 @@ interface OtlpSpanDraft {
 
 interface OtlpTraceDraft {
   traceId: string;
+  /** The format that read the trace's first span. */
+  format?: string;
   remappedTraceId: boolean;
   spans: Map<string, OtlpSpanDraft>;
   blobs: BlobSink;
@@ -467,13 +469,22 @@ interface OtlpTraceDraft {
   conflict?: string;
 }
 
-/** Gathers the spans of OTLP/JSON exports by trace, across files: an export writes a trace's
- * spans in the requests that carried them, which need not be one file. */
+/** The collector key of the formats that keep OTLP spans as recorded (OTLP/JSON, binary OTLP,
+ * Jaeger API v3): one {@link OtlpTraceCollector} gathers their spans together. */
+export const OTLP_SPANS = "otlp_spans";
+
+/** Gathers the spans of OTLP/JSON exports by trace, across files and the formats that carry
+ * them: an export writes a trace's spans in the requests that carried them, which need not be one
+ * file. Each trace is named by the format that read its first span. */
 export class OtlpTraceCollector {
   private readonly traces = new Map<string, OtlpTraceDraft>();
 
-  /** Adds every span of the envelopes; the spans refused, with their reasons. */
-  add(envelopes: readonly Record<string, unknown>[], sourceDigest: string): Refusal[] {
+  /** Adds every span of the envelopes `format` read; the spans refused, with their reasons. */
+  add(
+    envelopes: readonly Record<string, unknown>[],
+    sourceDigest: string,
+    format: string,
+  ): Refusal[] {
     const refused: Refusal[] = [];
     for (const envelope of envelopes) {
       // An export may mix the proto field names with lowerCamelCase at any depth; every
@@ -495,7 +506,15 @@ export class OtlpTraceCollector {
             try {
               if (resourceAttributes === undefined)
                 throw new ConversionError("the span's resource has malformed attributes");
-              this.addSpan(spanValue, resourceGroup, scopeGroup, resource, scopeName, sourceDigest);
+              this.addSpan(
+                spanValue,
+                resourceGroup,
+                scopeGroup,
+                resource,
+                scopeName,
+                sourceDigest,
+                format,
+              );
             } catch (error) {
               const failure = conversionFailure(error);
               if (!failure) throw error;
@@ -526,6 +545,7 @@ export class OtlpTraceCollector {
     resource: Map<string, OtlpValue>,
     scopeName: unknown,
     sourceDigest: string,
+    format: string,
   ): void {
     if (!isObject(value)) throw new ConversionError("a span that is not a JSON object");
     const span: Record<string, unknown> = { ...value };
@@ -563,6 +583,7 @@ export class OtlpTraceCollector {
     if (attributes === undefined)
       throw new ConversionError(`span ${spanId} has malformed attributes`);
     const trace = this.draft(traceId, remappedTraceId);
+    trace.format ??= format;
     const kept = [...attributes];
     if (remappedTraceId)
       kept.push({ key: "hue.import.original_trace_id", value: { stringValue: originalTraceId } });
@@ -653,7 +674,7 @@ export class OtlpTraceCollector {
       );
       traces.push({
         traceId: draft.traceId,
-        format: "otlp_json",
+        format: draft.format ?? "otlp_json",
         entries: spans.map((span) => span.entry),
         blobs: draft.blobs.sorted(),
         origin: draft.evaluation

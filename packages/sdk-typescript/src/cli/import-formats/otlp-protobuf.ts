@@ -2,6 +2,7 @@ import * as zlib from "node:zlib";
 import {
   ConversionError,
   isObject,
+  OTLP_SPANS,
   OtlpTraceCollector,
   parseJsonText,
   type OtlpAttribute,
@@ -26,7 +27,7 @@ import type { ParsedValue } from "./containers.js";
  * alone reported. It is written here because the package carries no protobuf runtime.
  *
  * The messages of a length-prefixed file are read one at a time, and their decompressed sizes
- * together are bounded as one file's are.
+ * together, those of messages that then do not read included, are bounded as one file's are.
  */
 
 /** Marks a value decoded from protobuf: no JSON document can carry a symbol key. */
@@ -389,13 +390,9 @@ function decoded(traces: DecodedTraces, line?: number): ParsedValue {
   };
 }
 
-/** One length-prefixed message: protobuf, or zstd around protobuf or OTLP/JSON. `budget` is what
- * the file may still decompress to; the message's decompressed size is returned beside it. */
-function frameValue(
-  frame: Uint8Array,
-  line: number,
-  budget: number,
-): { value: ParsedValue; bytes: number } {
+/** One length-prefixed message's bytes, a zstd message decompressed. `budget` is what the file
+ * may still decompress to. */
+function frameBytes(frame: Uint8Array, budget: number): Uint8Array {
   let bytes = frame;
   if (isZstd(frame)) {
     if (typeof zlib.zstdDecompressSync !== "function")
@@ -412,26 +409,32 @@ function frameValue(
         throw new Oversized();
       throw new ConversionError("a damaged zstd message");
     }
-    if (!binary(bytes) && /^\s*\{/.test(Buffer.from(bytes.subarray(0, 64)).toString("utf8"))) {
-      let text: string;
-      try {
-        text = utf8.decode(bytes);
-      } catch {
-        throw new ConversionError("a JSON message that is not UTF-8");
-      }
-      try {
-        const parsed = parseJsonText(text.trim());
-        return {
-          value: { value: parsed.value, text, unsafeIntegers: parsed.unsafeIntegers, line },
-          bytes: bytes.byteLength,
-        };
-      } catch {
-        throw new ConversionError("a message that is not JSON");
-      }
-    }
   }
   if (bytes.byteLength > budget) throw new Oversized();
-  return { value: decoded(decodeTraces(bytes), line), bytes: bytes.byteLength };
+  return bytes;
+}
+
+/** One message read: protobuf, or OTLP/JSON that a zstd message held. */
+function messageValue(bytes: Uint8Array, zstd: boolean, line: number): ParsedValue {
+  if (
+    zstd &&
+    !binary(bytes) &&
+    /^\s*\{/.test(Buffer.from(bytes.subarray(0, 64)).toString("utf8"))
+  ) {
+    let text: string;
+    try {
+      text = utf8.decode(bytes);
+    } catch {
+      throw new ConversionError("a JSON message that is not UTF-8");
+    }
+    try {
+      const parsed = parseJsonText(text.trim());
+      return { value: parsed.value, text, unsafeIntegers: parsed.unsafeIntegers, line };
+    } catch {
+      throw new ConversionError("a message that is not JSON");
+    }
+  }
+  return decoded(decodeTraces(bytes), line);
 }
 
 /** The file's messages together decompress past the bound of one file. */
@@ -491,10 +494,14 @@ export function binaryValues(
   let total = 0;
   function* values(): Generator<ParsedValue> {
     for (const [index, frame] of frames.entries()) {
+      // A message counts what it decompressed to, whether or not it then reads.
+      let size = frame.byteLength;
       try {
-        const read = frameValue(frame, index + 1, maxBytes - total);
-        total += read.bytes;
-        yield read.value;
+        const bytes = frameBytes(frame, maxBytes - total);
+        size = bytes.byteLength;
+        const value = messageValue(bytes, isZstd(frame), index + 1);
+        total += size;
+        yield value;
       } catch (error) {
         if (error instanceof Oversized) {
           problems.push({
@@ -504,7 +511,7 @@ export function binaryValues(
           return;
         }
         if (!(error instanceof ConversionError)) throw error;
-        total += frame.byteLength;
+        total += size;
         problems.push({ line: index + 1, reason: `not an OTLP trace message: ${error.message}` });
       }
     }
@@ -521,13 +528,13 @@ export const otlpProtobuf: ImportAdapter = {
   convert(value, context) {
     const traces = isObject(value) && PROTOBUF in value ? (value as Decoded)[PROTOBUF] : undefined;
     if (!traces) return;
-    const collector = context.collector(() => new OtlpTraceCollector());
+    const collector = context.collector(() => new OtlpTraceCollector(), OTLP_SPANS);
     // A span that could not be decoded refuses its trace, as a malformed OTLP/JSON span does.
     for (const problem of traces.refused) {
       const refusal = collector.refuse(problem.traceId, problem.reason);
       context.refuse(refusal.reason, refusal.traceId);
     }
-    for (const refusal of collector.add([traces.request], context.source.digest))
+    for (const refusal of collector.add([traces.request], context.source.digest, otlpProtobuf.id))
       context.refuse(refusal.reason, refusal.traceId);
   },
 };

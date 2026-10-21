@@ -30,8 +30,9 @@ refuses to publish a version without a matching entry below.
   `otlp_json`.
 - `prepare --user-key <key>` and `--session-key <key>` name the end user and conversation of an
   export that records them under a key of its own: a dotted attribute or metadata key, a JSONPath
-  or a JSON Pointer into the source record. A trace kept as recorded gains a `hue.import.user` or
-  `hue.import.session` child span rather than a changed root.
+  or a JSON Pointer into the source record. A converted record's spans name the key's user or
+  conversation, or none when they disagree, in place of the one they record. A trace kept as
+  recorded gains a `hue.import.user` or `hue.import.session` child span rather than a changed root.
 - `prepare` reads gzip and zstd files (every member and frame), UTF-16 text, and JSON Lines and
   JSON arrays record by record. A line or record no format can read is listed in `files.skipped`
   with its `line` or `record` while the rest of the file is read, and a malformed record refuses
@@ -57,7 +58,8 @@ refuses to publish a version without a matching entry below.
   differ from earlier versions' for the same export.
 - `prepare` reads at most 256 MiB of decompressed input in one run (1 GiB before), which a default
   Node.js heap holds; prepare a larger export in parts. The messages of a length-prefixed protobuf
-  file now share the 64 MiB one file may decompress to.
+  file now share the 64 MiB one file may decompress to, and a transcript whose turns together
+  repeat more than 64 MiB of conversation is refused.
 
 ### [0.21.1] - 2026-10-20
 

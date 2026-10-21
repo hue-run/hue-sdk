@@ -27,6 +27,7 @@ import { nanosFrom, readRecords, type SpanRow } from "./rows.js";
  * far as its input, and an `execute_tool` span per tool call, paired with its result by
  * `tool_call_id`, `call_id` or `tool_use_id`. A logged answer (a response object, or `output`
  * beside a request's `input`) is the last turn and carries the token usage the source records.
+ * A transcript whose turns together repeat more than 64 MiB of conversation is refused.
  *
  * - Ids: a response's own id (`msg_…`, `resp_…`) names the trace; otherwise the trace id derives
  *   from the SHA-256 of the value's canonical JSON, so the same transcript is the same trace.
@@ -208,6 +209,11 @@ interface Turn {
   messages: GenAiMessage[];
 }
 
+/** What a transcript's turns may repeat together, as much as one file may decompress to: each
+ * turn's span holds the conversation before it, so a long transcript repeats its early messages
+ * once per turn. */
+const MAX_REPEATED_BYTES = 64 * 1024 * 1024;
+
 /** The trace's rows: the agent, a chat span per turn and a tool span per call. */
 function transcriptRows(traceKey: string, transcript: Transcript): SpanRow[] {
   // Spans carry the items in shapes the emitter reads; records keep them as the source wrote them.
@@ -224,6 +230,15 @@ function transcriptRows(traceKey: string, transcript: Transcript): SpanRow[] {
     turns.push({ at: index, end, messages: history.slice(index, end) });
     index = end - 1;
   }
+  // The conversation each turn repeats, measured before any of it is copied.
+  const before = [0];
+  for (const item of items) before.push(before.at(-1)! + Buffer.byteLength(JSON.stringify(item)));
+  let repeated = answer ? before[items.length]! : 0;
+  for (const turn of turns) repeated += before[turn.at]!;
+  if (repeated > MAX_REPEATED_BYTES)
+    throw new ConversionError(
+      `a transcript whose turns together repeat more than ${MAX_REPEATED_BYTES} bytes of conversation`,
+    );
   // A tool call's result, by call id, with the message that holds it.
   const results = new Map<string, { response: JsonValue; item: JsonValue }>();
   for (const [index, message] of history.entries())

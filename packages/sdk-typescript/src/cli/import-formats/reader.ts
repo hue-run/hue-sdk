@@ -75,7 +75,10 @@ function where(earlier: Location, file: string): string {
 }
 
 export class ImportReader {
+  /** Run-wide collectors, by format id or by the key formats that share one name. */
   private readonly collectors = new Map<string, TraceCollector>();
+  /** The shared collector key of each format that named one. */
+  private readonly sharedKeys = new Map<string, string>();
   private readonly rowCollectors = new Map<string, RowTraceCollector>();
   private readonly whole: ConvertedTrace[] = [];
   /** Traces already refused and named; a collector's own refusal of one is not repeated. */
@@ -272,12 +275,15 @@ export class ImportReader {
         if (traceId) this.refusedTraces.add(traceId);
         this.result.refused.push({ ...at, ...(traceId ? { trace_id: traceId } : {}), reason });
       },
-      collector: <T extends TraceCollector>(create: () => T): T => {
-        // A format always creates the same kind of collector, so the one it created is a T.
-        const held = this.collectors.get(adapter.id) as T | undefined;
+      collector: <T extends TraceCollector>(create: () => T, shared?: string): T => {
+        if (shared !== undefined) this.sharedKeys.set(adapter.id, shared);
+        const key = shared ?? adapter.id;
+        // A format always creates the same kind of collector, and formats that share one create
+        // the same kind, so the one held is a T.
+        const held = this.collectors.get(key) as T | undefined;
         if (held) return held;
         const created = create();
-        this.collectors.set(adapter.id, created);
+        this.collectors.set(key, created);
         return created;
       },
     };
@@ -296,7 +302,9 @@ export class ImportReader {
     const traces = new Map<string, ConvertedTrace>();
     const conflicts = new Map<string, string>();
     const kept = new Set<ConvertedTrace>();
+    // A trace refused after another format's copy of it was merged is left out with it.
     const refuse = (traceId: string | undefined, reason: string) => {
+      if (traceId !== undefined) traces.delete(traceId);
       if (traceId !== undefined && this.refusedTraces.has(traceId)) return;
       if (traceId !== undefined) this.refusedTraces.add(traceId);
       this.result.refused.push({ ...(traceId !== undefined ? { trace_id: traceId } : {}), reason });
@@ -309,28 +317,39 @@ export class ImportReader {
         conflicts.set(trace.traceId, "the trace appears in two sources with different content");
       else for (const digest of trace.sourceDigests) held.sourceDigests.add(digest);
     };
-    for (const adapter of importAdapters)
+    const finishedShared = new Set<string>();
+    for (const adapter of importAdapters) {
+      const shared = this.sharedKeys.get(adapter.id);
+      // A shared collector is finished once, under the first of its formats.
+      const done = shared !== undefined && finishedShared.has(shared);
+      if (shared !== undefined) finishedShared.add(shared);
       for (const [collector, rowFormat] of [
-        [this.collectors.get(adapter.id), false],
+        [done ? undefined : this.collectors.get(shared ?? adapter.id), false],
         [this.rowCollectors.get(adapter.id), true],
       ] as const) {
         if (!collector) continue;
         const finished = collector.finish();
         for (const problem of finished.refused) refuse(problem.traceId, problem.reason);
         for (const trace of finished.traces) {
-          trace.format = adapter.id;
+          if (rowFormat || shared === undefined) trace.format = adapter.id;
           // Spans the shared emitter wrote already carry the identity keys' user and session.
           if (!rowFormat && !collector.appliesKeys) kept.add(trace);
           merge(trace);
         }
       }
+    }
     for (const trace of this.whole) {
       kept.add(trace);
       merge(trace);
     }
-    for (const [traceId, reason] of conflicts) {
-      traces.delete(traceId);
-      refuse(traceId, reason);
+    for (const [traceId, reason] of conflicts) refuse(traceId, reason);
+    // A trace a shared collector gathered from files of several formats counts for each file
+    // under the format it was read with.
+    const group = (format: string) => this.sharedKeys.get(format) ?? format;
+    const byGroup = new Map<string, ReadResult["supported"][number]>();
+    for (const entry of this.supported.values()) {
+      const key = `${entry.file}\u0000${group(entry.format)}`;
+      if (!byGroup.has(key)) byGroup.set(key, entry);
     }
     const ordered: ConvertedTrace[] = [];
     for (const trace of [...traces.values()].sort((a, b) => (a.traceId < b.traceId ? -1 : 1))) {
@@ -348,7 +367,9 @@ export class ImportReader {
       ordered.push(trace);
       for (const digest of trace.sourceDigests)
         for (const name of this.fileNames.get(digest) ?? []) {
-          const entry = this.supported.get(`${name}\u0000${trace.format}`);
+          const entry =
+            this.supported.get(`${name}\u0000${trace.format}`) ??
+            byGroup.get(`${name}\u0000${group(trace.format)}`);
           if (entry) entry.traces++;
         }
     }

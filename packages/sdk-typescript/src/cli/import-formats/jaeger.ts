@@ -1,6 +1,7 @@
 import {
   ConversionError,
   isObject,
+  OTLP_SPANS,
   OtlpTraceCollector,
   type JsonValue,
   type OtlpAttribute,
@@ -72,8 +73,8 @@ export const jaegerApiV3: ImportAdapter = {
       );
     const traces = v3Traces(value);
     if (!traces) return;
-    const collector = context.collector(() => new OtlpTraceCollector());
-    for (const refusal of collector.add([traces], context.source.digest))
+    const collector = context.collector(() => new OtlpTraceCollector(), OTLP_SPANS);
+    for (const refusal of collector.add([traces], context.source.digest, jaegerApiV3.id))
       context.refuse(refusal.reason, refusal.traceId);
   },
 };

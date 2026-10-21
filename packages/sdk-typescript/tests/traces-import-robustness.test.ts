@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -363,6 +364,27 @@ describe("damaged containers", () => {
     expect(decodeContainer(corrupt, 1 << 20)).toEqual({ unsupported: "a damaged gzip file" });
   });
 
+  test("reads no member of a gzip file read up to a break when a member fails its checksum", () => {
+    const first = zlib.gzipSync(Buffer.from(lines(1, 3)));
+    const second = zlib.gzipSync(Buffer.from(lines(4, 7)));
+    // The CRC-32, then the size, of the first member's data.
+    for (const at of [first.byteLength - 8, first.byteLength - 4]) {
+      const corrupt = Buffer.from(first);
+      corrupt[at]! ^= 0xff;
+      for (const rest of [Buffer.from("garbage"), second.subarray(0, 20)])
+        expect(decodeContainer(Buffer.concat([corrupt, second, rest]), 1 << 20)).toEqual({
+          unsupported: "a damaged gzip file",
+        });
+    }
+    // The members that match their trailers are read up to the break.
+    expect(
+      decodeContainer(Buffer.concat([first, second, Buffer.from("garbage")]), 1 << 20),
+    ).toEqual({
+      bytes: Buffer.from(lines(1, 3) + lines(4, 7)),
+      note: "7 bytes after the last gzip member are not gzip and were not read",
+    });
+  });
+
   test.skipIf(typeof zlib.zstdCompressSync !== "function")(
     "reads every frame of a zstd file, passes skippable frames and names a break or trailing bytes",
     async () => {
@@ -400,6 +422,50 @@ describe("damaged containers", () => {
       expect(report.totals.traces).toBe(10);
     },
   );
+});
+
+describe("Node.js without zstd", () => {
+  test("the package check loads where node:zlib has no zstd", async () => {
+    // Node.js 22.12 to 22.14 have no zstd in node:zlib; these hooks serve node:zlib without it.
+    const root = await scratch({
+      "hooks.mjs": `
+        export async function resolve(specifier, context, next) {
+          if (specifier === "node:zlib" || specifier === "zlib")
+            return { url: "hue-test:zlib-without-zstd", shortCircuit: true };
+          return next(specifier, context);
+        }
+        export async function load(url, context, next) {
+          if (url !== "hue-test:zlib-without-zstd") return next(url, context);
+          const names = Object.keys(process.getBuiltinModule("node:zlib")).filter(
+            (name) => !/zstd/i.test(name),
+          );
+          const source = [
+            'const zlib = process.getBuiltinModule("node:zlib");',
+            ...names.map((name) => \`export const \${name} = zlib.\${name};\`),
+          ].join("\\n");
+          return { format: "module", source, shortCircuit: true };
+        }`,
+      "register.mjs":
+        'import { register } from "node:module"; register("./hooks.mjs", import.meta.url);',
+    });
+    // Conflicting options stop the check as soon as its imports have loaded.
+    const run = spawnSync(
+      "node",
+      [
+        "--import",
+        join(root, "register.mjs"),
+        join(import.meta.dir, "..", "scripts", "verify-package.mjs"),
+        "--archive",
+        "sdk.tgz",
+        "--registry-version",
+        "0.0.0",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(run.stderr).not.toContain("does not provide an export named");
+    expect(run.stderr).toContain("Choose an archive or registry version");
+    expect(run.status).not.toBe(0);
+  });
 });
 
 describe("the row emitter at scale", () => {

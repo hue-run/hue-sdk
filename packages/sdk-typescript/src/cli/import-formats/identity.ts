@@ -126,8 +126,30 @@ const IDENTITY_KEYS = new Set([
 /** Whether Hue reads an owner or a conversation from an attribute of this name. */
 export const namesIdentity = (key: string): boolean => IDENTITY_KEYS.has(key);
 
+const KIND_KEYS: Record<IdentityKind, ReadonlySet<string>> = {
+  user: new Set(CANDIDATES.user.map((candidate) => candidate.key)),
+  session: new Set(CANDIDATES.session.map((candidate) => candidate.key)),
+};
+const MAPS: ReadonlySet<string> = new Set(METADATA_MAPS);
+
 /** A JSON object recorded as text is parsed only while it is this short. */
 const MAX_METADATA_TEXT = 64 * 1024;
+
+/** A recorded attribute without what Hue would read a `kind` identifier from: undefined for an
+ * attribute that names one itself, and a metadata map without the kind's fields. */
+export function withoutIdentity(
+  kind: IdentityKind,
+  key: string,
+  value: JsonValue,
+): JsonValue | undefined {
+  if (!KIND_KEYS[kind].has(key)) return value;
+  if (!MAPS.has(key)) return undefined;
+  const map = metadataObject(value);
+  const fields: readonly string[] = FIELDS[kind];
+  if (!map || !fields.some((field) => Object.hasOwn(map, field))) return value;
+  const kept = Object.fromEntries(Object.entries(map).filter(([field]) => !fields.includes(field)));
+  return typeof value === "string" ? JSON.stringify(kept) : (kept as JsonValue);
+}
 
 /** An identifier as recorded: a non-blank string, or an integer as its decimal text. */
 export function identityText(value: unknown): string | undefined {
