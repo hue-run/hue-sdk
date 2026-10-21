@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { Attachment, createHue, createHueSafe, createHueTransport } from "../src/index.js";
+import type { Context } from "@opentelemetry/api";
 
 type RequestLifetime = { tasks: Promise<unknown>[]; waitUntil(promise: Promise<unknown>): void };
 const requests = new AsyncLocalStorage<RequestLifetime>();
@@ -319,6 +320,131 @@ describe("Vercel background lifetime", () => {
       await endpoint.server.stop(true);
     }
   });
+
+  test.each(["unrelated", "shared", "mixed batch"])(
+    "cohorts wait for their own uploads and shared work only (%s)",
+    async (mode) => {
+      const shared = mode === "shared";
+      const mixed = mode === "mixed batch";
+      const firstAck = Promise.withResolvers<void>();
+      const uploaded = Promise.withResolvers<void>();
+      const firstUpload = Promise.withResolvers<void>();
+      let traces = 0;
+      let logs = 0;
+      let puts = 0;
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        async fetch(request): Promise<Response> {
+          const path = new URL(request.url).pathname;
+          if (path === "/api/v1/otlp/blobs") {
+            const value = (await request.json()) as {
+              key: string;
+              sha256: string;
+              byteSize: number;
+              contentType: string;
+            };
+            return Response.json({
+              status: "upload",
+              method: "PUT",
+              url: `http://127.0.0.1:${server.port}/store`,
+              expiresAt: new Date(Date.now() + 60000).toISOString(),
+              headers: {
+                "Content-Type": value.contentType,
+                "Content-Length": String(value.byteSize),
+              },
+              ref: {
+                key: value.key,
+                sha256: value.sha256,
+                size: value.byteSize,
+                content_type: value.contentType,
+              },
+            });
+          }
+          const payload = await request.arrayBuffer();
+          if (path === "/store") {
+            puts++;
+            await (mixed && new Uint8Array(payload)[0] === 7
+              ? firstUpload.promise
+              : uploaded.promise);
+          } else if (path === "/api/v1/otlp/blobs/complete") {
+            return Response.json({ status: "complete" });
+          } else if (path.endsWith("/traces") && ++traces === 1 && !mixed) await firstAck.promise;
+          else if (path.endsWith("/logs")) logs++;
+          return new Response(null, { headers: { "hue-pending-spans": "1" } });
+        },
+      });
+      const hue = client(`http://127.0.0.1:${server.port}`);
+      const first = lifetime();
+      const second = lifetime();
+      const file = new Attachment({ data: Buffer.alloc(96 * 1024, 7), contentType: "image/png" });
+      let parentContext: Context | undefined;
+      let firstDone = false;
+      let secondDone = false;
+      try {
+        await requests.run(first, async () => {
+          await hue.withSpan("first", (span) => {
+            parentContext = span.context;
+            if (shared || mixed) span.setInput({ file });
+          });
+          if (mixed) {
+            for (let index = 0; index < 128; index++)
+              hue.recordMessages({ output: "filler" }, parentContext);
+          } else {
+            for (let index = 1; index < 128; index++) hue.tracer.startSpan(`filler-${index}`).end();
+          }
+        });
+        await until(() => (mixed ? logs === 1 : traces === 1));
+        await requests.run(second, () =>
+          hue.withSpan(
+            "second",
+            (span) => {
+              if (shared || mixed)
+                span.setInput({
+                  file: mixed
+                    ? new Attachment({ data: Buffer.alloc(96 * 1024, 9), contentType: "image/png" })
+                    : file,
+                });
+              else hue.recordMessages({ output: [{ role: "assistant", parts: [file] }] });
+            },
+            { parentContext: shared ? parentContext : undefined },
+          ),
+        );
+        void Promise.all(first.tasks).then(() => (firstDone = true));
+        void Promise.all(second.tasks).then(() => (secondDone = true));
+        await until(() => puts === (mixed ? 2 : 1));
+        firstAck.resolve();
+        if (mixed) {
+          await until(() => hue.transport.getReport().pendingSpans === 0);
+          firstUpload.resolve();
+          await until(() => firstDone);
+          expect(hue.transport.getReport().uploadedValues).toBe(1);
+        } else if (shared) {
+          await until(() => traces === 2 && hue.transport.getReport().pendingSpans === 0);
+          expect(firstDone).toBe(false);
+        } else {
+          await until(() => firstDone);
+        }
+        expect(secondDone).toBe(false);
+        expect(puts).toBe(mixed ? 2 : 1);
+        uploaded.resolve();
+        await Promise.all([...first.tasks, ...second.tasks]);
+        expect(hue.transport.getReport()).toMatchObject({
+          acceptedSpans: mixed ? 2 : 129,
+          acceptedLogs: mixed ? 128 : shared ? 0 : 1,
+          uploadFallbacks: 0,
+        });
+        expect(puts).toBe(mixed ? 2 : 1);
+        if (mixed) expect(traces).toBe(1);
+      } finally {
+        firstAck.resolve();
+        uploaded.resolve();
+        firstUpload.resolve();
+        await hue.shutdownSafe();
+        await server.stop(true);
+      }
+    },
+  );
 
   test("a throwing host hook does not undo an admitted record", async () => {
     const endpoint = receiver();

@@ -83,6 +83,7 @@ if (!values.archive && !values["registry-version"]) {
   const transportTypes = readFileSync(join(staging, "dist", "transport.d.ts"), "utf8");
   for (const member of [
     "exporting",
+    "reportUploads",
     "finish",
     "acceptedRecords",
     "issue",

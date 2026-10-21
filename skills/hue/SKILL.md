@@ -3,7 +3,7 @@ name: hue
 description: "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction."
 metadata:
   author: hue-run
-  version: "0.8.20"
+  version: "0.8.21"
 ---
 
 # Hue
@@ -150,6 +150,8 @@ Images, audio and documents follow [Media](https://docs.hue.run/guides/media). W
 ## Isolate serving requests from Hue failures
 
 Read [TypeScript production setup](https://docs.hue.run/sdks/typescript#production-setup) or [Python production setup](https://docs.hue.run/sdks/python#production-setup). Use `createHueSafe` / `create_hue_safe` once per serving process. Read `HUE_TRACING_ENABLED` and pass `enabled`; `false` disables Hue without needing a key. Use `flushSafe` / `shutdownSafe` or `force_flush_safe` / `shutdown_safe` with a bounded deadline (default 1 second, longer when the process uploads files). Do not shut down a shared provider per request.
+
+In Vercel Functions, TypeScript SDK 0.23.0 automatically registers completed spans, logs and their uploads with `waitUntil`, preserving normal batching. A request or Workflow step can return while delivery finishes within the invocation's execution limit; remove a per-step awaited flush whose only purpose was preventing serverless freezing. Keep an explicit flush when the application needs its acknowledgement before continuing. For older versions, register `waitUntil(hue.flush().catch(() => {}))` inside the step after spans end, so a caller timeout does not end the host's protection before delivery finishes. Other hosts still need their lifetime hook or an awaited flush before a short-lived process exits. This does not complete a still-running stream; preserve the streaming completion handling above.
 
 Before a production rollout, test the application's actual entry point against a collector outage, oversized capture, a failing redactor, the original exception or cancellation and queue overflow: the same result or error and exactly one tool invocation. A client pointed at an unreachable loopback `baseUrl`, or created with a key Hue rejects, simulates an outage. Setup itself requires the checks under Verify delivery. Observe sanitized cumulative failure and drop counters through a health channel independent of Hue. Bounded memory queues can lose records and cannot survive process termination.
 

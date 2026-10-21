@@ -150,7 +150,7 @@ interface ExportSink {
     queued: RecordValue,
   ): Promise<ReadableLogRecord>;
   reportOffload(tally: OffloadTally, signal?: Signal, late?: boolean): void;
-  awaitUploads(report: Promise<void>): void;
+  reportUploads(late: LateUploads, signal: Signal): void;
 }
 
 /** A record's trace: a span's context, a log record's span identifiers; "" when unreadable. */
@@ -341,6 +341,10 @@ export class HueTransport {
   // A cohort closes when export starts, so later requests cannot extend its lifetime.
   private deliveryCohort?: DeliveryCohort;
   private deliveries = new WeakMap<RecordValue, DeliveryCohort>();
+  private deliveryUploads = new WeakMap<
+    LateUploads,
+    Map<DeliveryCohort | undefined, LateUploads>
+  >();
   private pendingBytes = 0;
   private dropped = { traces: 0, logs: 0 };
   /** Records of each trace the SDK never sent (dropped from the queue, refused as invalid or
@@ -728,6 +732,19 @@ export class HueTransport {
       this.deliveryCohort = undefined;
   }
 
+  private holdDelivery(cohort: DeliveryCohort | undefined, work: Promise<void>): void {
+    if (!cohort) return;
+    cohort.pending++;
+    const finish = () => this.finishDelivery(cohort);
+    void work.then(finish, finish);
+  }
+
+  private finishDelivery(cohort: DeliveryCohort): void {
+    if (--cohort.pending !== 0) return;
+    if (this.deliveryCohort === cohort) this.deliveryCohort = undefined;
+    cohort.resolve();
+  }
+
   private track(span: ReadableSpan): void {
     try {
       if (!this.liveSpans || this.live.size >= MAX_LIVE_SPANS) return;
@@ -845,12 +862,7 @@ export class HueTransport {
       const cohort = this.deliveries.get(record);
       if (cohort) {
         this.deliveries.delete(record);
-        if (--cohort.pending === 0) {
-          if (this.deliveryCohort === cohort) this.deliveryCohort = undefined;
-          // Export registered its upload reports before finishing these records. A snapshot
-          // includes their final accounting without following uploads from later requests.
-          void this.drainUploads().then(cohort.resolve, cohort.resolve);
-        }
+        this.finishDelivery(cohort);
       }
       this.releaseMedia(record);
       this.logMedia.delete(record);
@@ -1035,6 +1047,7 @@ export class HueTransport {
     released: Promise<void>,
   ): void {
     this.awaitUploads(settled);
+    this.holdDelivery(this.deliveries.get(record), settled);
     const identity = this.mediaIdentity(record);
     const staged = identity
       ? (this.media.get(identity) ?? []).reduce((total, file) => total + heldBytesOf(file.bytes), 0)
@@ -1151,8 +1164,8 @@ export class HueTransport {
   }
 
   /** @internal Exporter callback: a redacted span with the values its redaction left to the
-   * upload step placed: listed under `hue.blobs` with their uploads queued (each added to `late`
-   * once it settles, and charged in place of the `queued` record it came from), or cut as before.
+   * upload step placed: listed under `hue.blobs` with their uploads queued (reported once settled,
+   * and charged in place of the `queued` record they came from), or cut as before.
    * Never rejects. */
   async offloadSpan<T extends RecordValue>(
     span: T,
@@ -1182,8 +1195,7 @@ export class HueTransport {
         memo: this.mediaMemo,
         background: own,
       });
-      if (own.settled.length)
-        late.settled.push(mergeWhenSettled(late.tally, own.tally, own.settled));
+      this.collectDeliveryUploads(queued, own, late);
       return { ...span, attributes: attributes as Attributes };
     } catch {
       return {
@@ -1236,13 +1248,39 @@ export class HueTransport {
         memo: this.mediaMemo,
         background: own,
       });
-      if (own.settled.length)
-        late.settled.push(mergeWhenSettled(late.tally, own.tally, own.settled));
+      this.collectDeliveryUploads(queued, own, late);
       return placed(result);
     } catch {
       return placed(
         fallbackRecord(log.attributes, collector, valueBytes, tally, traceId, this.mediaMemo),
       );
+    }
+  }
+
+  /** Keep an export's warning aggregation within each cohort's upload ownership. */
+  private collectDeliveryUploads(
+    record: RecordValue,
+    uploads: LateUploads,
+    late: LateUploads,
+  ): void {
+    const { settled, tally } = uploads;
+    if (!settled.length) return;
+    let groups = this.deliveryUploads.get(late);
+    if (!groups) this.deliveryUploads.set(late, (groups = new Map()));
+    const cohort = this.deliveries.get(record);
+    let group = groups.get(cohort);
+    if (!group) groups.set(cohort, (group = { tally: newTally(), settled: [] }));
+    group.settled.push(mergeWhenSettled(group.tally, tally, settled));
+  }
+
+  /** @internal Report only the uploads each cohort owns, without retaining their records. */
+  reportUploads(late: LateUploads, signal: Signal): void {
+    const groups = this.deliveryUploads.get(late);
+    this.deliveryUploads.delete(late);
+    for (const [cohort, { settled, tally }] of groups ?? []) {
+      const report = Promise.all(settled).then(() => this.reportOffload(tally, signal, true));
+      this.awaitUploads(report);
+      this.holdDelivery(cohort, report);
     }
   }
 
@@ -1789,25 +1827,14 @@ class ReportingExporter<T extends RecordValue> {
     return real;
   }
 
-  /** Places and sends the records; the uploads their placement queued are reported once they
-   * settle, after the records were sent, never awaited here. */
+  /** Queue final upload reports before releasing the records that own their cohorts. */
   private async exportRecords(records: T[]): Promise<void> {
     const late: LateUploads = { tally: newTally(), settled: [] };
     try {
       await this.placeAndSend(records, late);
     } finally {
-      if (late.settled.length) this.reportWhenSettled(late);
+      this.transport.reportUploads(late, this.signal);
     }
-  }
-
-  /** Reports an export's uploads once they all settle. Built apart from the export, so a pending
-   * upload never keeps the export's records alive. */
-  private reportWhenSettled(late: LateUploads): void {
-    this.transport.awaitUploads(
-      Promise.all(late.settled).then(() =>
-        this.transport.reportOffload(late.tally, this.signal, true),
-      ),
-    );
   }
 
   private async placeAndSend(records: T[], late: LateUploads): Promise<void> {
