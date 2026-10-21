@@ -1,5 +1,6 @@
 import { isObject } from "../traces-import-convert.js";
 import type { ImportAdapter } from "./adapter.js";
+import { agentEventAdapters } from "./agent-events.js";
 import { atif } from "./atif.js";
 import { braintrust } from "./braintrust.js";
 import { langfuseObservations } from "./langfuse.js";
@@ -39,6 +40,7 @@ export const importAdapters: readonly ImportAdapter[] = [
   langfuseObservations,
   atif,
   braintrust,
+  ...agentEventAdapters,
 ];
 
 /** The format that claims a value, the first in registry order. */
