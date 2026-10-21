@@ -1,0 +1,101 @@
+{
+  "info": {
+    "trace_id": "tr-7d3c1f0a9b8e4d2c1a0f9e8d7c6b5a49",
+    "trace_location": {
+      "type": "MLFLOW_EXPERIMENT",
+      "mlflow_experiment": {
+        "experiment_id": "1"
+      }
+    },
+    "request_preview": "{\"question\": \"Where is order 12?\"}",
+    "response_preview": "\"Order 12 shipped and arrives tomorrow.\"",
+    "request_time": "2026-10-20T14:03:11.402Z",
+    "state": "OK",
+    "trace_metadata": {
+      "mlflow.trace.user": "user-42",
+      "mlflow.trace.session": "thread-7",
+      "mlflow.trace_schema.version": "3",
+      "mlflow.source.name": "agent.py",
+      "mlflow.source.type": "LOCAL",
+      "mlflow.user": "developer-1",
+      "mlflow.trace.tokenUsage": "{\"input_tokens\": 1834, \"output_tokens\": 96, \"total_tokens\": 1930}"
+    },
+    "tags": {
+      "mlflow.traceName": "support_agent",
+      "mlflow.artifactLocation": "mlflow-artifacts:/1/traces/tr-7d3c/artifacts"
+    },
+    "execution_duration_ms": 12475
+  },
+  "data": {
+    "spans": [
+      {
+        "trace_id": "fTwfCpuOTSwaD56NfGtaSQ==",
+        "span_id": "obLD1OX2Bxg=",
+        "parent_span_id": null,
+        "name": "support_agent",
+        "start_time_unix_nano": 1792504991402000000,
+        "end_time_unix_nano": 1792505003877000000,
+        "events": [],
+        "status": {
+          "code": "STATUS_CODE_OK",
+          "message": ""
+        },
+        "attributes": {
+          "mlflow.traceRequestId": "\"tr-7d3c1f0a9b8e4d2c1a0f9e8d7c6b5a49\"",
+          "mlflow.spanType": "\"AGENT\"",
+          "mlflow.spanFunctionName": "\"support_agent\"",
+          "mlflow.spanInputs": "{\"question\": \"Where is order 12?\"}",
+          "mlflow.spanOutputs": "\"Order 12 shipped and arrives tomorrow.\""
+        },
+        "links": []
+      },
+      {
+        "trace_id": "fTwfCpuOTSwaD56NfGtaSQ==",
+        "span_id": "ssPU5fYHGCk=",
+        "parent_span_id": "obLD1OX2Bxg=",
+        "name": "Completions",
+        "start_time_unix_nano": 1792504992010000000,
+        "end_time_unix_nano": 1792504995233000000,
+        "events": [],
+        "status": {
+          "code": "STATUS_CODE_OK",
+          "message": ""
+        },
+        "attributes": {
+          "mlflow.traceRequestId": "\"tr-7d3c1f0a9b8e4d2c1a0f9e8d7c6b5a49\"",
+          "mlflow.spanType": "\"CHAT_MODEL\"",
+          "mlflow.spanInputs": "{\"messages\": [{\"role\": \"system\", \"content\": \"You help customers with their orders.\"}, {\"role\": \"user\", \"content\": \"Where is order 12?\"}], \"model\": \"gpt-5\", \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"lookup_order\", \"description\": \"Look up an order by id.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"id\": {\"type\": \"integer\"}}, \"required\": [\"id\"]}}}]}",
+          "mlflow.spanOutputs": "{\"id\": \"chatcmpl-synthetic-1\", \"object\": \"chat.completion\", \"created\": 1792504995, \"model\": \"gpt-5-2025-08-07\", \"choices\": [{\"index\": 0, \"finish_reason\": \"tool_calls\", \"message\": {\"role\": \"assistant\", \"content\": null, \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"lookup_order\", \"arguments\": \"{\\\"id\\\": 12}\"}}]}}], \"usage\": {\"prompt_tokens\": 1834, \"completion_tokens\": 96, \"total_tokens\": 1930, \"prompt_tokens_details\": {\"cached_tokens\": 1024}, \"completion_tokens_details\": {\"reasoning_tokens\": 64}}}",
+          "mlflow.chat.tools": "[{\"type\": \"function\", \"function\": {\"name\": \"lookup_order\", \"description\": \"Look up an order by id.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"id\": {\"type\": \"integer\"}}, \"required\": [\"id\"]}}}]",
+          "mlflow.chat.tokenUsage": "{\"input_tokens\": 1834, \"output_tokens\": 96, \"total_tokens\": 1930, \"cache_read_input_tokens\": 1024}",
+          "mlflow.llm.model": "\"gpt-5\"",
+          "mlflow.llm.provider": "\"openai\"",
+          "mlflow.message.format": "\"openai\""
+        },
+        "links": []
+      },
+      {
+        "trace_id": "fTwfCpuOTSwaD56NfGtaSQ==",
+        "span_id": "w9Tl9gcYKTo=",
+        "parent_span_id": "obLD1OX2Bxg=",
+        "name": "lookup_order",
+        "start_time_unix_nano": 1792504995300000000,
+        "end_time_unix_nano": 1792504995900000000,
+        "events": [],
+        "status": {
+          "code": "STATUS_CODE_OK",
+          "message": ""
+        },
+        "attributes": {
+          "mlflow.traceRequestId": "\"tr-7d3c1f0a9b8e4d2c1a0f9e8d7c6b5a49\"",
+          "mlflow.spanType": "\"TOOL\"",
+          "mlflow.spanFunctionName": "\"lookup_order\"",
+          "mlflow.spanInputs": "{\"id\": 12}",
+          "mlflow.spanOutputs": "{\"status\": \"shipped\", \"eta\": \"tomorrow\"}",
+          "user.id": "\"account-the-tool-touched\""
+        },
+        "links": []
+      }
+    ]
+  }
+}
