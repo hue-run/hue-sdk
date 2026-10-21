@@ -637,6 +637,44 @@ metadata, an MLflow trace's metadata, an Opik record's metadata or a Weave call'
   the W&B account that logged the call, is never the user. A trace with a scorer or an
   `Evaluation.*` op is evaluation traffic.
 
+**Agent runtimes, event logs and transcripts.** `prepare` also reads OpenAI Agents SDK traces,
+Raindrop events, Helicone request exports and plain chat transcripts. Each is labelled with its
+own `hue.import.format` (`openai_agents`, `raindrop`, `helicone`, `openai_chat`,
+`openai_responses`, `anthropic_messages`) and declared `otlp_json` in the manifest.
+
+- OpenAI Agents SDK records are `Trace.export()` and `Span.export()` as a tracing processor writes
+  them, one per line or in a list, or the `{"data": […]}` body the SDK's exporter posts. Each
+  `trace_id` is one trace. The trace record is its root span, named by `workflow_name`, with
+  `group_id` as `gen_ai.conversation.id` and a `user_id` in its metadata as `user.id`. An `agent`
+  span is an agent invocation, a `generation` span a model call with its messages, model and token
+  usage, a `response` span a model call with its response id and usage (the SDK exports no content
+  for it), and a `function` span a tool call with its arguments and result. The trace record has
+  no instants, so it spans its spans. A span written when it started and again when it ended is
+  read from its ended copy.
+- A Raindrop event is an element of a `POST /v1/events/track` payload or an event of a Query API
+  `GET /v1/events` answer. Each event is one trace: an agent span named for the event with its
+  model, input and output, `user_id` as `user.id` and `convo_id` as the conversation, and a tool
+  span per tool call. An event without `ai_data` records no agent turn and is reported, not
+  imported, and an event sent while pending (`is_pending`) and again finished is read from the
+  finished copy.
+- A Helicone request is a record of `npx @helicone/export` JSON or JSON Lines (with
+  `--include-body` for the bodies) or of the `query-clickhouse` API answer. Each request is one
+  model call span, and requests sharing a `Helicone-Session-Id` property are one trace.
+  `request_user_id` is the user; `helicone_user`, the Helicone account, never is. A request with
+  no response time ends `delay_ms` after it starts (`end_from_latency`). The CSV export is not
+  read.
+- A chat transcript is a line of an OpenAI chat JSONL file (a fine-tuning or eval dataset, a
+  logged request), an OpenAI Responses `response` object, request or bare item list, or an
+  Anthropic Messages request or response. Each is one trace: an `invoke_agent` span keeping the
+  whole value, a `chat` span per assistant turn with the conversation so far as its input, and an
+  `execute_tool` span per call, paired with its result by `tool_call_id`, `call_id` or
+  `tool_use_id`. An Anthropic `is_error` result is an error status. The trace id is a response's
+  own id, or else derives from the SHA-256 of the value's canonical JSON, so the same transcript in
+  two files is one trace. Transcripts record no instants apart from a Responses object's
+  `created_at`, so the untimed rule places them at 2000-01-01T00:00:00Z. Their user is the
+  request's own end-user field (OpenAI `safety_identifier` or `user`, Anthropic
+  `metadata.user_id`); a transcript without one needs `--user-key`, or imports without an owner.
+
 **History owner.** A trace's owner is read from its spans as Hue reads it: the trace's local roots
 (spans with no parent, or one outside the trace) first, then its other spans, never a tool span or
 anything beneath one, and every span that names one must agree. An explicit

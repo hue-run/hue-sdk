@@ -1,5 +1,6 @@
 import { isObject } from "../traces-import-convert.js";
 import type { ImportAdapter } from "./adapter.js";
+import { agentEventAdapters } from "./agent-events.js";
 import { atif } from "./atif.js";
 import { braintrust } from "./braintrust.js";
 import { langfuse, langfuseObservations } from "./langfuse.js";
@@ -50,6 +51,7 @@ export const importAdapters: readonly ImportAdapter[] = [
   mlflowTraces,
   opikTraces,
   weaveCalls,
+  ...agentEventAdapters,
 ];
 
 /** The format that claims a value, the first in registry order. */

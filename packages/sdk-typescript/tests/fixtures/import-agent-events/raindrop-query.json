@@ -1,0 +1,41 @@
+{
+  "data": [
+    {
+      "id": "evt_q_4410",
+      "event_name": "refund_request",
+      "user_id": "customer-5120",
+      "convo_id": "conv_91c2",
+      "timestamp": "2026-10-19T09:12:55.204Z",
+      "received_at": "2026-10-19T09:12:56.010Z",
+      "user_input": "I was charged twice for order 40.",
+      "assistant_output": "I refunded the duplicate charge.",
+      "model": "claude-sonnet-4-5",
+      "topics": [
+        "billing"
+      ],
+      "signals": [
+        {
+          "id": "3f8e2b1c-7a9d-4e6f-8b2a-1c3d5e7f9a0b",
+          "name": "thumbs_up",
+          "score": 1
+        }
+      ],
+      "tool_calls": [
+        {
+          "tool_name": "refund_charge",
+          "status": "OK",
+          "duration_ms": 412.5,
+          "started_at": "2026-10-19T09:12:55.900Z",
+          "span_id": "8a3f1c9e2b7d4a60"
+        }
+      ],
+      "properties": {
+        "agent": "billing"
+      }
+    }
+  ],
+  "meta": {
+    "cursor": null,
+    "has_more": false
+  }
+}

@@ -609,6 +609,10 @@ npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authoriza
   run it again: it resumes from `progress.json` in the bundle. An expired authorization is renewed
   by calling `prepare_trace_import` again with the same digest and totals.
 - The authorization (`hue_it_…`) is read only from the file and never printed.
+- `prepare` also reads OpenAI Agents SDK trace and span records, Raindrop events (track payloads
+  and Query API answers), Helicone request exports, and OpenAI chat, OpenAI Responses and
+  Anthropic Messages transcripts. A transcript without a time is placed at 2000-01-01T00:00:00Z,
+  and `--user-key` names the user of one whose request carries no end-user field.
 
 See [Import a bundle of existing traces](CLI.md#import-a-bundle-of-existing-traces) for the
 formats, the report, what Hue refuses and the exit codes.
