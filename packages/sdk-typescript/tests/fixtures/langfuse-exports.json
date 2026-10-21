@@ -1,0 +1,787 @@
+{
+  "traceWithObservations": {
+    "id": "3a7f9c1e-5b2d-4e8a-9f60-1c2d3e4f5a6b",
+    "externalId": null,
+    "timestamp": "2026-03-05T09:00:00.000Z",
+    "name": "support-chat",
+    "userId": "user-ada",
+    "metadata": {
+      "plan": "pro"
+    },
+    "release": "2026.03.1",
+    "version": "v7",
+    "projectId": "proj-demo",
+    "environment": "production",
+    "public": false,
+    "bookmarked": false,
+    "tags": [
+      "support",
+      "refunds"
+    ],
+    "input": {
+      "question": "Where is my refund for order A-1001?"
+    },
+    "output": "Your refund for order A-1001 was issued on March 3.",
+    "sessionId": "session-ada-1",
+    "createdAt": "2026-03-05T09:00:00.120Z",
+    "updatedAt": "2026-03-05T09:00:03.400Z",
+    "totalCost": 1.65e-05,
+    "latency": 2.3,
+    "htmlPath": "/project/proj-demo/traces/3a7f9c1e-5b2d-4e8a-9f60-1c2d3e4f5a6b",
+    "scores": [],
+    "observations": [
+      {
+        "id": "b6c1d2e3-f4a5-4b6c-8d7e-9f0a1b2c3d4e",
+        "projectId": "proj-demo",
+        "traceId": "3a7f9c1e-5b2d-4e8a-9f60-1c2d3e4f5a6b",
+        "parentObservationId": null,
+        "name": "draft-reply",
+        "type": "GENERATION",
+        "environment": "production",
+        "startTime": "2026-03-05T09:00:00.200Z",
+        "endTime": "2026-03-05T09:00:01.900Z",
+        "version": null,
+        "createdAt": "2026-03-05T09:00:00.210Z",
+        "updatedAt": "2026-03-05T09:00:01.950Z",
+        "input": [
+          {
+            "role": "system",
+            "content": "You answer billing questions."
+          },
+          {
+            "role": "user",
+            "content": "Where is my refund for order A-1001?"
+          }
+        ],
+        "output": {
+          "role": "assistant",
+          "content": "Your refund for order A-1001 was issued on March 3."
+        },
+        "metadata": {},
+        "level": "DEFAULT",
+        "statusMessage": null,
+        "model": "gpt-4o-mini",
+        "modelParameters": {
+          "temperature": 0.2
+        },
+        "completionStartTime": "2026-03-05T09:00:00.650Z",
+        "promptId": null,
+        "promptName": null,
+        "promptVersion": null,
+        "usageDetails": {
+          "input": 42,
+          "output": 17,
+          "total": 59
+        },
+        "costDetails": {
+          "input": 6.3e-06,
+          "output": 1.02e-05,
+          "total": 1.65e-05
+        },
+        "usage": {
+          "unit": "TOKENS",
+          "input": 42,
+          "output": 17,
+          "total": 59
+        },
+        "unit": "TOKENS",
+        "promptTokens": 42,
+        "completionTokens": 17,
+        "totalTokens": 59,
+        "usagePricingTierName": null,
+        "usagePricingTierId": null,
+        "modelId": "model-small",
+        "inputPrice": 1.5e-07,
+        "outputPrice": 6e-07,
+        "totalPrice": null,
+        "calculatedInputCost": 6.3e-06,
+        "calculatedOutputCost": 1.02e-05,
+        "calculatedTotalCost": 1.65e-05,
+        "latency": 1.7,
+        "timeToFirstToken": 0.45
+      },
+      {
+        "id": "c7d2e3f4-a5b6-4c7d-9e8f-0a1b2c3d4e5f",
+        "projectId": "proj-demo",
+        "traceId": "3a7f9c1e-5b2d-4e8a-9f60-1c2d3e4f5a6b",
+        "parentObservationId": null,
+        "name": "lookup_refund",
+        "type": "TOOL",
+        "environment": "production",
+        "startTime": "2026-03-05T09:00:02.000Z",
+        "endTime": "2026-03-05T09:00:02.300Z",
+        "version": null,
+        "createdAt": "2026-03-05T09:00:02.010Z",
+        "updatedAt": "2026-03-05T09:00:02.310Z",
+        "input": {
+          "args": [],
+          "kwargs": {
+            "order_id": "A-1001"
+          }
+        },
+        "output": {
+          "status": "issued",
+          "issued_on": "2026-03-03"
+        },
+        "metadata": {},
+        "level": "DEFAULT",
+        "statusMessage": null,
+        "model": null,
+        "modelParameters": null,
+        "completionStartTime": null,
+        "promptId": null,
+        "promptName": null,
+        "promptVersion": null,
+        "usageDetails": {},
+        "costDetails": {},
+        "usage": {
+          "unit": null,
+          "input": 0,
+          "output": 0,
+          "total": 0
+        },
+        "unit": null,
+        "promptTokens": 0,
+        "completionTokens": 0,
+        "totalTokens": 0,
+        "usagePricingTierName": null,
+        "usagePricingTierId": null,
+        "modelId": null,
+        "inputPrice": null,
+        "outputPrice": null,
+        "totalPrice": null,
+        "calculatedInputCost": null,
+        "calculatedOutputCost": null,
+        "calculatedTotalCost": null,
+        "latency": 0.3,
+        "timeToFirstToken": null
+      }
+    ]
+  },
+  "tracesPage": {
+    "data": [
+      {
+        "id": "8d2e4f6a-1b3c-4d5e-8f9a-0b1c2d3e4f5a",
+        "externalId": null,
+        "timestamp": "2026-03-06T14:30:00.000Z",
+        "name": "docs-question",
+        "userId": "user-grace",
+        "metadata": {},
+        "release": null,
+        "version": null,
+        "projectId": "proj-demo",
+        "environment": "production",
+        "public": false,
+        "bookmarked": false,
+        "tags": [
+          "docs"
+        ],
+        "input": "How do I rotate an API key?",
+        "output": "Open Settings, then Keys, then Rotate.",
+        "sessionId": "session-grace-7",
+        "createdAt": "2026-03-06T14:30:00.050Z",
+        "updatedAt": "2026-03-06T14:30:02.100Z",
+        "observations": [
+          "d8e3f4a5-b6c7-4d8e-af90-1b2c3d4e5f60",
+          "e9f4a5b6-c7d8-4e9f-b0a1-2c3d4e5f6071"
+        ],
+        "scores": [],
+        "totalCost": 2e-05,
+        "latency": 1.9,
+        "htmlPath": "/project/proj-demo/traces/8d2e4f6a-1b3c-4d5e-8f9a-0b1c2d3e4f5a"
+      }
+    ],
+    "meta": {
+      "page": 1,
+      "limit": 50,
+      "totalItems": 1,
+      "totalPages": 1
+    }
+  },
+  "observationsPage": {
+    "data": [
+      {
+        "id": "d8e3f4a5-b6c7-4d8e-af90-1b2c3d4e5f60",
+        "projectId": "proj-demo",
+        "traceId": "8d2e4f6a-1b3c-4d5e-8f9a-0b1c2d3e4f5a",
+        "parentObservationId": null,
+        "name": "retrieve-docs",
+        "type": "RETRIEVER",
+        "environment": "production",
+        "startTime": "2026-03-06T14:30:00.100Z",
+        "endTime": "2026-03-06T14:30:00.400Z",
+        "version": null,
+        "createdAt": "2026-03-06T14:30:00.110Z",
+        "updatedAt": "2026-03-06T14:30:00.410Z",
+        "input": "rotate api key",
+        "output": [
+          {
+            "title": "Keys",
+            "path": "/docs/keys"
+          }
+        ],
+        "metadata": {},
+        "level": "DEFAULT",
+        "statusMessage": null,
+        "model": null,
+        "modelParameters": null,
+        "completionStartTime": null,
+        "promptId": null,
+        "promptName": null,
+        "promptVersion": null,
+        "usageDetails": {},
+        "costDetails": {},
+        "usage": {
+          "unit": null,
+          "input": 0,
+          "output": 0,
+          "total": 0
+        },
+        "unit": null,
+        "promptTokens": 0,
+        "completionTokens": 0,
+        "totalTokens": 0,
+        "usagePricingTierName": null,
+        "usagePricingTierId": null,
+        "modelId": null,
+        "inputPrice": null,
+        "outputPrice": null,
+        "totalPrice": null,
+        "calculatedInputCost": null,
+        "calculatedOutputCost": null,
+        "calculatedTotalCost": null,
+        "latency": 0.3,
+        "timeToFirstToken": null
+      },
+      {
+        "id": "e9f4a5b6-c7d8-4e9f-b0a1-2c3d4e5f6071",
+        "projectId": "proj-demo",
+        "traceId": "8d2e4f6a-1b3c-4d5e-8f9a-0b1c2d3e4f5a",
+        "parentObservationId": null,
+        "name": "answer",
+        "type": "GENERATION",
+        "environment": "production",
+        "startTime": "2026-03-06T14:30:00.500Z",
+        "endTime": "2026-03-06T14:30:01.800Z",
+        "version": null,
+        "createdAt": "2026-03-06T14:30:00.510Z",
+        "updatedAt": "2026-03-06T14:30:01.810Z",
+        "input": [
+          {
+            "role": "user",
+            "content": "How do I rotate an API key?"
+          }
+        ],
+        "output": {
+          "role": "assistant",
+          "content": "Open Settings, then Keys, then Rotate."
+        },
+        "metadata": {},
+        "level": "DEFAULT",
+        "statusMessage": null,
+        "model": "gpt-4o-mini",
+        "modelParameters": null,
+        "completionStartTime": null,
+        "promptId": null,
+        "promptName": null,
+        "promptVersion": null,
+        "usageDetails": {
+          "input": 120,
+          "output": 14,
+          "total": 134
+        },
+        "costDetails": {},
+        "usage": {
+          "unit": "TOKENS",
+          "input": 120,
+          "output": 14,
+          "total": 134
+        },
+        "unit": "TOKENS",
+        "promptTokens": 120,
+        "completionTokens": 14,
+        "totalTokens": 134,
+        "usagePricingTierName": null,
+        "usagePricingTierId": null,
+        "modelId": null,
+        "inputPrice": null,
+        "outputPrice": null,
+        "totalPrice": null,
+        "calculatedInputCost": null,
+        "calculatedOutputCost": null,
+        "calculatedTotalCost": null,
+        "latency": 1.3,
+        "timeToFirstToken": null
+      }
+    ],
+    "meta": {
+      "page": 1,
+      "limit": 50,
+      "totalItems": 2,
+      "totalPages": 1
+    }
+  },
+  "observationsV2Page": {
+    "data": [
+      {
+        "id": "1f2e3d4c5b6a7980",
+        "traceId": "7c3e1f0a9b8d4c2e6f5a4b3c2d1e0f9a",
+        "startTime": "2026-03-10T11:00:00.000Z",
+        "endTime": "2026-03-10T11:00:04.000Z",
+        "projectId": "proj-demo",
+        "parentObservationId": "aaaaaaaaaaaaaaaa",
+        "type": "AGENT",
+        "name": "refund-agent",
+        "level": "DEFAULT",
+        "statusMessage": null,
+        "version": null,
+        "environment": "default",
+        "bookmarked": false,
+        "public": false,
+        "userId": "user-lin",
+        "sessionId": "thread-42",
+        "isRootObservation": true,
+        "completionStartTime": null,
+        "createdAt": "2026-03-10T11:00:04.100Z",
+        "updatedAt": "2026-03-10T11:00:04.100Z",
+        "input": "\"Refund my order A-2002, it arrived broken.\"",
+        "output": "\"Refund rf_1 for 25.00 is on its way.\"",
+        "metadata": {
+          "resourceAttributes.service.name": "refund-agent",
+          "scope.name": "langfuse-sdk",
+          "customer_tier": "gold"
+        },
+        "model": null,
+        "internalModelId": null,
+        "modelParameters": null,
+        "usageDetails": {},
+        "costDetails": {},
+        "totalCost": 0,
+        "usagePricingTierName": null,
+        "traceName": "refund-flow",
+        "tags": [
+          "refunds"
+        ],
+        "release": "1.4.0",
+        "modelId": null,
+        "inputPrice": null,
+        "outputPrice": null,
+        "totalPrice": null
+      },
+      {
+        "id": "2a3b4c5d6e7f8091",
+        "traceId": "7c3e1f0a9b8d4c2e6f5a4b3c2d1e0f9a",
+        "startTime": "2026-03-10T11:00:00.100Z",
+        "endTime": "2026-03-10T11:00:01.600Z",
+        "projectId": "proj-demo",
+        "parentObservationId": "1f2e3d4c5b6a7980",
+        "type": "GENERATION",
+        "name": "plan-refund",
+        "level": "DEFAULT",
+        "statusMessage": null,
+        "version": null,
+        "environment": "default",
+        "bookmarked": false,
+        "public": false,
+        "userId": "user-lin",
+        "sessionId": "thread-42",
+        "isRootObservation": false,
+        "completionStartTime": "2026-03-10T11:00:00.700Z",
+        "createdAt": "2026-03-10T11:00:01.700Z",
+        "updatedAt": "2026-03-10T11:00:01.700Z",
+        "input": "[{\"role\": \"user\", \"content\": \"Refund my order A-2002, it arrived broken.\"}]",
+        "output": "{\"role\": \"assistant\", \"content\": null, \"tool_calls\": [{\"id\": \"call_7\", \"type\": \"function\", \"function\": {\"name\": \"issue_refund\", \"arguments\": \"{\\\"order_id\\\":\\\"A-2002\\\",\\\"amount\\\":25}\"}}]}",
+        "metadata": {
+          "resourceAttributes.service.name": "refund-agent",
+          "scope.name": "langfuse-sdk"
+        },
+        "model": "gpt-4o-mini",
+        "internalModelId": "model-small",
+        "modelParameters": {
+          "temperature": 0
+        },
+        "usageDetails": {
+          "input": 80,
+          "input_cached_tokens": 20,
+          "output": 30,
+          "output_reasoning_tokens": 10,
+          "total": 140
+        },
+        "costDetails": {
+          "input": 1.2e-05,
+          "input_cached_tokens": 1.5e-06,
+          "output": 2.4e-05,
+          "total": 3.75e-05
+        },
+        "totalCost": 3.75e-05,
+        "usagePricingTierName": null,
+        "traceName": "refund-flow",
+        "tags": [
+          "refunds"
+        ],
+        "release": "1.4.0",
+        "modelId": "model-small",
+        "inputPrice": "0.00000015",
+        "outputPrice": "0.0000006",
+        "totalPrice": null
+      },
+      {
+        "id": "3b4c5d6e7f809102",
+        "traceId": "7c3e1f0a9b8d4c2e6f5a4b3c2d1e0f9a",
+        "startTime": "2026-03-10T11:00:01.700Z",
+        "endTime": "2026-03-10T11:00:02.900Z",
+        "projectId": "proj-demo",
+        "parentObservationId": "1f2e3d4c5b6a7980",
+        "type": "TOOL",
+        "name": "issue_refund",
+        "level": "DEFAULT",
+        "statusMessage": null,
+        "version": null,
+        "environment": "default",
+        "bookmarked": false,
+        "public": false,
+        "userId": "user-lin",
+        "sessionId": "thread-42",
+        "isRootObservation": false,
+        "completionStartTime": null,
+        "createdAt": "2026-03-10T11:00:03.000Z",
+        "updatedAt": "2026-03-10T11:00:03.000Z",
+        "input": "{\"order_id\":\"A-2002\",\"amount\":25}",
+        "output": "{\"refund_id\":\"rf_1\",\"status\":\"pending\"}",
+        "metadata": {
+          "resourceAttributes.service.name": "refund-agent",
+          "scope.name": "langfuse-sdk"
+        },
+        "model": null,
+        "internalModelId": null,
+        "modelParameters": null,
+        "usageDetails": {},
+        "costDetails": {},
+        "totalCost": 0,
+        "usagePricingTierName": null,
+        "traceName": "refund-flow",
+        "tags": [
+          "refunds"
+        ],
+        "release": "1.4.0",
+        "modelId": null,
+        "inputPrice": null,
+        "outputPrice": null,
+        "totalPrice": null
+      }
+    ],
+    "meta": {
+      "cursor": "eyJsYXN0SWQiOiIzYjRjNWQ2ZTdmODA5MTAyIn0="
+    }
+  },
+  "blobTraces": [
+    {
+      "id": "f1a2b3c4-d5e6-4f70-8a9b-0c1d2e3f4a5b",
+      "timestamp": "2026-03-07 08:00:00.000",
+      "name": "nightly-summary",
+      "environment": "production",
+      "project_id": "proj-demo",
+      "metadata": {
+        "team": "ops"
+      },
+      "user_id": "user-mo",
+      "session_id": null,
+      "release": null,
+      "version": null,
+      "public": false,
+      "bookmarked": false,
+      "tags": [],
+      "input": "{\"date\":\"2026-03-06\"}",
+      "output": "\"Three incidents, all resolved.\"",
+      "created_at": "2026-03-07 08:00:00.010",
+      "updated_at": "2026-03-07 08:00:03.020"
+    }
+  ],
+  "blobObservations": [
+    {
+      "id": "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d",
+      "trace_id": "f1a2b3c4-d5e6-4f70-8a9b-0c1d2e3f4a5b",
+      "project_id": "proj-demo",
+      "environment": "production",
+      "type": "GENERATION",
+      "parent_observation_id": null,
+      "start_time": "2026-03-07 08:00:00.250",
+      "end_time": "2026-03-07 08:00:02.750",
+      "name": "summarize",
+      "metadata": {},
+      "level": "DEFAULT",
+      "status_message": null,
+      "version": null,
+      "input": "[{\"role\": \"user\", \"content\": \"Summarize the incidents of 2026-03-06.\"}]",
+      "output": "{\"role\": \"assistant\", \"content\": \"Three incidents, all resolved.\"}",
+      "provided_model_name": "gpt-4o-mini",
+      "model_parameters": "{\"temperature\":0}",
+      "usage_details": {
+        "input": "50",
+        "output": "12",
+        "total": "62"
+      },
+      "cost_details": {
+        "input": 7.5e-06,
+        "output": 7.2e-06,
+        "total": 1.47e-05
+      },
+      "completion_start_time": null,
+      "prompt_name": null,
+      "prompt_version": null,
+      "total_cost": 1.47e-05,
+      "latency": 2.5,
+      "time_to_first_token": null,
+      "model_id": null,
+      "created_at": "2026-03-07 08:00:00.260",
+      "updated_at": "2026-03-07 08:00:02.760",
+      "prompt_id": null,
+      "tool_calls": [],
+      "tool_call_names": [],
+      "tool_definitions": {},
+      "usage_pricing_tier_name": null,
+      "input_price": null,
+      "output_price": null,
+      "total_price": null
+    }
+  ],
+  "blobObservationsV2": [
+    {
+      "id": "4c5d6e7f80910213",
+      "trace_id": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b",
+      "project_id": "proj-demo",
+      "environment": "production",
+      "type": "AGENT",
+      "parent_observation_id": "",
+      "is_root_observation": true,
+      "start_time": "2026-03-08 12:00:00.123456",
+      "end_time": "2026-03-08 12:00:03.654321",
+      "name": "order-agent",
+      "metadata": {
+        "resourceAttributes.service.name": "order-agent"
+      },
+      "level": "DEFAULT",
+      "status_message": "",
+      "version": "",
+      "input": "\"Where is order B-17?\"",
+      "output": "\"Order B-17 ships tomorrow.\"",
+      "provided_model_name": "",
+      "model_parameters": "",
+      "usage_details": {},
+      "cost_details": {},
+      "completion_start_time": null,
+      "prompt_name": "",
+      "prompt_version": null,
+      "total_cost": 0,
+      "latency": 3.530865,
+      "time_to_first_token": null,
+      "model_id": "",
+      "created_at": "2026-03-08 12:00:03.700000",
+      "updated_at": "2026-03-08 12:00:03.700000",
+      "prompt_id": "",
+      "tool_calls": [],
+      "tool_call_names": [],
+      "tool_definitions": {},
+      "usage_pricing_tier_id": "",
+      "usage_pricing_tier_name": "",
+      "input_price": null,
+      "output_price": null,
+      "total_price": null,
+      "user_id": "user-kim",
+      "session_id": "chat-9",
+      "trace_name": "order-status",
+      "tags": [
+        "orders"
+      ],
+      "release": "2.0.1",
+      "bookmarked": false,
+      "public": false
+    },
+    {
+      "id": "5d6e7f8091021324",
+      "trace_id": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b",
+      "project_id": "proj-demo",
+      "environment": "production",
+      "type": "TOOL",
+      "parent_observation_id": "4c5d6e7f80910213",
+      "is_root_observation": false,
+      "start_time": "2026-03-08 12:00:00.500000",
+      "end_time": "2026-03-08 12:00:01.000000",
+      "name": "get_order",
+      "metadata": {},
+      "level": "DEFAULT",
+      "status_message": "",
+      "version": "",
+      "input": "{\"order_id\":\"B-17\"}",
+      "output": "{\"ships\":\"2026-03-09\"}",
+      "provided_model_name": "",
+      "model_parameters": "",
+      "usage_details": {},
+      "cost_details": {},
+      "completion_start_time": null,
+      "prompt_name": "",
+      "prompt_version": null,
+      "total_cost": 0,
+      "latency": 0.5,
+      "time_to_first_token": null,
+      "model_id": "",
+      "created_at": "2026-03-08 12:00:03.700000",
+      "updated_at": "2026-03-08 12:00:03.700000",
+      "prompt_id": "",
+      "tool_calls": [],
+      "tool_call_names": [],
+      "tool_definitions": {},
+      "usage_pricing_tier_id": "",
+      "usage_pricing_tier_name": "",
+      "input_price": null,
+      "output_price": null,
+      "total_price": null,
+      "user_id": "user-kim",
+      "session_id": "chat-9",
+      "trace_name": "order-status",
+      "tags": [
+        "orders"
+      ],
+      "release": "2.0.1",
+      "bookmarked": false,
+      "public": false
+    }
+  ],
+  "uiTraces": [
+    {
+      "id": "a0b1c2d3-e4f5-4a6b-9c8d-7e6f5a4b3c2d",
+      "timestamp": "2026-03-09T15:00:00.000Z",
+      "name": "spam-check",
+      "userId": "user-noor",
+      "sessionId": "inbox-3",
+      "release": null,
+      "version": null,
+      "environment": "production",
+      "tags": [
+        "moderation"
+      ],
+      "bookmarked": false,
+      "public": false,
+      "input": "\"Is this message spam?\"",
+      "output": "\"No.\"",
+      "metadata": {},
+      "scores": {},
+      "comments": []
+    }
+  ],
+  "uiObservations": [
+    {
+      "id": "b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e",
+      "traceId": "a0b1c2d3-e4f5-4a6b-9c8d-7e6f5a4b3c2d",
+      "startTime": "2026-03-09T15:00:00.200Z",
+      "endTime": "2026-03-09T15:00:01.100Z",
+      "projectId": "proj-demo",
+      "parentObservationId": null,
+      "type": "GENERATION",
+      "environment": "production",
+      "name": "classify",
+      "level": "ERROR",
+      "statusMessage": "upstream timeout, retried",
+      "version": null,
+      "createdAt": "2026-03-09T15:00:00.210Z",
+      "updatedAt": "2026-03-09T15:00:01.110Z",
+      "input": [
+        {
+          "role": "user",
+          "content": "Is this message spam?"
+        }
+      ],
+      "output": {
+        "role": "assistant",
+        "content": "No."
+      },
+      "metadata": {},
+      "model": "gpt-4o-mini",
+      "internalModelId": "model-small",
+      "modelParameters": null,
+      "completionStartTime": null,
+      "promptId": null,
+      "promptName": null,
+      "promptVersion": null,
+      "latency": 0.9,
+      "timeToFirstToken": null,
+      "providedUsageDetails": {
+        "input": 9,
+        "output": 1
+      },
+      "usageDetails": {
+        "input": 9,
+        "output": 1,
+        "total": 10
+      },
+      "costDetails": {},
+      "providedCostDetails": {},
+      "inputCost": null,
+      "outputCost": null,
+      "totalCost": null,
+      "inputUsage": 9,
+      "outputUsage": 1,
+      "totalUsage": 10,
+      "usagePricingTierId": null,
+      "usagePricingTierName": null,
+      "toolDefinitions": null,
+      "toolCalls": null,
+      "toolCallNames": null,
+      "traceName": "spam-check",
+      "traceTags": [
+        "moderation"
+      ],
+      "traceTimestamp": "2026-03-09 15:00:00.000",
+      "userId": "user-noor",
+      "toolDefinitionsCount": null,
+      "toolCallsCount": null,
+      "modelId": "model-small",
+      "inputPrice": 1.5e-07,
+      "outputPrice": 6e-07,
+      "totalPrice": null,
+      "scores": {},
+      "comments": []
+    }
+  ],
+  "uiEvents": [
+    {
+      "id": "6e7f809102132435",
+      "traceId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "traceName": "translate",
+      "type": "GENERATION",
+      "name": "translate",
+      "startTime": "2026-03-11 07:30:00.000250",
+      "endTime": "2026-03-11 07:30:00.900250",
+      "completionStartTime": null,
+      "environment": "production",
+      "version": "",
+      "userId": "user-ines",
+      "sessionId": "",
+      "level": "DEFAULT",
+      "statusMessage": "",
+      "promptName": "",
+      "promptId": "",
+      "promptVersion": null,
+      "modelId": "model-small",
+      "providedModelName": "gpt-4o-mini",
+      "modelParameters": "",
+      "usageDetails": {
+        "input": "30",
+        "output": "8",
+        "total": "38"
+      },
+      "costDetails": {},
+      "totalCost": 0,
+      "input": "\"Bonjour\"",
+      "output": "\"Hello\"",
+      "metadata": {},
+      "latencyMs": 900,
+      "timeToFirstTokenMs": null,
+      "tags": [],
+      "release": "",
+      "parentObservationId": "",
+      "scores": {},
+      "comments": []
+    }
+  ]
+}

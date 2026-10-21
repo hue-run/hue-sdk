@@ -326,6 +326,21 @@ describe("the format registry", () => {
       ["otlp_json", { resource_spans: [] }],
       ["langfuse_observations", { data: [observation], meta: { page: 1 } }],
       ["langfuse_observations", { observations: [observation] }],
+      ["langfuse", { data: [{ ...observation, projectId: "p" }], meta: { cursor: "c" } }],
+      [
+        "langfuse",
+        { id: "t", timestamp: "2026-03-01T10:00:00Z", bookmarked: false, public: false },
+      ],
+      [
+        "langfuse",
+        {
+          id: "o",
+          trace_id: "t",
+          type: "SPAN",
+          start_time: "2026-03-01 10:00:00",
+          parent_observation_id: "",
+        },
+      ],
       ["atif", { schema_version: "ATIF-v1.7", session_id: "s", steps: [] }],
       ["braintrust", braintrustRows[0]],
       ["braintrust", { events: braintrustRows, cursor: "next" }],
