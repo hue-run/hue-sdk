@@ -433,10 +433,10 @@ instrumentation scope `@hue-run/sdk/import/langfuse`.
 **Environment and Worlds.** A span whose observation, or v1 trace, records an environment also
 carries it as recorded in `hue.import.source_environment`, which marks the trace as imported; one
 that records none carries neither attribute, and the resource never declares
-`deployment.environment.name`, since one import can mix environments. A trace adds to its user's
-World only when Langfuse recorded it in its `production` environment: Hue reads the root's
-`langfuse.environment` as the trace's deployment environment, and never takes an imported trace in
-which any span names another environment, such as Langfuse's `default`, as production history.
+`deployment.environment.name`, since one import can mix environments. Ended traces with a resolved
+user can contribute to that user's World with any environment value or without an environment
+declaration. Traces linked to Hue runs, World instances, or run executions never contribute.
+Hue's evaluation and simulation evidence and deliberately excluded traces also stay excluded.
 
 **Ids and resuming.** A Langfuse id that already is an OpenTelemetry id (32 lowercase hex digits for
 a trace, 16 for an observation, as Langfuse's OpenTelemetry SDKs write them) is kept; any other id,
@@ -544,9 +544,10 @@ or re-zipped copy of the bundle prepares to byte-identical batches and the same 
 The report (`--json` prints it as one object) names `manifest_digest`, `totals` (traces, batches,
 spans, blobs, bytes) and `source`, which `prepare_trace_import` takes as given; the formats
 recognized and the traces each file held; the files it could not read, with the reason; the traces
-and spans it refused; the traces without a history owner (a root `user.id`, a Langfuse `userId`, an
-ATIF `extra.user_id`, or an explicit `hue.world.entity.namespace` and `hue.world.entity.id`), which
-import like any other trace but leave a gap in continuous history; the origin each source recorded
+and spans it refused; the traces without a declared history owner (a root `user.id`, a Langfuse
+`userId`, an ATIF `extra.user_id`, or an explicit `hue.world.entity.namespace` and
+`hue.world.entity.id`), which import like any other trace and can contribute to a World if Hue
+resolves their owner from the imported records; the origin each source recorded
 (`production`, `evaluation`, `simulation` or `unknown`; evaluation and simulation traffic is
 imported and kept out of production history); and the traces whose vendor ids were mapped. An
 existing `--out` directory is accepted only while it holds nothing but an earlier preparation and

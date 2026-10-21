@@ -40,7 +40,7 @@ prepare  Reads a file, a directory or a ZIP archive and recognizes each file by 
          Every trace becomes gzip OTLP/JSON batches written to --out (default <path>.hue-import)
          with manifest.json. The report names the manifest_digest and totals that
          prepare_trace_import takes, the files it could not read, invalid vendor ids it mapped
-         to OpenTelemetry ids, traces without a history owner and the origin each source
+         to OpenTelemetry ids, traces without a declared history owner and the origin each source
          recorded.
   --out <directory>   Where the bundle is written (created with mode 0700)
   --json              Print the report as one JSON object
@@ -164,7 +164,7 @@ async function prepare(
   out(`Source: ${JSON.stringify(report.source)}`);
   if (report.traces.without_identity)
     out(
-      `${plural(report.traces.without_identity, "trace names", "traces name")} no history owner.`,
+      `${plural(report.traces.without_identity, "trace declares", "traces declare")} no history owner.`,
     );
   const origins = Object.entries(report.traces.by_origin).filter(([, count]) => count);
   out(`Origin: ${origins.map(([origin, count]) => `${origin} ${count}`).join(", ")}.`);
