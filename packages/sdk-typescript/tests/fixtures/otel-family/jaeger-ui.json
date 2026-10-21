@@ -1,0 +1,166 @@
+{
+  "data": [
+    {
+      "traceID": "7a3c9e2f41b85d06c1e2f3a4b5c6d7e8",
+      "spans": [
+        {
+          "traceID": "7a3c9e2f41b85d06c1e2f3a4b5c6d7e8",
+          "spanID": "a1b2c3d4e5f60718",
+          "flags": 1,
+          "operationName": "invoke_agent support-agent",
+          "references": [
+            {
+              "refType": "FOLLOWS_FROM",
+              "traceID": "00000000000000000000000000c0ffee",
+              "spanID": "00000000000000aa"
+            }
+          ],
+          "startTime": 1792504991402000,
+          "duration": 12475000,
+          "tags": [
+            { "key": "otel.scope.name", "type": "string", "value": "support-agent" },
+            { "key": "otel.scope.version", "type": "string", "value": "1.4.0" },
+            { "key": "span.kind", "type": "string", "value": "server" },
+            { "key": "gen_ai.operation.name", "type": "string", "value": "invoke_agent" },
+            { "key": "gen_ai.agent.name", "type": "string", "value": "support-agent" },
+            { "key": "user.id", "type": "string", "value": "user-42" },
+            { "key": "gen_ai.conversation.id", "type": "string", "value": "conversation-7" },
+            { "key": "internal.span.format", "type": "string", "value": "otlp" }
+          ],
+          "logs": [],
+          "processID": "p1",
+          "warnings": null
+        },
+        {
+          "traceID": "7a3c9e2f41b85d06c1e2f3a4b5c6d7e8",
+          "spanID": "b2c3d4e5f6071829",
+          "flags": 1,
+          "operationName": "chat gpt-5",
+          "references": [
+            {
+              "refType": "CHILD_OF",
+              "traceID": "7a3c9e2f41b85d06c1e2f3a4b5c6d7e8",
+              "spanID": "a1b2c3d4e5f60718"
+            }
+          ],
+          "startTime": 1792504992010000,
+          "duration": 3223000,
+          "tags": [
+            { "key": "otel.scope.name", "type": "string", "value": "support-agent" },
+            { "key": "span.kind", "type": "string", "value": "client" },
+            { "key": "gen_ai.operation.name", "type": "string", "value": "chat" },
+            { "key": "gen_ai.provider.name", "type": "string", "value": "openai" },
+            { "key": "gen_ai.request.model", "type": "string", "value": "gpt-5" },
+            {
+              "key": "gen_ai.input.messages",
+              "type": "string",
+              "value": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Where is order 12?\"}]}]"
+            },
+            {
+              "key": "gen_ai.output.messages",
+              "type": "string",
+              "value": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_1\",\"name\":\"lookup_order\",\"arguments\":{\"id\":12}}],\"finish_reason\":\"tool_call\"}]"
+            },
+            { "key": "gen_ai.usage.input_tokens", "type": "int64", "value": 1834 },
+            { "key": "gen_ai.usage.output_tokens", "type": "int64", "value": 96 },
+            { "key": "gen_ai.request.temperature", "type": "float64", "value": 0.2 }
+          ],
+          "logs": [
+            {
+              "timestamp": 1792504995200000,
+              "fields": [
+                { "key": "event", "type": "string", "value": "gen_ai.choice" },
+                { "key": "finish_reason", "type": "string", "value": "tool_calls" }
+              ]
+            }
+          ],
+          "processID": "p1",
+          "warnings": null
+        },
+        {
+          "traceID": "7a3c9e2f41b85d06c1e2f3a4b5c6d7e8",
+          "spanID": "c3d4e5f60718293a",
+          "flags": 1,
+          "operationName": "execute_tool lookup_order",
+          "references": [
+            {
+              "refType": "CHILD_OF",
+              "traceID": "7a3c9e2f41b85d06c1e2f3a4b5c6d7e8",
+              "spanID": "a1b2c3d4e5f60718"
+            }
+          ],
+          "startTime": 1792504995300000,
+          "duration": 600000,
+          "tags": [
+            { "key": "otel.scope.name", "type": "string", "value": "support-agent" },
+            { "key": "span.kind", "type": "string", "value": "internal" },
+            { "key": "gen_ai.operation.name", "type": "string", "value": "execute_tool" },
+            { "key": "gen_ai.tool.name", "type": "string", "value": "lookup_order" },
+            { "key": "gen_ai.tool.call.id", "type": "string", "value": "call_1" },
+            {
+              "key": "gen_ai.tool.call.arguments",
+              "type": "string",
+              "value": "{\"id\":12,\"user_id\":\"account-the-tool-touched\"}"
+            },
+            {
+              "key": "gen_ai.tool.call.result",
+              "type": "string",
+              "value": "{\"status\":\"shipped\",\"eta\":\"tomorrow\"}"
+            },
+            { "key": "user.id", "type": "string", "value": "account-the-tool-touched" },
+            { "key": "error", "type": "bool", "value": true },
+            { "key": "otel.status_description", "type": "string", "value": "carrier timeout, retried" }
+          ],
+          "logs": [],
+          "processID": "p1",
+          "warnings": null
+        }
+      ],
+      "processes": {
+        "p1": {
+          "serviceName": "support-agent",
+          "tags": [
+            { "key": "telemetry.sdk.language", "type": "string", "value": "nodejs" },
+            { "key": "deployment.environment.name", "type": "string", "value": "production" }
+          ]
+        }
+      },
+      "warnings": null
+    },
+    {
+      "traceID": "5f2e1d0c9b8a7968",
+      "spans": [
+        {
+          "traceID": "5f2e1d0c9b8a7968",
+          "spanID": "d4e5f60718293a4b",
+          "operationName": "invoke_agent support-agent",
+          "references": [],
+          "startTime": 1792505100000000,
+          "duration": 2000000,
+          "tags": [{ "key": "user.id", "type": "string", "value": "user-43" }],
+          "logs": [],
+          "processID": "p1"
+        },
+        {
+          "traceID": "5f2e1d0c9b8a7968",
+          "spanID": "e5f60718293a4b5c",
+          "operationName": "chat gpt-5",
+          "references": [
+            { "refType": "CHILD_OF", "traceID": "5f2e1d0c9b8a7968", "spanID": "d4e5f60718293a4b" }
+          ],
+          "startTime": "soon",
+          "duration": 1000000,
+          "tags": [],
+          "logs": [],
+          "processID": "p1"
+        }
+      ],
+      "processes": { "p1": { "serviceName": "support-agent", "tags": [] } },
+      "warnings": null
+    }
+  ],
+  "total": 0,
+  "limit": 0,
+  "offset": 0,
+  "errors": null
+}

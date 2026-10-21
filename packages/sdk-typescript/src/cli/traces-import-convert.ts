@@ -614,7 +614,7 @@ function readAttributes(value: unknown): OtlpAttribute[] | undefined {
 
 /** A recorded span's string values over the inline limit stored apart from it, listed beside
  * any values its exporter already listed. */
-function offloadOtlpValues(attributes: OtlpAttribute[], blobs: BlobSink): OtlpAttribute[] {
+export function offloadOtlpValues(attributes: OtlpAttribute[], blobs: BlobSink): OtlpAttribute[] {
   const over = attributes.filter(
     (attribute) =>
       typeof attribute.value.stringValue === "string" &&

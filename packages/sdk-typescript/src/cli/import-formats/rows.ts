@@ -531,7 +531,7 @@ function addContent(attributes: AttributeList, row: SpanRow): void {
  *   start.
  * A recorded end before its start refuses the trace.
  */
-function timesOf(
+export function timesOf(
   rows: ReadonlyMap<string, SpanRow>,
   parentOf: (row: SpanRow) => string | undefined,
 ): { starts: Map<string, bigint>; ends: Map<string, bigint>; notes: Map<string, string[]> } {

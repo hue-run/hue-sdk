@@ -1,0 +1,564 @@
+{
+ "data": [
+  {
+   "attributes": [
+    {
+     "key": "openinference.span.kind",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "AGENT"
+     }
+    },
+    {
+     "key": "input.value",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "Where is order 12?"
+     }
+    },
+    {
+     "key": "input.mime_type",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "text/plain"
+     }
+    },
+    {
+     "key": "output.value",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "Order 12 ships tomorrow."
+     }
+    },
+    {
+     "key": "user.id",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "user-42"
+     }
+    },
+    {
+     "key": "session.id",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "conversation-7"
+     }
+    },
+    {
+     "key": "metadata",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "{\"plan\":\"pro\"}"
+     }
+    }
+   ],
+   "dropped_attributes_count": null,
+   "dropped_events_count": null,
+   "dropped_links_count": null,
+   "end_time_unix_nano": 1792505003877000192,
+   "events": null,
+   "flags": null,
+   "kind": "SPAN_KIND_INTERNAL",
+   "links": null,
+   "name": "support-agent",
+   "parent_span_id": null,
+   "span_id": "1111aaaa2222bbbb",
+   "start_time_unix_nano": 1792504991402000128,
+   "status": {
+    "code": 1,
+    "message": null
+   },
+   "trace_id": "8c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f",
+   "trace_state": null
+  },
+  {
+   "attributes": [
+    {
+     "key": "openinference.span.kind",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "LLM"
+     }
+    },
+    {
+     "key": "llm.model_name",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "gpt-5"
+     }
+    },
+    {
+     "key": "llm.provider",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "openai"
+     }
+    },
+    {
+     "key": "llm.system",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "openai"
+     }
+    },
+    {
+     "key": "llm.input_messages.0.message.role",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "system"
+     }
+    },
+    {
+     "key": "llm.input_messages.0.message.content",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "You help with orders."
+     }
+    },
+    {
+     "key": "llm.input_messages.1.message.role",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "user"
+     }
+    },
+    {
+     "key": "llm.input_messages.1.message.content",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "Where is order 12?"
+     }
+    },
+    {
+     "key": "llm.output_messages.0.message.role",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "assistant"
+     }
+    },
+    {
+     "key": "llm.output_messages.0.message.tool_calls.0.tool_call.id",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "call_1"
+     }
+    },
+    {
+     "key": "llm.output_messages.0.message.tool_calls.0.tool_call.function.name",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "lookup_order"
+     }
+    },
+    {
+     "key": "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "{\"id\": 12}"
+     }
+    },
+    {
+     "key": "llm.token_count.prompt",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": 1834,
+      "kvlist_value": null,
+      "string_value": null
+     }
+    },
+    {
+     "key": "llm.token_count.completion",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": 96,
+      "kvlist_value": null,
+      "string_value": null
+     }
+    },
+    {
+     "key": "llm.token_count.total",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": 1930,
+      "kvlist_value": null,
+      "string_value": null
+     }
+    },
+    {
+     "key": "llm.invocation_parameters",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "{\"temperature\": 0.2}"
+     }
+    },
+    {
+     "key": "input.value",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "{\"messages\": []}"
+     }
+    },
+    {
+     "key": "input.mime_type",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "application/json"
+     }
+    }
+   ],
+   "dropped_attributes_count": null,
+   "dropped_events_count": null,
+   "dropped_links_count": null,
+   "end_time_unix_nano": 1792504995233000192,
+   "events": [
+    {
+     "attributes": [
+      {
+       "key": "finish_reason",
+       "value": {
+        "array_value": null,
+        "bool_value": null,
+        "bytes_value": null,
+        "double_value": null,
+        "int_value": null,
+        "kvlist_value": null,
+        "string_value": "tool_calls"
+       }
+      }
+     ],
+     "dropped_attributes_count": null,
+     "name": "gen_ai.choice",
+     "time_unix_nano": 1792504995200000000
+    }
+   ],
+   "flags": null,
+   "kind": "SPAN_KIND_INTERNAL",
+   "links": null,
+   "name": "ChatCompletion",
+   "parent_span_id": "1111aaaa2222bbbb",
+   "span_id": "3333cccc4444dddd",
+   "start_time_unix_nano": 1792504992010000128,
+   "status": {
+    "code": 1,
+    "message": null
+   },
+   "trace_id": "8c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f",
+   "trace_state": null
+  },
+  {
+   "attributes": [
+    {
+     "key": "openinference.span.kind",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "TOOL"
+     }
+    },
+    {
+     "key": "tool.name",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "lookup_order"
+     }
+    },
+    {
+     "key": "tool.parameters",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "{\"id\": 12, \"user_id\": \"account-the-tool-touched\"}"
+     }
+    },
+    {
+     "key": "input.value",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "{\"id\": 12, \"user_id\": \"account-the-tool-touched\"}"
+     }
+    },
+    {
+     "key": "output.value",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "{\"status\": \"shipped\"}"
+     }
+    },
+    {
+     "key": "user.id",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "account-the-tool-touched"
+     }
+    },
+    {
+     "key": "tag.tags",
+     "value": {
+      "array_value": {
+       "values": [
+        {
+         "array_value": null,
+         "bool_value": null,
+         "bytes_value": null,
+         "double_value": null,
+         "int_value": null,
+         "kvlist_value": null,
+         "string_value": "orders"
+        },
+        {
+         "array_value": null,
+         "bool_value": null,
+         "bytes_value": null,
+         "double_value": null,
+         "int_value": null,
+         "kvlist_value": null,
+         "string_value": "beta"
+        }
+       ]
+      },
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": null
+     }
+    }
+   ],
+   "dropped_attributes_count": null,
+   "dropped_events_count": null,
+   "dropped_links_count": null,
+   "end_time_unix_nano": 1792504995900000000,
+   "events": null,
+   "flags": null,
+   "kind": "SPAN_KIND_INTERNAL",
+   "links": null,
+   "name": "lookup_order",
+   "parent_span_id": "1111aaaa2222bbbb",
+   "span_id": "5555eeee6666ffff",
+   "start_time_unix_nano": 1792504995300000000,
+   "status": {
+    "code": 2,
+    "message": "carrier timeout"
+   },
+   "trace_id": "8c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f",
+   "trace_state": null
+  },
+  {
+   "attributes": [
+    {
+     "key": "openinference.span.kind",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "AGENT"
+     }
+    }
+   ],
+   "dropped_attributes_count": null,
+   "dropped_events_count": null,
+   "dropped_links_count": null,
+   "end_time_unix_nano": 1792505102000000000,
+   "events": null,
+   "flags": null,
+   "kind": "SPAN_KIND_INTERNAL",
+   "links": null,
+   "name": "support-agent",
+   "parent_span_id": null,
+   "span_id": "7777aaaa8888bbbb",
+   "start_time_unix_nano": 1792505100000000000,
+   "status": {
+    "code": 0,
+    "message": null
+   },
+   "trace_id": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b",
+   "trace_state": null
+  },
+  {
+   "attributes": [
+    {
+     "key": "openinference.span.kind",
+     "value": {
+      "array_value": null,
+      "bool_value": null,
+      "bytes_value": null,
+      "double_value": null,
+      "int_value": null,
+      "kvlist_value": null,
+      "string_value": "LLM"
+     }
+    }
+   ],
+   "dropped_attributes_count": null,
+   "dropped_events_count": null,
+   "dropped_links_count": null,
+   "end_time_unix_nano": 1792505101000000000,
+   "events": null,
+   "flags": null,
+   "kind": "SPAN_KIND_INTERNAL",
+   "links": null,
+   "name": "ChatCompletion",
+   "parent_span_id": "7777aaaa8888bbbb",
+   "span_id": "9999cccc0000dddd",
+   "start_time_unix_nano": "yesterday",
+   "status": {
+    "code": 0,
+    "message": null
+   },
+   "trace_id": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b",
+   "trace_state": null
+  }
+ ],
+ "next_cursor": null
+}

@@ -2,6 +2,7 @@ import { ConversionError, sha256Hex, type ConvertedTrace } from "../traces-impor
 import type { ConvertContext, ImportAdapter, TraceCollector, ValueSource } from "./adapter.js";
 import { decodeContainer, parseValues } from "./containers.js";
 import { applyIdentityKeys, traceIdentity, type IdentityKeys } from "./identity.js";
+import { binaryValues } from "./otlp-protobuf.js";
 import { adapterFor, importAdapters, unrecognizedReason } from "./registry.js";
 import { RowTraceCollector, rowTraceId } from "./rows.js";
 
@@ -60,7 +61,8 @@ export class ImportReader {
       this.result.unsupported.push({ file, reason: decoded.unsupported });
       return raw.byteLength;
     }
-    const parsed = parseValues(decoded.bytes);
+    const parsed =
+      binaryValues(decoded.bytes, this.options.maxFileBytes) ?? parseValues(decoded.bytes);
     if ("unsupported" in parsed) {
       this.result.unsupported.push({ file, reason: parsed.unsupported });
       return decoded.bytes.byteLength;

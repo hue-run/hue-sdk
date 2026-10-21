@@ -1,0 +1,209 @@
+{
+ "data": [
+  {
+   "id": "5815242380127734912",
+   "type": "span",
+   "attributes": {
+    "duration": 12475000000.0,
+    "input": {
+     "value": "Where is order 12?"
+    },
+    "metadata": {
+     "plan": "pro"
+    },
+    "metrics": {},
+    "ml_app": "support-agent",
+    "name": "support-agent",
+    "output": {
+     "value": "Order 12 ships tomorrow."
+    },
+    "parent_id": "undefined",
+    "span_id": "5815242380127734912",
+    "span_kind": "agent",
+    "start_ns": 1792504991402000000,
+    "status": "ok",
+    "tags": [
+     "service:support-agent",
+     "env:production",
+     "ddtrace.version:3.17",
+     "ml_app:support-agent",
+     "source:integration",
+     "language:python",
+     "error:0",
+     "session_id:conversation-7",
+     "user_id:user-42"
+    ],
+    "trace_id": "6903738200000000af2d3775dfc70530",
+    "session_id": "conversation-7"
+   }
+  },
+  {
+   "id": "1287234500329112345",
+   "type": "span",
+   "attributes": {
+    "duration": 3223000000.0,
+    "input": {
+     "messages": [
+      {
+       "content": "You help with orders.",
+       "role": "system"
+      },
+      {
+       "content": "Where is order 12?",
+       "role": "user"
+      }
+     ]
+    },
+    "metadata": {},
+    "metrics": {
+     "input_tokens": 1834,
+     "output_tokens": 96,
+     "total_tokens": 1930,
+     "cache_read_input_tokens": 1024,
+     "cache_write_input_tokens": 0,
+     "estimated_total_cost": 7500
+    },
+    "ml_app": "support-agent",
+    "name": "openai.request",
+    "output": {
+     "messages": [
+      {
+       "content": "",
+       "role": "assistant",
+       "tool_calls": [
+        {
+         "name": "lookup_order",
+         "arguments": {
+          "id": 12
+         },
+         "tool_id": "call_1",
+         "type": "function"
+        }
+       ]
+      }
+     ]
+    },
+    "parent_id": "5815242380127734912",
+    "span_id": "1287234500329112345",
+    "span_kind": "llm",
+    "start_ns": 1792504992010000000,
+    "status": "ok",
+    "tags": [
+     "service:support-agent",
+     "env:production",
+     "ddtrace.version:3.17",
+     "ml_app:support-agent",
+     "source:integration",
+     "language:python",
+     "error:0",
+     "session_id:conversation-7"
+    ],
+    "trace_id": "6903738200000000af2d3775dfc70530",
+    "model_name": "gpt-5",
+    "model_provider": "openai",
+    "tool_definitions": [
+     {
+      "name": "lookup_order",
+      "description": "Look up an order",
+      "schema": {
+       "type": "object",
+       "properties": {
+        "id": {
+         "type": "integer"
+        }
+       }
+      }
+     }
+    ],
+    "evaluation": {
+     "failure_to_answer": {
+      "eval_metric_type": "categorical",
+      "value": "answered",
+      "assessment": "pass",
+      "status": "OK"
+     }
+    },
+    "session_id": "conversation-7"
+   }
+  },
+  {
+   "id": "9071223845517020301",
+   "type": "span",
+   "attributes": {
+    "duration": 600000000.0,
+    "input": {
+     "value": "{\"id\": 12, \"user_id\": \"account-the-tool-touched\"}"
+    },
+    "metadata": {},
+    "metrics": {},
+    "ml_app": "support-agent",
+    "name": "lookup_order",
+    "output": {
+     "value": "{\"status\": \"shipped\"}"
+    },
+    "parent_id": "5815242380127734912",
+    "span_id": "9071223845517020301",
+    "span_kind": "tool",
+    "start_ns": 1792504995300000000,
+    "status": "error",
+    "tags": [
+     "service:support-agent",
+     "env:production",
+     "ddtrace.version:3.17",
+     "ml_app:support-agent",
+     "source:integration",
+     "language:python",
+     "error:1",
+     "error_type:TimeoutError",
+     "user_id:account-the-tool-touched"
+    ],
+    "trace_id": "6903738200000000af2d3775dfc70530"
+   }
+  },
+  {
+   "id": "4400000000000000001",
+   "type": "span",
+   "attributes": {
+    "span_id": "4400000000000000001",
+    "trace_id": "6903738200000000aaaaaaaaaaaaaaaa",
+    "parent_id": "undefined",
+    "name": "support-agent",
+    "span_kind": "agent",
+    "start_ns": 1792505100000000000,
+    "duration": 2000000000,
+    "status": "ok",
+    "metrics": {},
+    "tags": [
+     "user_id:user-43"
+    ]
+   }
+  },
+  {
+   "id": "4400000000000000002",
+   "type": "span",
+   "attributes": {
+    "span_id": "4400000000000000002",
+    "trace_id": "6903738200000000aaaaaaaaaaaaaaaa",
+    "parent_id": "4400000000000000001",
+    "name": "openai.request",
+    "span_kind": "llm",
+    "start_ns": 1792505100500000000,
+    "duration": 1000000000,
+    "status": "ok",
+    "metrics": "lots",
+    "tags": []
+   }
+  }
+ ],
+ "meta": {
+  "elapsed": 336,
+  "request_id": "synthetic-request",
+  "status": "done",
+  "page": {
+   "after": "synthetic-cursor"
+  }
+ },
+ "links": {
+  "next": "https://api.example.com/next"
+ }
+}
