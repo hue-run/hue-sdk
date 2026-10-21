@@ -1,6 +1,13 @@
-import { ConversionError, isObject, unixNano, type JsonValue } from "../traces-import-convert.js";
+import {
+  ConversionError,
+  isObject,
+  parseNestedJsonText,
+  unixNano,
+  type JsonValue,
+} from "../traces-import-convert.js";
 import type { ConvertContext, ImportAdapter } from "./adapter.js";
 import { identityText } from "./identity.js";
+import { metadataUser } from "./row-platform-fields.js";
 import { nanosFrom, readRecords, type SpanKind, type SpanRow } from "./rows.js";
 
 /**
@@ -11,13 +18,18 @@ import { nanosFrom, readRecords, type SpanKind, type SpanRow } from "./rows.js";
  * and the `{"events": […], "cursor": …}` fetch answer.
  *
  * - `metrics.start`/`end` are Unix seconds; a row without `metrics.start` starts at `created`.
- * - `span_attributes.type` names the kind: `llm` a model call, `tool` a tool call; Braintrust's
- *   own scorers and automations record no operation. `log` rows are events of the span they
- *   share `span_id` with.
- * - The user and conversation come from `metadata` (`user_id`, `userId`, `session_id`,
- *   `thread_id`, …), Mastra's `resourceId` on Mastra rows and `group_id` on OpenAI Agents rows.
- * - Rows exported more than once keep the highest `_xact_id`. An experiment's rows are
- *   evaluation traffic.
+ * - `span_attributes.type` names the kind: `llm` a model call, `tool` a tool call. `log` rows are
+ *   events of the span they share `span_id` with.
+ * - Braintrust's own work inside a trace (`purpose: "scorer"`, or a `score`, `automation`,
+ *   `facet`, `classifier`, `preprocessor` or `review` span, as online scoring adds to production
+ *   traces) is scoring: it and everything beneath it record no GenAI operation, model, messages or
+ *   usage, and never name the trace's user (`rows.ts`).
+ * - The user and conversation come from `metadata` (`userId`, `user_id`, `session_id`,
+ *   `thread_id`, …, read in the order Hue reads a metadata map), Mastra's `resourceId` on Mastra
+ *   rows and `group_id` on OpenAI Agents rows.
+ * - Rows exported more than once keep the highest `_xact_id`. An experiment's rows and a
+ *   dataset's records (`dataset_id`: test inputs and expected outputs, not production traffic)
+ *   are evaluation traffic.
  */
 
 type Row = Record<string, JsonValue>;
@@ -46,7 +58,6 @@ const first = (fields: Row | undefined, names: readonly string[]): string | unde
   return undefined;
 };
 
-const USER_FIELDS = ["user_id", "userId", "user.id", "enduser.id"];
 const SESSION_FIELDS = [
   "session_id",
   "sessionId",
@@ -57,8 +68,17 @@ const SESSION_FIELDS = [
   "gen_ai.conversation.id",
   "langgraph.thread_id",
 ];
-/** Braintrust's own activity inside a trace (scoring, review, automation): no agent operation. */
 const KINDS: Record<string, SpanKind> = { llm: "llm", tool: "tool" };
+/** Braintrust's own activity inside a trace (`SpanType` in its OpenAPI): scoring, not the
+ * agent's work. */
+const SCORING_TYPES = new Set([
+  "score",
+  "automation",
+  "facet",
+  "classifier",
+  "preprocessor",
+  "review",
+]);
 
 /** A token count Braintrust recorded, when it is a nonnegative integer. */
 const count = (value: JsonValue | undefined) =>
@@ -75,7 +95,7 @@ function toolArguments(input: JsonValue | undefined): { arguments?: JsonValue; c
   let args: JsonValue = fn.arguments ?? null;
   if (typeof args === "string")
     try {
-      args = JSON.parse(args) as JsonValue;
+      args = parseNestedJsonText(args).value as JsonValue;
     } catch {
       // Arguments that are not JSON stay the text recorded.
     }
@@ -146,9 +166,12 @@ function readRow(record: Row, context: ConvertContext): void {
         ? "agent"
         : undefined;
   const error = record.error;
+  const scoring =
+    attributes?.purpose === "scorer" || (type !== undefined && SCORING_TYPES.has(type));
   const row: SpanRow = {
     traceKey,
     spanKey,
+    ...(scoring ? { scoring } : {}),
     ...(parents[0] !== undefined ? { parentKey: parents[0] as string } : {}),
     ...(parents.length > 1 ? { linkKeys: parents.slice(1) as string[] } : {}),
     name,
@@ -207,14 +230,13 @@ function readRow(record: Row, context: ConvertContext): void {
       returned.callId;
     if (callId) row.tool.callId = callId;
   } else {
-    const user =
-      first(metadata, USER_FIELDS) ?? (mastra ? first(metadata, ["resourceId"]) : undefined);
+    const user = metadataUser(metadata) ?? (mastra ? first(metadata, ["resourceId"]) : undefined);
     const session =
       first(metadata, SESSION_FIELDS) ?? (openaiAgents ? first(metadata, ["group_id"]) : undefined);
     if (user !== undefined) row.user = user;
     if (session !== undefined) row.session = session;
   }
-  if (text(record.experiment_id)) row.origin = "evaluation";
+  if (text(record.experiment_id) || text(record.dataset_id)) row.origin = "evaluation";
   // `vercel` and other platform names are where the code ran, not a deployment environment.
   const environmentName = text(environment?.name);
   if (environmentName === "production" || environmentName === "staging")

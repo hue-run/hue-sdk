@@ -1,4 +1,4 @@
-import { isObject, type JsonValue } from "../traces-import-convert.js";
+import { isObject, parseNestedJsonText, type JsonValue } from "../traces-import-convert.js";
 
 /**
  * Chat content as the OpenTelemetry GenAI conventions record it (`gen_ai.input.messages`,
@@ -28,7 +28,7 @@ const string = (value: JsonValue | undefined): string | undefined =>
 function argumentsOf(value: JsonValue | undefined): JsonValue {
   if (typeof value === "string")
     try {
-      return JSON.parse(value) as JsonValue;
+      return parseNestedJsonText(value).value as JsonValue;
     } catch {
       return value;
     }

@@ -284,9 +284,9 @@ describe("containers", () => {
       { file: "export.jsonl", format: "otlp_json", traces: 1 },
     ]);
     expect(report.files.skipped).toEqual([
+      { file: "export.jsonl", line: 4, reason: "an OTLP logs export; only traces are imported" },
       { file: "export.jsonl", line: 6, reason: "not JSON" },
       { file: "export.jsonl", line: 7, reason: "truncated JSON" },
-      { file: "export.jsonl", line: 4, reason: "an OTLP logs export; only traces are imported" },
     ]);
     // A file of which nothing is read is reported whole, not line by line.
     expect(report.files.unsupported).toEqual([
@@ -883,5 +883,106 @@ describe("Braintrust", () => {
     const { manifest, spans } = await bundle(report.output_directory);
     expect(manifest.traces[0]!.identity).toEqual({ user: "customer-77" });
     expect(str((await spans(BT_TRACE))[0]!, "user.id")).toBe("customer-77");
+  });
+
+  test("reads online scoring inside a production trace as Braintrust's, never the agent's", async () => {
+    // A scorer span under the production root holds the judge's own model call and a user.
+    const scorer = {
+      ...container,
+      id: "e1f2a3b4c5d6e7f8",
+      span_id: "e1f2a3b4c5d6e7f8",
+      root_span_id: BT_TRACE,
+      span_parents: [BT_ROOT],
+      span_attributes: { name: "Factuality", type: "score", purpose: "scorer" },
+      input: { output: "Order 12 ships tomorrow." },
+      output: { score: 1 },
+      metadata: { user_id: "scorer-user" },
+      metrics: { start: 1792505004.1, end: 1792505005.2 },
+    };
+    const judge = {
+      ...braintrustRows[1]!,
+      id: "f2a3b4c5d6e7f809",
+      span_id: "f2a3b4c5d6e7f809",
+      span_parents: [scorer.span_id],
+      span_attributes: { name: "judge", type: "llm" },
+      metadata: { model: "gpt-5", user_id: "judge-user" },
+      metrics: { start: 1792505004.2, end: 1792505005.1, prompt_tokens: 300 },
+    };
+    const root = await scratch();
+    await writeFiles(root, {
+      "rows.jsonl": [{ ...braintrustRows[0]!, metadata: {} }, braintrustRows[1], scorer, judge]
+        .map((row) => JSON.stringify(row))
+        .join("\n"),
+    });
+    const { code, report } = await prepare(root);
+    expect(code).toBe(0);
+    const { manifest, spans } = await bundle(report.output_directory);
+    // Neither the scorer's nor its judge's user owns the trace, and it stays production traffic.
+    expect(manifest.traces[0]!.identity).toBeUndefined();
+    expect(manifest.traces[0]!.origin).toBe("unknown");
+    const emitted = await spans(BT_TRACE);
+    const call = emitted.find((span) => span.name === "judge")!;
+    for (const key of [
+      "gen_ai.operation.name",
+      "gen_ai.request.model",
+      "gen_ai.input.messages",
+      "gen_ai.usage.input_tokens",
+      "braintrust.metadata",
+    ])
+      expect(attr(call, key)).toBeUndefined();
+    expect(json(call, "input.value")).toEqual((judge as Record<string, unknown>).input);
+    expect(str(call, "braintrust.span_attributes")).toContain('"type":"llm"');
+    // The agent's own model call is read as one.
+    const agentCall = emitted.find((span) => span.name === "Chat Completion")!;
+    expect(str(agentCall, "gen_ai.operation.name")).toBe("chat");
+  });
+
+  test("reads dataset records as evaluation traffic and metadata users as Hue reads them", async () => {
+    const row = (spanId: string, fields: Record<string, unknown>) => ({
+      ...container,
+      id: spanId,
+      span_id: spanId,
+      root_span_id: spanId,
+      span_parents: [],
+      span_attributes: { name: "task", type: "task" },
+      input: "Where is order 12?",
+      metrics: { start: 1792504991.402, end: 1792504992.402 },
+      ...fields,
+    });
+    const traces = ["a1", "b2", "c3"].map((seed) => spanIds(seed));
+    const root = await scratch();
+    await writeFiles(root, {
+      "rows.jsonl": [
+        // A dataset record (`bt sync pull dataset:…`): test data, never a user's history.
+        row(traces[0]!, {
+          dataset_id: "0c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+          expected: "Tomorrow",
+          metadata: { user_id: "dataset-user" },
+        }),
+        // A metadata map's `userId` before its `user_id`, as Hue reads `braintrust.metadata`.
+        row(traces[1]!, { metadata: { userId: "camel", user_id: "snake" } }),
+        // A Claude Code span ingested by Braintrust: `user.id` beside `user.account_uuid` names
+        // an installation, so `enduser.id` is read.
+        row(traces[2]!, {
+          metadata: {
+            "user.id": "installation-1",
+            "user.account_uuid": "account-1",
+            "enduser.id": "customer-5",
+          },
+        }),
+      ]
+        .map((item) => JSON.stringify(item))
+        .join("\n"),
+    });
+    const { code, report } = await prepare(root);
+    expect(code).toBe(0);
+    const { manifest } = await bundle(report.output_directory);
+    const traceOf = (spanId: string) =>
+      manifest.traces.find(
+        (trace) => trace.trace_id === sha256(`braintrust.trace:${spanId}`).slice(0, 32),
+      )!;
+    expect(traceOf(traces[0]!).origin).toBe("evaluation");
+    expect(traceOf(traces[1]!).identity).toEqual({ user: "camel" });
+    expect(traceOf(traces[2]!).identity).toEqual({ user: "customer-5" });
   });
 });

@@ -594,8 +594,9 @@ npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authoriza
   name, in these formats: OTLP/JSON, OTLP protobuf and OpenTelemetry Collector file exports,
   Jaeger, Zipkin v2, Langfuse (API answers, UI downloads and blob-storage files), Braintrust span
   rows, LangSmith runs, Arize Phoenix spans, MLflow traces, Opik exports, W&B Weave calls, Datadog
-  LLM Observability spans, OpenAI Agents SDK traces, Raindrop events, Helicone requests, ATIF
-  v1.7 and v1.8, and OpenAI chat, OpenAI Responses and Anthropic Messages transcripts.
+  LLM Observability spans, OpenAI Agents SDK traces, Raindrop events and span rows, Helicone
+  requests, ATIF v1.7 and v1.8, and OpenAI chat, OpenAI Responses and Anthropic Messages
+  transcripts. One `prepare` reads up to 256 MiB decompressed; prepare a larger export in parts.
 - `prepare` writes each trace as gzip OTLP/JSON batches beside a manifest. Spans of OTLP exports
   (Jaeger API v3 answers included) are kept as recorded, and Jaeger, Zipkin and Phoenix spans
   become the OTLP spans they were. Every other record becomes the GenAI spans Hue reads, with its
@@ -605,8 +606,9 @@ npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authoriza
   trace's root. `--user-key` and `--session-key` name them for an export that records them under
   keys of its own.
 - The report gives the manifest's digest and totals, the traces per format, the files it could not
-  read, each line or record of a file it could not read (the rest of the file is read), the traces
-  refused (a malformed record refuses only its trace), the instants filled in by a fixed rule,
+  read, each line or record of a file it could not read (the rest of the file is read), what it
+  read with a repair (a compressed file read up to a break, `NaN` read as null) or read once though
+  the input held it twice, the traces refused (a malformed record refuses only its trace), the instants filled in by a fixed rule,
   invalid vendor ids mapped to OpenTelemetry ids, and the traces without a history owner, read from
   the spans as Hue reads them. Nothing about a file's name or place reaches a span.
 - `upload` registers the manifest, sends each trace's large values and batches in order, two

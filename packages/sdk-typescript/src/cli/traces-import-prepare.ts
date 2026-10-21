@@ -35,8 +35,10 @@ import { isZipSignature, ZipArchive, ZipError } from "./traces-import-zip.js";
 export const PREPARE_LIMITS = {
   /** One source file, or one archive member. */
   fileBytes: 64 * 1024 * 1024,
-  /** Every source file together. */
-  totalBytes: 1024 * 1024 * 1024,
+  /** Every source file together, decompressed. Every trace is held until all are read, at about
+   * seven times its source size, so this keeps a run inside a 2 GiB JavaScript heap (Node.js's
+   * default on a machine with 8 GiB of memory). */
+  totalBytes: 256 * 1024 * 1024,
   /** Files one directory tree or archive may hold. */
   files: 50_000,
   /** How deep a directory tree is walked. */
@@ -61,6 +63,9 @@ export interface PrepareReport {
     unsupported: ReadResult["unsupported"];
     /** Records of a read file (a line of JSON Lines, a record of a JSON array) that were not. */
     skipped: ReadResult["skipped"];
+    /** What was read with a repair (a damaged gzip or zstd file read up to the damage, `NaN` read
+     * as null) or read once though the input held it more than once. */
+    notes: ReadResult["notes"];
   };
   traces: {
     without_identity: number;
@@ -288,7 +293,9 @@ export async function prepareTraceBundle(
   const countBytes = (bytes: number) => {
     totalBytes += bytes;
     if (totalBytes > PREPARE_LIMITS.totalBytes)
-      throw new PrepareError(`The input holds more than ${PREPARE_LIMITS.totalBytes} bytes`);
+      throw new PrepareError(
+        `The input holds more than ${PREPARE_LIMITS.totalBytes} bytes decompressed; prepare it in parts of at most that size, each to its own --out`,
+      );
   };
   for await (const source of sourceFiles(input, unsupported)) {
     countBytes(source.size);
@@ -392,6 +399,9 @@ export async function prepareTraceBundle(
       ...(sourceDigest ? { source_digest: sourceDigest } : {}),
     };
     manifestTraces.push(declared);
+    // What was written is let go: the run holds each trace's spans only until they are on disk.
+    trace.entries = [];
+    for (const blob of trace.blobs) blob.bytes = new Uint8Array(0);
     formats.add(adapterById(trace.format)!.manifestFormat);
     formatCounts[trace.format] = (formatCounts[trace.format] ?? 0) + 1;
     for (const rule of trace.inferredTiming ?? []) timing[rule] = (timing[rule] ?? 0) + 1;
@@ -424,7 +434,7 @@ export async function prepareTraceBundle(
     source: manifest.source,
     output_directory: outputDirectory,
     formats: formatCounts,
-    files: { supported: read.supported, unsupported, skipped: read.skipped },
+    files: { supported: read.supported, unsupported, skipped: read.skipped, notes: read.notes },
     traces: {
       without_identity: withoutIdentity,
       by_origin: byOrigin,

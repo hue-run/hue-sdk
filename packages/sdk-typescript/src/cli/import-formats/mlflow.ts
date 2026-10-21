@@ -21,6 +21,8 @@ import { nanosFrom, readRecords, type EventRow, type SpanKind, type SpanRow } fr
  *   name who logged the trace, never the end user.
  * - A trace tagged `mlflow.eval.requestId` (made by `mlflow.genai.evaluate`) or
  *   `mlflow.trace.sourceScorer` (a judge's own trace) is evaluation traffic.
+ * - A span's `links`, which `Span.to_dict()` writes beside its parent, become span links, to a
+ *   span of the same trace or of another, their ids read as the trace's own are.
  * - A trace is one record: a malformed span refuses its trace. The spans without a parent keep the
  *   trace's `info` beside the span in their source record.
  */
@@ -75,6 +77,30 @@ const attributeValue = (value: JsonValue): JsonValue =>
     ? value
     : JSON.stringify(value);
 
+/** A trace reference as a trace key: an id in any of MLflow's forms (`tr-<hex>`, hex, a v4
+ * `trace:/<location>/<hex>`), else the reference as recorded. */
+const traceKeyOf = (reference: string): string =>
+  hexId(reference, 16) ?? hexId(reference.split("/").at(-1), 16) ?? reference;
+
+/** A span's links (`Link.to_dict()`: `trace_id`, `span_id`, `attributes`). */
+function linksOf(value: JsonValue | undefined): NonNullable<SpanRow["links"]> {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new ConversionError("a span's links are not a list");
+  return value.map((item) => {
+    const link = object(item);
+    const traceId = text(link?.trace_id);
+    const spanId = text(link?.span_id);
+    if (!link || !traceId || !spanId)
+      throw new ConversionError("a span link without a trace_id or span_id");
+    const attributes = object(link.attributes);
+    return {
+      traceKey: traceKeyOf(traceId),
+      spanKey: hexId(spanId, 8) ?? spanId,
+      ...(attributes ? { attributes } : {}),
+    };
+  });
+}
+
 /** The instant a span field records, in nanoseconds; undefined when absent. */
 const instant = (value: JsonValue | undefined) =>
   value === undefined || value === null || value === "" || value === 0
@@ -125,6 +151,7 @@ function readSpan(span: JsonValue, trace: Trace): { row: SpanRow; events: EventR
       record: event as JsonObject,
     };
   });
+  const links = linksOf(span.links);
   const input = attributes["mlflow.spanInputs"];
   const output = attributes["mlflow.spanOutputs"];
   const own: Record<string, JsonValue> = {};
@@ -140,6 +167,7 @@ function readSpan(span: JsonValue, trace: Trace): { row: SpanRow; events: EventR
     traceKey: trace.traceKey,
     spanKey,
     ...(parentKey !== undefined ? { parentKey } : {}),
+    ...(links.length ? { links } : {}),
     name: text(span.name) ?? "span",
     ...(kind ? { kind } : {}),
     ...(start !== undefined ? { start } : {}),
@@ -215,7 +243,7 @@ function traceOf(value: JsonObject): Trace | undefined {
   const traceKey =
     hexId(reference, 16) ??
     hexId(reference.split("/").at(-1), 16) ??
-    (spanTraces.size === 1 ? [...spanTraces][0]! : reference);
+    (spanTraces.size === 1 ? [...spanTraces][0]! : traceKeyOf(reference));
   const metadata = object(info.trace_metadata ?? info.request_metadata);
   const tags = object(info.tags);
   const user = identityText(metadata?.["mlflow.trace.user"]);

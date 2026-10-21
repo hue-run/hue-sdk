@@ -1,0 +1,67 @@
+{
+  "data": [
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b7",
+      "parent_span_id": null,
+      "span_name": "support.reply",
+      "span_type": "INTERNAL",
+      "status": "OK",
+      "start_time_ns": 1792317601120000000,
+      "end_time_ns": 1792317603002000000,
+      "duration_ns": 1882000000,
+      "input": "Where is order 12?",
+      "output": "Order 12 has shipped.",
+      "input_tokens": null,
+      "output_tokens": null,
+      "model": null,
+      "provider": null,
+      "attributes": {
+        "traceloop.association.properties.user_id": "customer-3307",
+        "traceloop.association.properties.convo_id": "convo-2c7e91",
+        "traceloop.association.properties.event_id": "turn_1842"
+      }
+    },
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "a3ce929d0e0e4736",
+      "parent_span_id": "00f067aa0ba902b7",
+      "span_name": "ai.generateText",
+      "span_type": "LLM_GENERATION",
+      "status": "OK",
+      "start_time_ns": 1792317601200000000,
+      "end_time_ns": 1792317602044000000,
+      "duration_ns": 844000000,
+      "input": "[{\"role\":\"system\",\"content\":\"You answer questions about orders.\"},{\"role\":\"user\",\"content\":\"Where is order 12?\"}]",
+      "output": "Order 12 has shipped.",
+      "input_tokens": 96,
+      "output_tokens": 17,
+      "model": "gpt-4.1-mini",
+      "provider": "OpenAI",
+      "attributes": {
+        "traceloop.association.properties.user_id": "customer-3307",
+        "ai.model.id": "gpt-4.1-mini"
+      }
+    },
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "b7ad6b7169203331",
+      "parent_span_id": "a3ce929d0e0e4736",
+      "span_name": "lookup_order",
+      "span_type": "TOOL_CALL",
+      "status": "ERROR",
+      "start_time_ns": 1792317601500000000,
+      "end_time_ns": null,
+      "duration_ns": 120000000,
+      "input": "{\"id\":12,\"account\":\"account-acted-on\"}",
+      "output": "{\"status\":\"shipped\"}",
+      "input_tokens": null,
+      "output_tokens": null,
+      "model": null,
+      "provider": null,
+      "attributes": {
+        "traceloop.association.properties.user_id": "customer-3307"
+      }
+    }
+  ]
+}

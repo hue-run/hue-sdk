@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { parseArgs } from "node:util";
+import { zstdCompressSync } from "node:zlib";
 
 const { values } = parseArgs({
   options: {
@@ -370,6 +371,41 @@ if (
   installedPinnedMcp.stdout !== expectedPinnedMcp
 )
   throw new Error("Installed hue mcp install did not preserve the project pin");
+// The installed CLI under Node.js reads every frame of a zstd file: Node's zlib decompresses only
+// a file's first frame on its own, which Bun's tests cannot show. zstd is in node:zlib from 22.15.
+if (typeof zstdCompressSync === "function") {
+  const exports = await mkdtemp(join(destination, "traces-import-"));
+  const spans = (from, count) =>
+    Array.from({ length: count }, (_, index) =>
+      JSON.stringify({
+        traceId: (from + index).toString(16).padStart(32, "0"),
+        id: "0000000000000001",
+        name: "turn",
+        timestamp: 1760000000000000,
+        duration: 1000,
+      }),
+    ).join("\n") + "\n";
+  const input = join(exports, "spans.jsonl.zst");
+  await writeFile(
+    input,
+    Buffer.concat([zstdCompressSync(spans(1, 3)), zstdCompressSync(spans(4, 7))]),
+  );
+  const prepared = spawnSync(
+    join(minimal, "node_modules", ".bin", "hue"),
+    ["traces", "import", "prepare", input, "--out", join(exports, "bundle"), "--json"],
+    { cwd: exports, encoding: "utf8", timeout: 10000, env: process.env },
+  );
+  const report = prepared.status === 0 ? JSON.parse(prepared.stdout) : undefined;
+  if (
+    !report ||
+    report.totals.traces !== 10 ||
+    report.files.unsupported.length ||
+    report.files.skipped.length ||
+    report.files.notes.length
+  )
+    throw new Error("Installed hue traces import prepare did not read every frame of a zstd file");
+  console.log("traces import: every frame of a two-frame zstd file read under Node.js");
+} else console.log("traces import: zstd frame check skipped (this Node.js has no zstd)");
 // Without --auth, the installed CLI signs Claude Code in unless HUE_MCP_KEY is set, and names its
 // choice on stderr so --print stays a snippet; it checks the variable's presence, never prints it.
 {

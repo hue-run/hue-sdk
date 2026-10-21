@@ -1026,7 +1026,10 @@ describe("hue traces import prepare", () => {
     expect(formatOf(Buffer.from(JSON.stringify(atifExport())))).toBe("atif");
     expect(formatOf(Buffer.from("\uFEFF" + otlpFile))).toBe("otlp_json");
     expect(formatOf(gzipSync(Buffer.from(otlpFile)))).toBe("otlp_json");
-    expect(formatOf(Buffer.from([0xff, 0xfe, 0x00]))).toBe("not UTF-8 text");
+    expect(formatOf(Buffer.from([0xc3, 0x28, 0x7b]))).toBe("not UTF-8 text (line 1)");
+    // A UTF-16 byte order mark: UTF-16 text, or nothing readable.
+    expect(formatOf(Buffer.from([0xff, 0xfe, 0x00]))).toBe("not UTF-16 text");
+    expect(formatOf(Buffer.from(`\uFEFF${otlpFile}`, "utf16le"))).toBe("otlp_json");
     expect(formatOf(Buffer.from('{"data": [1]}'))).toBe("a JSON document of no recognized format");
     expect(formatOf(Buffer.from('{"data": []}'))).toBe("an export page with no records");
     expect(formatOf(Buffer.from("[]"))).toBe("an empty JSON array");

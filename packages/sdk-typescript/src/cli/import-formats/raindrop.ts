@@ -2,15 +2,19 @@ import {
   canonicalJson,
   ConversionError,
   isObject,
+  parseNestedJsonText,
   sha256Hex,
   unixNano,
   type JsonValue,
 } from "../traces-import-convert.js";
 import type { ConvertContext, ImportAdapter } from "./adapter.js";
-import { identityText } from "./identity.js";
-import { nanosFrom, readRecords, type SpanRow } from "./rows.js";
+import { identityText, readIdentity } from "./identity.js";
+import { nanosFrom, readRecords, type SpanKind, type SpanRow } from "./rows.js";
 
 /**
+ * Raindrop exports, read by two formats: `raindrop` (events) and `raindrop_spans` (the span rows of
+ * an event's trace; see {@link raindropSpans}).
+ *
  * Raindrop events: one event is one agent turn (the user's input, the tools the agent ran, the
  * assistant's output), read from two shapes:
  *
@@ -181,6 +185,137 @@ export const raindrop: ImportAdapter = {
       (record) => {
         if (!isEvent(record)) throw new ConversionError("a record that is not a Raindrop event");
         readEvent(record, context);
+      },
+    );
+  },
+};
+
+// --- raindrop_spans --------------------------------------------------------------------------
+
+/** Raindrop's span types, by the kind each is. */
+const SPAN_TYPES: Record<string, SpanKind | undefined> = {
+  INTERNAL: undefined,
+  LLM_GENERATION: "llm",
+  LLM_GENERATION_STREAM: "llm",
+  TOOL_CALL: "tool",
+};
+
+/** A span row of the Query API's `GET /v1/traces`. */
+const isSpanRow = (value: unknown): value is JsonObject =>
+  isObject(value) &&
+  typeof value.trace_id === "string" &&
+  typeof value.span_id === "string" &&
+  typeof value.span_name === "string" &&
+  typeof value.span_type === "string" &&
+  Object.hasOwn(SPAN_TYPES, value.span_type) &&
+  "start_time_ns" in value;
+
+/** The span rows a `GET /v1/traces` answer (`{"data": […]}`) holds, when it holds any. */
+const envelopeSpans = (value: unknown): unknown[] | undefined =>
+  isObject(value) && Array.isArray(value.data) && value.data.some(isSpanRow)
+    ? value.data
+    : undefined;
+
+/** A payload Raindrop keeps as text: the JSON it holds when it holds an object or a list. */
+function payload(value: JsonValue | undefined): JsonValue | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || !/^\s*[[{]/.test(value)) return value;
+  try {
+    return parseNestedJsonText(value).value as JsonValue;
+  } catch {
+    return value;
+  }
+}
+
+/** An instant or duration in nanoseconds (a number, or its decimal text for one past 2^53). */
+const nanos = (value: JsonValue | undefined): bigint | undefined =>
+  value === undefined || value === null || value === 0 ? undefined : nanosFrom(value, "ns");
+
+function readSpanRow(record: JsonObject, context: ConvertContext): void {
+  const traceKey = text(record.trace_id);
+  const spanKey = text(record.span_id);
+  if (!traceKey || !spanKey) throw new ConversionError("a span without a trace_id or span_id");
+  const attributes = object(record.attributes);
+  if (record.attributes != null && !attributes)
+    throw new ConversionError("attributes is not an object");
+  const kind = SPAN_TYPES[record.span_type as string];
+  const start = nanos(record.start_time_ns);
+  const duration = record.end_time_ns == null ? nanos(record.duration_ns) : undefined;
+  const end = nanos(record.end_time_ns) ?? (start && duration ? start + duration : undefined);
+  const input = payload(record.input);
+  const output = payload(record.output);
+  const row: SpanRow = {
+    traceKey,
+    spanKey,
+    ...(text(record.parent_span_id) ? { parentKey: text(record.parent_span_id)! } : {}),
+    name: text(record.span_name) ?? "span",
+    ...(kind ? { kind } : {}),
+    ...(start !== undefined ? { start } : {}),
+    ...(end !== undefined ? { end } : {}),
+    ...(record.end_time_ns == null && duration !== undefined
+      ? { timing: "end_from_duration" }
+      : {}),
+    ...(input !== undefined ? { input } : {}),
+    ...(output !== undefined ? { output } : {}),
+    ...(attributes ? { attributes, metadata: attributes } : {}),
+    record,
+  };
+  if (text(record.status) === "ERROR") row.error = {};
+  if (kind === "llm") {
+    if (text(record.model)) row.model = text(record.model)!;
+    if (text(record.provider)) row.provider = text(record.provider)!.toLowerCase();
+    const count = (value: JsonValue | undefined) =>
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+    row.usage = { input: count(record.input_tokens), output: count(record.output_tokens) };
+  }
+  if (kind === "tool")
+    row.tool = {
+      name: row.name,
+      ...(input !== undefined ? { arguments: input } : {}),
+      ...(output !== undefined ? { result: output } : {}),
+    };
+  else {
+    // Raindrop's SDKs stamp the interaction's user and conversation on every span they open
+    // (`traceloop.association.properties.user_id`, `ai.telemetry.metadata.raindrop.userId`, …),
+    // read as Hue reads them.
+    const user = readIdentity("user", (key) => attributes?.[key]);
+    const session = readIdentity("session", (key) => attributes?.[key]);
+    if (user !== undefined) row.user = user;
+    if (session !== undefined) row.session = session;
+  }
+  context.row(row);
+}
+
+/**
+ * Raindrop's span rows: the Query API's `GET /v1/traces?event_id=` answer (`{"data": […]}`), one
+ * row alone, or one per line. Each row (`trace_id`, `span_id`, `parent_span_id`, `span_name`,
+ * `span_type`, `status`, `start_time_ns`, `end_time_ns`, `duration_ns`, `input`, `output`,
+ * `input_tokens`, `output_tokens`, `model`, `provider`, `attributes`) is one span of its trace; it
+ * carries the content, tool arguments and results, tokens and model an event record lacks.
+ *
+ * - `span_type` names the kind: `LLM_GENERATION` and `LLM_GENERATION_STREAM` a model call,
+ *   `TOOL_CALL` a tool call, `INTERNAL` none. A tool span's input and output are its arguments and
+ *   result; payload text holding JSON is read as that JSON.
+ * - Times are Unix nanoseconds; a row without `end_time_ns` ends `duration_ns` after it starts
+ *   (`end_from_duration`). `status` `ERROR` is an error.
+ * - `attributes` (text and numbers only, as Raindrop serves them) are kept under their own names.
+ *   The user and conversation are those Raindrop's SDKs stamp on every span of the interaction
+ *   (`traceloop.association.properties.user_id` and `convo_id`, `ai.telemetry.metadata.raindrop.*`),
+ *   read as Hue reads them; the rows name no event, so the event's own `user_id` is not joined in,
+ *   and `--user-key` names a user the attributes lack.
+ */
+export const raindropSpans: ImportAdapter = {
+  id: "raindrop_spans",
+  manifestFormat: "otlp_json",
+  detect: (value) => isSpanRow(value) || envelopeSpans(value) !== undefined,
+  convert(value, context) {
+    readRecords(
+      context,
+      isSpanRow(value) ? [value] : (envelopeSpans(value) ?? []),
+      (record) => (isSpanRow(record) ? text(record.trace_id) : undefined),
+      (record) => {
+        if (!isSpanRow(record)) throw new ConversionError("a record that is not a Raindrop span");
+        readSpanRow(record, context);
       },
     );
   },

@@ -20,14 +20,23 @@ import type { ParsedValue } from "./containers.js";
  *
  * The reader below decodes the OTLP trace messages the files hold (opentelemetry-proto v1) into
  * their OTLP/JSON form, ids as hex and 64-bit integers as decimal text, and the spans are then
- * kept as recorded, exactly as an OTLP/JSON export's are. It is strict: a field of the wrong wire
- * type, a truncated field or text that is not UTF-8 makes the message unreadable, and that
- * message alone is reported. It is written here because the package carries no protobuf runtime.
+ * kept as recorded, exactly as an OTLP/JSON export's are. It is strict: a span with a field of the
+ * wrong wire type, a truncated field or text that is not UTF-8 refuses its trace (the other traces
+ * of the message are read), and damage outside any span makes the message unreadable, that message
+ * alone reported. It is written here because the package carries no protobuf runtime.
+ *
+ * The messages of a length-prefixed file are read one at a time, and their decompressed sizes
+ * together are bounded as one file's are.
  */
 
 /** Marks a value decoded from protobuf: no JSON document can carry a symbol key. */
 const PROTOBUF = Symbol("otlp-protobuf");
-type Decoded = { [PROTOBUF]: Record<string, unknown> };
+/** A decoded request and the spans of it that could not be read, by the trace they name. */
+interface DecodedTraces {
+  request: Record<string, unknown>;
+  refused: { traceId?: string; reason: string }[];
+}
+type Decoded = { [PROTOBUF]: DecodedTraces };
 
 const MAX_DEPTH = 64;
 const utf8 = new TextDecoder("utf-8", { fatal: true });
@@ -35,7 +44,7 @@ const utf8 = new TextDecoder("utf-8", { fatal: true });
 class Reader {
   pos: number;
   constructor(
-    private readonly bytes: Uint8Array,
+    readonly bytes: Uint8Array,
     start = 0,
     readonly end = bytes.byteLength,
   ) {
@@ -260,9 +269,40 @@ function span(reader: Reader): Record<string, unknown> {
   });
 }
 
-/** A `TracesData` or `ExportTraceServiceRequest` (the same fields) as OTLP/JSON. */
-export function decodeTraces(bytes: Uint8Array): Record<string, unknown> {
+/** A span the message holds, or why it cannot be read and the trace it names when its trace id
+ * was read before the damage. */
+function readSpan(
+  reader: Reader,
+  index: number,
+  refused: DecodedTraces["refused"],
+): Record<string, unknown> | undefined {
+  const start = reader.pos;
+  try {
+    return span(reader);
+  } catch (error) {
+    if (!(error instanceof ConversionError)) throw error;
+    let traceId: string | undefined;
+    try {
+      new Reader(reader.bytes, start, reader.end).fields({
+        1: [2, (field) => (traceId ??= hex(field.bytesField()))],
+      });
+    } catch {
+      // The trace id came before the damage, or the span names none.
+    }
+    refused.push({
+      ...(traceId ? { traceId } : {}),
+      reason: `span ${index} is not an OTLP span: ${error.message}`,
+    });
+    return undefined;
+  }
+}
+
+/** A `TracesData` or `ExportTraceServiceRequest` (the same fields) as OTLP/JSON, with the spans
+ * that could not be read. */
+export function decodeTraces(bytes: Uint8Array): DecodedTraces {
   const resourceSpans: unknown[] = [];
+  const refused: DecodedTraces["refused"] = [];
+  let spanCount = 0;
   new Reader(bytes).fields({
     1: [
       2,
@@ -304,7 +344,13 @@ export function decodeTraces(bytes: Uint8Array): Record<string, unknown> {
                               };
                             })),
                         ],
-                        2: [2, (value) => spans.push(span(value.sub()))],
+                        2: [
+                          2,
+                          (value) => {
+                            const read = readSpan(value.sub(), ++spanCount, refused);
+                            if (read) spans.push(read);
+                          },
+                        ],
                         3: [2, (value) => (scopeGroup.schemaUrl = value.text())],
                       };
                     }),
@@ -316,7 +362,7 @@ export function decodeTraces(bytes: Uint8Array): Record<string, unknown> {
         ),
     ],
   });
-  return { resourceSpans };
+  return { request: { resourceSpans }, refused };
 }
 
 const ZSTD = [0x28, 0xb5, 0x2f, 0xfd];
@@ -330,15 +376,26 @@ function binary(bytes: Uint8Array): boolean {
   return false;
 }
 
-const decoded = (request: Record<string, unknown>, line?: number): ParsedValue => ({
-  value: { [PROTOBUF]: request } satisfies Decoded,
-  text: JSON.stringify(request),
-  unsafeIntegers: false,
-  ...(line !== undefined ? { line } : {}),
-});
+/** A decoded request as a value; its JSON text is made only when a format asks for it. */
+function decoded(traces: DecodedTraces, line?: number): ParsedValue {
+  let text: string | undefined;
+  return {
+    value: { [PROTOBUF]: traces } satisfies Decoded,
+    get text() {
+      return (text ??= JSON.stringify(traces.request));
+    },
+    unsafeIntegers: false,
+    ...(line !== undefined ? { line } : {}),
+  };
+}
 
-/** One length-prefixed message: protobuf, or zstd around protobuf or OTLP/JSON. */
-function frameValue(frame: Uint8Array, line: number, maxBytes: number): ParsedValue {
+/** One length-prefixed message: protobuf, or zstd around protobuf or OTLP/JSON. `budget` is what
+ * the file may still decompress to; the message's decompressed size is returned beside it. */
+function frameValue(
+  frame: Uint8Array,
+  line: number,
+  budget: number,
+): { value: ParsedValue; bytes: number } {
   let bytes = frame;
   if (isZstd(frame)) {
     if (typeof zlib.zstdDecompressSync !== "function")
@@ -346,9 +403,14 @@ function frameValue(frame: Uint8Array, line: number, maxBytes: number): ParsedVa
         "a zstd message, which this Node.js cannot decompress (Node.js 22.15 or later can)",
       );
     try {
-      bytes = zlib.zstdDecompressSync(frame, { maxOutputLength: maxBytes });
-    } catch {
-      throw new ConversionError("a damaged or oversized zstd message");
+      bytes = zlib.zstdDecompressSync(frame, { maxOutputLength: Math.max(0, budget) });
+    } catch (error) {
+      if (
+        error instanceof RangeError ||
+        (error as NodeJS.ErrnoException)?.code === "ERR_BUFFER_TOO_LARGE"
+      )
+        throw new Oversized();
+      throw new ConversionError("a damaged zstd message");
     }
     if (!binary(bytes) && /^\s*\{/.test(Buffer.from(bytes.subarray(0, 64)).toString("utf8"))) {
       let text: string;
@@ -359,32 +421,51 @@ function frameValue(frame: Uint8Array, line: number, maxBytes: number): ParsedVa
       }
       try {
         const parsed = parseJsonText(text.trim());
-        return { value: parsed.value, text, unsafeIntegers: parsed.unsafeIntegers, line };
+        return {
+          value: { value: parsed.value, text, unsafeIntegers: parsed.unsafeIntegers, line },
+          bytes: bytes.byteLength,
+        };
       } catch {
         throw new ConversionError("a message that is not JSON");
       }
     }
   }
-  return decoded(decodeTraces(bytes), line);
+  if (bytes.byteLength > budget) throw new Oversized();
+  return { value: decoded(decodeTraces(bytes), line), bytes: bytes.byteLength };
+}
+
+/** The file's messages together decompress past the bound of one file. */
+class Oversized extends Error {}
+
+/** The values of a binary OTLP file, read one at a time; the messages that could not be read are
+ * added to `problems` as they are met, and `bytes` grows to the file's decompressed size. */
+export interface BinaryValues {
+  values: Iterable<ParsedValue>;
+  problems: { line: number; reason: string }[];
+  bytes: () => number;
 }
 
 /**
- * The values of a binary OTLP file, or undefined when the content is not binary or is not OTLP
- * protobuf in either form, so that it is read as text. In a length-prefixed file each message is
- * one value, its 1-based position given as its line; a message that cannot be read is reported
- * with that position and the rest are read.
+ * The values of a binary OTLP file; undefined when the content is not binary or holds neither
+ * form, so that it is read as text; or why a binary OTLP request cannot be read. In a
+ * length-prefixed file each message is one value, its 1-based position given as its line; a
+ * message that cannot be read is reported with that position and the rest are read, until the
+ * messages together decompress to more than `maxBytes`.
  */
 export function binaryValues(
   bytes: Uint8Array,
   maxBytes: number,
-): { values: ParsedValue[]; problems: { line: number; reason: string }[] } | undefined {
+): BinaryValues | { unsupported: string } | undefined {
   if (!binary(bytes)) return undefined;
+  let requestError: string | undefined;
   if (bytes[0] === 0x0a)
     try {
-      return { values: [decoded(decodeTraces(bytes))], problems: [] };
+      const value = decoded(decodeTraces(bytes));
+      return { values: [value], problems: [], bytes: () => bytes.byteLength };
     } catch (error) {
       if (!(error instanceof ConversionError)) throw error;
       // Not one message: perhaps length-prefixed messages.
+      requestError = error.message;
     }
   const frames: Uint8Array[] = [];
   let pos = 0;
@@ -402,20 +483,35 @@ export function binaryValues(
     frames.push(bytes.subarray(pos + 4, pos + 4 + length));
     pos += 4 + length;
   }
-  if (!frames.length) return undefined;
-  const values: ParsedValue[] = [];
-  const problems: { line: number; reason: string }[] = [];
-  for (const [index, frame] of frames.entries())
-    try {
-      values.push(frameValue(frame, index + 1, maxBytes));
-    } catch (error) {
-      if (!(error instanceof ConversionError)) throw error;
-      problems.push({ line: index + 1, reason: `not an OTLP trace message: ${error.message}` });
+  if (!frames.length)
+    return requestError === undefined
+      ? undefined
+      : { unsupported: `not an OTLP trace request: ${requestError}` };
+  const problems: BinaryValues["problems"] = [];
+  let total = 0;
+  function* values(): Generator<ParsedValue> {
+    for (const [index, frame] of frames.entries()) {
+      try {
+        const read = frameValue(frame, index + 1, maxBytes - total);
+        total += read.bytes;
+        yield read.value;
+      } catch (error) {
+        if (error instanceof Oversized) {
+          problems.push({
+            line: index + 1,
+            reason: `the messages decompress to more than ${maxBytes} bytes; this message and the ${frames.length - index - 1} after it were not read`,
+          });
+          return;
+        }
+        if (!(error instanceof ConversionError)) throw error;
+        total += frame.byteLength;
+        problems.push({ line: index + 1, reason: `not an OTLP trace message: ${error.message}` });
+      }
     }
-  if (!values.length) return undefined;
-  if (truncated)
-    problems.push({ line: frames.length + 1, reason: "a truncated length-prefixed message" });
-  return { values, problems };
+    if (truncated)
+      problems.push({ line: frames.length + 1, reason: "a truncated length-prefixed message" });
+  }
+  return { values: values(), problems, bytes: () => Math.max(total, bytes.byteLength) };
 }
 
 export const otlpProtobuf: ImportAdapter = {
@@ -423,10 +519,15 @@ export const otlpProtobuf: ImportAdapter = {
   manifestFormat: "otlp_json",
   detect: (value) => isObject(value) && PROTOBUF in value,
   convert(value, context) {
-    const request = isObject(value) && PROTOBUF in value ? value[PROTOBUF] : undefined;
-    if (!isObject(request)) return;
+    const traces = isObject(value) && PROTOBUF in value ? (value as Decoded)[PROTOBUF] : undefined;
+    if (!traces) return;
     const collector = context.collector(() => new OtlpTraceCollector());
-    for (const refusal of collector.add([request], context.source.digest))
+    // A span that could not be decoded refuses its trace, as a malformed OTLP/JSON span does.
+    for (const problem of traces.refused) {
+      const refusal = collector.refuse(problem.traceId, problem.reason);
+      context.refuse(refusal.reason, refusal.traceId);
+    }
+    for (const refusal of collector.add([traces.request], context.source.digest))
       context.refuse(refusal.reason, refusal.traceId);
   },
 };

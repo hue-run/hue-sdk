@@ -8,6 +8,7 @@ import * as zlib from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { runTracesCommand } from "../src/cli/traces-import.js";
 import { parseJsonText, type TraceImportManifest } from "../src/cli/traces-import-convert.js";
+import { binaryValues } from "../src/cli/import-formats/otlp-protobuf.js";
 import { importAdapters } from "../src/cli/import-formats/registry.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 
@@ -634,11 +635,36 @@ describe("Datadog LLM Observability", () => {
       },
     };
     const { report, spans } = await prepareFile("span.json", JSON.stringify(span));
-    expect(report.traces.timing).toEqual({ start_ns_read_as_ms: 1 });
+    // The duration beside a millisecond start_ns is read in milliseconds too: 83 s, not 83 µs.
+    expect(report.traces.timing).toEqual({ start_ns_read_as_ms: 1, duration_read_as_ms: 1 });
     const [llm] = await spans("6903738200000000af2d3775dfc70531");
     expect(llm!.startTimeUnixNano).toBe("1761833858897000000");
-    expect(llm!.endTimeUnixNano).toBe("1761833858897083000");
-    expect(str(llm!, "hue.import.timing")).toBe("start_ns_read_as_ms");
+    expect(llm!.endTimeUnixNano).toBe("1761833941897000000");
+    expect(str(llm!, "hue.import.timing")).toBe("start_ns_read_as_ms; duration_read_as_ms");
+  });
+});
+
+describe("Datadog LLM Observability experiments", () => {
+  test("declares a span ddtrace tagged with its experiment evaluation traffic, root or not", async () => {
+    // An export filtered to llm spans holds an experiment's model calls without their
+    // `experiment` root; ddtrace tags every span of the experiment with its id.
+    const span = {
+      id: "1",
+      type: "span",
+      attributes: {
+        span_id: "1",
+        trace_id: "7903738200000000af2d3775dfc70531",
+        parent_id: "2",
+        name: "llm_call",
+        span_kind: "llm",
+        start_ns: 1_761_833_858_897_000_000,
+        duration: 1000,
+        status: "ok",
+        tags: ["experiment_id:3b0c1f2a-0d6e-4f7a-9b8c-1d2e3f4a5b6c", "user_id:customer-1"],
+      },
+    };
+    const { manifest } = await prepareFile("span.json", JSON.stringify(span));
+    expect(manifest.traces[0]).toMatchObject({ origin: "evaluation" });
   });
 });
 
@@ -714,13 +740,13 @@ describe("OTLP protobuf", () => {
     expect(report.files.skipped).toEqual([
       {
         file: "lines.jsonl",
-        line: 3,
-        reason: "truncated JSON",
+        line: 2,
+        reason: "an OTLP metrics export; only traces are imported",
       },
       {
         file: "lines.jsonl",
-        line: 2,
-        reason: "an OTLP metrics export; only traces are imported",
+        line: 3,
+        reason: "truncated JSON",
       },
       {
         file: "proto.bin",
@@ -748,4 +774,92 @@ describe("OTLP protobuf", () => {
       identity: { user: "user-42", session: "conversation-7" },
     });
   });
+  test("refuses only the trace of a span it cannot decode, and names a damaged request's fault", async () => {
+    const request = await fixtureJson("otlp-request.json");
+    const [first] = request.resourceSpans[0].scopeSpans[0].spans;
+    const traces = ["5e7f9081a2b3c4d5e6f708192a3b4c5d", "6f8091a2b3c4d5e6f708192a3b4c5d6e"];
+    const spanOf = (traceId: string, name: string) => ({ ...first, traceId, name });
+    // A span whose name is not UTF-8: its trace id comes first, so its trace alone is refused.
+    const encoded = Buffer.from(
+      encodeRequest({
+        resourceSpans: [
+          {
+            ...request.resourceSpans[0],
+            scopeSpans: [
+              {
+                ...request.resourceSpans[0].scopeSpans[0],
+                spans: [spanOf(traces[0]!, "good span"), spanOf(traces[1]!, "BROKEN!!")],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const at = encoded.indexOf("BROKEN!!");
+    encoded.fill(0xff, at, at + 8);
+    const directory = await scratch();
+    await writeFiles(directory, {
+      "request.pb": encoded,
+      "cut.pb": encoded.subarray(0, encoded.byteLength - 5),
+    });
+    const { code, report } = await prepare(directory);
+    expect(code).toBe(0);
+    expect(report.totals.traces).toBe(1);
+    expect(report.traces.refused).toEqual([
+      {
+        file: "request.pb",
+        trace_id: traces[1],
+        reason: "span 2 is not an OTLP span: protobuf text that is not UTF-8",
+      },
+    ]);
+    expect(report.files.unsupported).toEqual([
+      { file: "cut.pb", reason: "not an OTLP trace request: a truncated protobuf field" },
+    ]);
+  });
+
+  test.skipIf(typeof zlib.zstdCompressSync !== "function")(
+    "bounds what a file's zstd messages decompress to together, reading them one at a time",
+    () => {
+      const request = (traceId: string) => ({
+        resourceSpans: [
+          {
+            scopeSpans: [
+              {
+                spans: [
+                  {
+                    traceId,
+                    spanId: "0f1e2d3c4b5a6978",
+                    name: "big",
+                    startTimeUnixNano: "1792504991402000123",
+                    endTimeUnixNano: "1792504991402000124",
+                    attributes: [{ key: "pad", value: { stringValue: "x".repeat(400_000) } }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      // Each message compresses to a few hundred bytes and decompresses to about 400 KB.
+      const frames = ["1", "2", "3", "4"].map((digit) =>
+        zlib.zstdCompressSync(encodeRequest(request(digit.repeat(32)))),
+      );
+      const read = binaryValues(lengthPrefixed(...frames), 1_000_000);
+      if (!read || "unsupported" in read) throw new Error("not read as binary OTLP");
+      const iterator = read.values[Symbol.iterator]();
+      expect(iterator.next().done).toBe(false);
+      // Nothing past the message in hand is decompressed yet.
+      expect(read.bytes()).toBeLessThan(500_000);
+      expect(iterator.next().done).toBe(false);
+      expect(iterator.next().done).toBe(true);
+      expect(read.problems).toEqual([
+        {
+          line: 3,
+          reason:
+            "the messages decompress to more than 1000000 bytes; this message and the 1 after it were not read",
+        },
+      ]);
+      expect(read.bytes()).toBeGreaterThan(800_000);
+    },
+  );
 });

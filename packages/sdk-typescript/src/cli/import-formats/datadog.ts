@@ -1,4 +1,9 @@
-import { ConversionError, isObject, type JsonValue } from "../traces-import-convert.js";
+import {
+  ConversionError,
+  isObject,
+  parseNestedJsonText,
+  type JsonValue,
+} from "../traces-import-convert.js";
 import type { ConvertContext, ImportAdapter } from "./adapter.js";
 import { identityText } from "./identity.js";
 import { unsigned } from "./otel-spans.js";
@@ -16,10 +21,13 @@ import { readRecords, type SpanKind, type SpanRow } from "./rows.js";
  *   text `undefined`.
  * - `start_ns` and `duration` are nanoseconds, as the SDKs record them. Datadog's own example
  *   answer shows a `start_ns` of millisecond size, so a `start_ns` under 10^14 is read as
- *   milliseconds and one under 10^17 as microseconds, each named in `hue.import.timing`
- *   (`start_ns_read_as_ms`, `start_ns_read_as_us`).
+ *   milliseconds and one under 10^17 as microseconds, and the span's `duration` in the same unit,
+ *   each named in `hue.import.timing` (`start_ns_read_as_ms` and `duration_read_as_ms`, or the
+ *   `_us` pair).
  * - `span_kind` names the kind (`llm`, `tool`, `agent`, `embedding`, `retrieval`; `workflow` and
- *   `task` record no operation); an `experiment` span is evaluation traffic.
+ *   `task` record no operation). An `experiment` span, and every span ddtrace tags with the
+ *   experiment it ran in (`experiment_id`), is evaluation traffic, so an export filtered to some
+ *   span kinds keeps its experiment spans out of production history too.
  * - LLM messages (`content`, `tool_calls`, `tool_results`) become GenAI message parts; a tool
  *   span's input and output values are its arguments and result.
  * - The conversation is `session_id` (or the `session_id` tag); the end user the `user_id`,
@@ -59,25 +67,28 @@ const KINDS: Record<string, SpanKind> = {
 /** A root span's `parent_id`. */
 const NO_PARENT = new Set(["undefined", "", "0"]);
 
-/** `start_ns` as Unix nanoseconds, with the rule that read it when it was not nanoseconds. */
-function startOf(value: JsonValue | undefined): { start: bigint; timing?: string } | undefined {
+/** `start_ns` as Unix nanoseconds, the unit it was read in (nanoseconds per unit) and the rule
+ * that read it when it was not nanoseconds. */
+function startOf(
+  value: JsonValue | undefined,
+): { start: bigint; scale: bigint; unit?: "ms" | "us" } | undefined {
   if (value === undefined || value === null) return undefined;
   const count = unsigned(value);
   if (!count) throw new ConversionError("start_ns is not a positive integer");
   if (count < 100_000_000_000_000n)
-    return { start: count * 1_000_000n, timing: "start_ns_read_as_ms" };
-  if (count < 100_000_000_000_000_000n)
-    return { start: count * 1_000n, timing: "start_ns_read_as_us" };
-  return { start: count };
+    return { start: count * 1_000_000n, scale: 1_000_000n, unit: "ms" };
+  if (count < 100_000_000_000_000_000n) return { start: count * 1_000n, scale: 1_000n, unit: "us" };
+  return { start: count, scale: 1n };
 }
 
-function durationOf(value: JsonValue | undefined): bigint | undefined {
+/** `duration` in the unit `start_ns` was read in, as nanoseconds. */
+function durationOf(value: JsonValue | undefined, scale: bigint): bigint | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "number" && Number.isFinite(value) && value >= 0)
-    return BigInt(Math.round(value));
+    return BigInt(Math.round(value * Number(scale)));
   const count = unsigned(value);
   if (count === undefined) throw new ConversionError("duration is not a count of nanoseconds");
-  return count;
+  return count * scale;
 }
 
 /** Tags (`key:value`) by key; a key tagged twice keeps its first value. */
@@ -143,7 +154,7 @@ function toolValue(raw: JsonValue | undefined): JsonValue | undefined {
   const value = io ? io.value : raw;
   if (typeof value !== "string") return value ?? undefined;
   try {
-    return JSON.parse(value) as JsonValue;
+    return parseNestedJsonText(value).value as JsonValue;
   } catch {
     return value;
   }
@@ -172,7 +183,13 @@ function readSpan(resource: Json, context: ConvertContext): void {
   const spanKind = text(span.span_kind);
   const kind = spanKind && Object.hasOwn(KINDS, spanKind) ? KINDS[spanKind] : undefined;
   const started = startOf(span.start_ns);
-  const duration = durationOf(span.duration);
+  const duration = durationOf(span.duration, started?.scale ?? 1n);
+  const timing = started?.unit
+    ? [
+        `start_ns_read_as_${started.unit}`,
+        ...(duration !== undefined ? [`duration_read_as_${started.unit}`] : []),
+      ].join("; ")
+    : undefined;
   const tool = kind === "tool";
   const row: SpanRow = {
     traceKey,
@@ -182,7 +199,7 @@ function readSpan(resource: Json, context: ConvertContext): void {
     ...(kind ? { kind } : {}),
     ...(started ? { start: started.start } : {}),
     ...(started && duration !== undefined ? { end: started.start + duration } : {}),
-    ...(started?.timing ? { timing: started.timing } : {}),
+    ...(timing ? { timing } : {}),
     record: resource,
     ...(metadata ? { metadata } : {}),
     attributes: {
@@ -204,7 +221,7 @@ function readSpan(resource: Json, context: ConvertContext): void {
   if (service) row.resource = { "service.name": service };
   const environment = tags.get("env");
   if (environment) row.environment = environment;
-  if (spanKind === "experiment") row.origin = "evaluation";
+  if (spanKind === "experiment" || tags.get("experiment_id")) row.origin = "evaluation";
   if (tool) {
     const args = toolValue(span.input);
     const result = toolValue(span.output);

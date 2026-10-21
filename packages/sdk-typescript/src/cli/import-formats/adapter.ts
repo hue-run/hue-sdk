@@ -1,4 +1,5 @@
 import type { ConvertedTrace, Refusal, TraceImportFormat } from "../traces-import-convert.js";
+import type { IdentityKeys } from "./identity.js";
 import type { EventRow, SpanRow } from "./rows.js";
 
 /**
@@ -25,6 +26,15 @@ export interface ImportAdapter {
   convert(value: unknown, context: ConvertContext): void;
 }
 
+/** Where a record was read, for the report: never written to a span. */
+export interface Location {
+  file: string;
+  /** 1-based line of JSON Lines. */
+  line?: number;
+  /** 1-based position in a JSON array. */
+  record?: number;
+}
+
 /** Where a value was read, for the report: never written to a span. */
 export interface ValueSource {
   /** The SHA-256 of the file's decoded content: the same for a renamed or recompressed copy. */
@@ -46,11 +56,16 @@ export interface ValueSource {
 /** Run-wide state a format gathers across files and lines; `finish` runs once all are read. */
 export interface TraceCollector {
   finish(): { traces: ConvertedTrace[]; refused: Refusal[] };
+  /** Whether the traces it emits already carry `--user-key` and `--session-key`, as the shared
+   * row emitter writes them; otherwise the reader applies the keys to its traces. */
+  readonly appliesKeys?: boolean;
 }
 
 /** What a format's `convert` hands its results to. */
 export interface ConvertContext {
   readonly source: ValueSource;
+  /** `--user-key` and `--session-key`, for a collector that emits rows itself. */
+  readonly keys: IdentityKeys;
   /** Adds one canonical span row; rows are grouped into traces by `traceKey` across every file
    * and line, and emitted as OTLP spans by the shared emitter (`rows.ts`). */
   row(row: SpanRow): void;

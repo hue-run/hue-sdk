@@ -371,6 +371,61 @@ describe("LangSmith runs", () => {
   });
 });
 
+describe("LangSmith token details", () => {
+  test("reads cache writes under every key LangSmith records them", async () => {
+    const { runs } = JSON.parse(await fixture("langsmith-runs.json")) as {
+      runs: Record<string, any>[];
+    };
+    const llm = runs.find((run) => run.run_type === "llm")!;
+    const withDetails = (id: string, fields: Record<string, unknown>) => ({
+      ...llm,
+      id,
+      trace_id: id,
+      parent_run_id: null,
+      dotted_order: undefined,
+      prompt_tokens: undefined,
+      prompt_token_details: undefined,
+      ...fields,
+    });
+    const [wrapped, v2] = [
+      "1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e21",
+      "1f0c6a2e-3b4d-4c5e-8f60-7a8b9c0d1e22",
+    ];
+    const usage = (details: Record<string, number>) => ({
+      ...llm.extra,
+      metadata: {
+        ...llm.extra.metadata,
+        usage_metadata: { input_tokens: 1300, output_tokens: 20, input_token_details: details },
+      },
+    });
+    const report = await prepareFiles({
+      "runs.jsonl": jsonl([
+        // LangSmith's own Anthropic wrapper records cache writes by their lifetime.
+        withDetails(wrapped!, {
+          extra: usage({
+            cache_read: 1000,
+            ephemeral_5m_input_tokens: 200,
+            ephemeral_1h_input_tokens: 50,
+          }),
+        }),
+        // The v2 runs API names them `cache_write` under `raw`.
+        withDetails(v2!, {
+          extra: usage({}),
+          prompt_token_details: { raw: { cache_read: 1000, cache_write: 40 } },
+        }),
+      ]),
+    });
+    const { spans } = await bundle(report.output_directory);
+    const cacheWrite = async (id: string) =>
+      int(
+        (await spans(derivedTrace("langsmith_runs", id)))[0]!,
+        "gen_ai.usage.cache_write.input_tokens",
+      );
+    expect(await cacheWrite(wrapped!)).toBe("250");
+    expect(await cacheWrite(v2!)).toBe("40");
+  });
+});
+
 describe("MLflow traces", () => {
   test("reads a trace, a list, JSON Lines and a search answer alike, keeping exact ids and times", async () => {
     const text = await fixture("mlflow-trace.json");
@@ -516,6 +571,40 @@ describe("MLflow traces", () => {
       user: "customer-9",
       session: "thread-7",
     });
+  });
+});
+
+describe("MLflow span links", () => {
+  test("keeps a span's links, to its own trace or another, as span links", async () => {
+    const trace = JSON.parse(await fixture("mlflow-trace.json")) as Record<string, any>;
+    const otherTrace = "0123456789abcdef0123456789abcdef";
+    const [, completions, tool] = trace.data.spans;
+    completions.links = [
+      {
+        trace_id: `tr-${otherTrace}`,
+        span_id: "1122334455667788",
+        attributes: { kind: "follows" },
+      },
+    ];
+    // A link to a span of the same trace, its id as Span.to_dict writes it (base64).
+    tool.links = [
+      { trace_id: `tr-${MLFLOW_TRACE}`, span_id: completions.span_id, attributes: null },
+    ];
+    const report = await prepareFiles({ "trace.json": JSON.stringify(trace) });
+    const { spans } = await bundle(report.output_directory);
+    const emitted = await spans(MLFLOW_TRACE);
+    const linksOf = (span: Span) => (span as Span & { links?: unknown[] }).links;
+    const model = named(emitted, completions.name);
+    expect(linksOf(model)).toEqual([
+      {
+        traceId: otherTrace,
+        spanId: "1122334455667788",
+        attributes: [{ key: "kind", value: { stringValue: "follows" } }],
+      },
+    ]);
+    expect(linksOf(named(emitted, "lookup_order"))).toEqual([
+      { traceId: MLFLOW_TRACE, spanId: model.spanId, attributes: [] },
+    ]);
   });
 });
 
@@ -680,5 +769,52 @@ describe("W&B Weave calls", () => {
     const failed = (await spans(derivedTrace("weave_calls", evaluation.trace_id)))[0]!;
     expect(failed.name).toBe("Evaluation.evaluate");
     expect(failed.status).toEqual({ code: 2, message: "KeyError: 'expected'" });
+  });
+  test("reads the kind of an integration's op from before Weave recorded kinds", async () => {
+    // Calls logged before op kinds existed carry no `attributes.weave.kind`.
+    const calls = (await fixture("weave-calls.jsonl"))
+      .trim()
+      .split("\n")
+      .map((line) => {
+        const call = JSON.parse(line) as Record<string, any>;
+        delete call.attributes.weave.kind;
+        return call;
+      });
+    const report = await prepareFiles({ "calls.jsonl": jsonl(calls) });
+    const { spans } = await bundle(report.output_directory);
+    const emitted = await spans(derivedTrace("weave_calls", WEAVE_TRACE));
+    const model = named(emitted, "openai.chat.completions.create");
+    expect(str(model, "gen_ai.operation.name")).toBe("chat");
+    expect(str(model, "gen_ai.request.model")).toBe("gpt-5");
+    expect(int(model, "gen_ai.usage.input_tokens")).toBe("1834");
+    // An op of the application's own records no kind it did not record.
+    expect(str(named(emitted, "support_agent"), "gen_ai.operation.name")).toBeUndefined();
+  });
+
+  test("declares a trace evaluation traffic for a root scorer, never for a guardrail inside it", async () => {
+    const calls = (await fixture("weave-calls.jsonl"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, any>);
+    const scorer = (id: string, traceId: string, parent: string | null) => ({
+      ...calls[2],
+      id,
+      trace_id: traceId,
+      parent_id: parent,
+      op_name: "weave:///synthetic-team/support-agent/op/ToxicityScorer.score:aGFzaA",
+      attributes: { weave: { kind: "scorer" } },
+    });
+    const standalone = "019a0a1c-4444-7aaa-8bbb-0000000000f4";
+    const report = await prepareFiles({
+      "calls.jsonl": jsonl([
+        ...calls,
+        // A guardrail the agent applied inside its own op: a span of its production trace.
+        scorer("019a0a1c-1111-7aaa-8bbb-000000000009", WEAVE_TRACE, calls[0]!.id),
+        scorer("019a0a1c-4444-7aaa-8bbb-000000000001", standalone, null),
+      ]),
+    });
+    const { trace } = await bundle(report.output_directory);
+    expect(trace(derivedTrace("weave_calls", WEAVE_TRACE)).origin).toBe("unknown");
+    expect(trace(derivedTrace("weave_calls", standalone)).origin).toBe("evaluation");
   });
 });

@@ -223,6 +223,7 @@ async function prepare(
       .join(" ");
   for (const file of report.files.unsupported) warn(`Not read: ${file.file}: ${file.reason}.`);
   for (const record of report.files.skipped) warn(`Not read: ${where(record)}: ${record.reason}.`);
+  for (const note of report.files.notes) warn(`Note: ${where(note)}: ${note.reason}.`);
   for (const refusal of report.traces.refused)
     warn(
       `Not converted: ${[where(refusal), refusal.trace_id ? `trace ${refusal.trace_id}` : undefined].filter(Boolean).join(" ")}: ${refusal.reason}.`,

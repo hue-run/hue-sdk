@@ -116,6 +116,16 @@ const CANDIDATES: Record<IdentityKind, readonly Candidate[]> = {
   session: candidates("session"),
 };
 
+/** Every attribute Hue reads a user, a conversation or an explicit owner from. */
+const IDENTITY_KEYS = new Set([
+  ...[...CANDIDATES.user, ...CANDIDATES.session].map((candidate) => candidate.key),
+  "hue.world.entity.id",
+  "hue.world.entity.namespace",
+]);
+
+/** Whether Hue reads an owner or a conversation from an attribute of this name. */
+export const namesIdentity = (key: string): boolean => IDENTITY_KEYS.has(key);
+
 /** A JSON object recorded as text is parsed only while it is this short. */
 const MAX_METADATA_TEXT = 64 * 1024;
 
@@ -186,17 +196,29 @@ export function readIdentity(
 
 // --- Reading emitted spans ---------------------------------------------------------------------
 
-/** An OTLP value in source form: an int64 stays its decimal text, a kvlist becomes an object. */
-function sourceValue(value: OtlpValue): JsonValue {
-  if (typeof value.stringValue === "string") return value.stringValue;
-  if (typeof value.boolValue === "boolean") return value.boolValue;
-  if (typeof value.doubleValue === "number") return value.doubleValue;
-  if (value.intValue !== undefined) return String(value.intValue);
-  if (typeof value.bytesValue === "string") return value.bytesValue;
-  if (value.arrayValue) return (value.arrayValue.values ?? []).map(sourceValue);
-  if (value.kvlistValue)
+/** An OTLP value in source form: an int64 stays its decimal text, a kvlist becomes an object.
+ * A value of no OTLP shape (a recorded span need not have one) is null. */
+function sourceValue(value: unknown): JsonValue {
+  if (!isObject(value)) return null;
+  const { stringValue, boolValue, doubleValue, intValue, bytesValue } = value as OtlpValue;
+  if (typeof stringValue === "string") return stringValue;
+  if (typeof boolValue === "boolean") return boolValue;
+  if (typeof doubleValue === "number") return doubleValue;
+  if (typeof intValue === "string" || typeof intValue === "number") return String(intValue);
+  if (typeof bytesValue === "string") return bytesValue;
+  const list = (field: "arrayValue" | "kvlistValue"): unknown[] | undefined => {
+    const holder = value[field];
+    const values = isObject(holder) ? holder.values : undefined;
+    return Array.isArray(values) ? values : isObject(holder) ? [] : undefined;
+  };
+  const array = list("arrayValue");
+  if (array) return array.map(sourceValue);
+  const kvlist = list("kvlistValue");
+  if (kvlist)
     return Object.fromEntries(
-      (value.kvlistValue.values ?? []).map((item) => [item.key, sourceValue(item.value ?? {})]),
+      kvlist.flatMap((item) =>
+        isObject(item) && typeof item.key === "string" ? [[item.key, sourceValue(item.value)]] : [],
+      ),
     );
   return null;
 }
@@ -206,7 +228,7 @@ function sourceMap(attributes: unknown): Map<string, JsonValue> {
   if (!Array.isArray(attributes)) return map;
   for (const item of attributes as unknown[])
     if (isObject(item) && typeof item.key === "string" && isObject(item.value))
-      map.set(item.key, sourceValue(item.value as OtlpValue));
+      map.set(item.key, sourceValue(item.value));
   return map;
 }
 
@@ -320,30 +342,43 @@ function decideStep(carriers: readonly Carrier[]): Owner | "none" | undefined {
   return unique.size === 1 ? found[0] : "none";
 }
 
+/** The ids of the spans `marked` picks and of every span beneath one, walked from them down
+ * without recursion; a parent chain that closes on itself reaches nothing marked on its own. */
+export function subtreeIds<T extends { spanId: string; parentSpanId?: string }>(
+  spans: readonly T[],
+  marked: (span: T) => boolean,
+): Set<string> {
+  const children = new Map<string, string[]>();
+  for (const span of spans) {
+    if (span.parentSpanId === undefined) continue;
+    const held = children.get(span.parentSpanId);
+    if (held) held.push(span.spanId);
+    else children.set(span.parentSpanId, [span.spanId]);
+  }
+  const found = new Set<string>();
+  const pending = spans.filter(marked).map((span) => span.spanId);
+  while (pending.length) {
+    const id = pending.pop()!;
+    if (found.has(id)) continue;
+    found.add(id);
+    for (const child of children.get(id) ?? []) pending.push(child);
+  }
+  return found;
+}
+
 /** The spans the agent itself recorded, split into local roots and the rest: a tool span and
  * every span beneath one are left out. */
 export function agentSpans<T extends { spanId: string; parentSpanId?: string }>(
   spans: readonly T[],
   tool: (span: T) => boolean,
 ): { roots: T[]; others: T[] } {
-  const byId = new Map<string, T[]>();
-  for (const span of spans) byId.set(span.spanId, [...(byId.get(span.spanId) ?? []), span]);
-  const underTool = new Map<string, boolean>();
-  const toolPath = (id: string): boolean => {
-    const known = underTool.get(id);
-    if (known !== undefined) return known;
-    underTool.set(id, false); // a cycle reads as no tool ancestor
-    const result = (byId.get(id) ?? []).some(
-      (span) => tool(span) || (span.parentSpanId !== undefined && toolPath(span.parentSpanId)),
-    );
-    underTool.set(id, result);
-    return result;
-  };
+  const ids = new Set(spans.map((span) => span.spanId));
+  const underTool = subtreeIds(spans, tool);
   const roots: T[] = [];
   const others: T[] = [];
   for (const span of spans) {
-    if (toolPath(span.spanId)) continue;
-    if (span.parentSpanId === undefined || !byId.has(span.parentSpanId)) roots.push(span);
+    if (underTool.has(span.spanId)) continue;
+    if (span.parentSpanId === undefined || !ids.has(span.parentSpanId)) roots.push(span);
     else others.push(span);
   }
   return { roots, others };
@@ -547,8 +582,8 @@ function recordOf(view: SpanView): unknown {
  * Applies `--user-key` and `--session-key` to a trace whose spans are kept as converted (OTLP,
  * Langfuse, ATIF): a span's bytes never change, so a trace also sent live does not conflict.
  * When a key names one user across the agent's spans and the trace names no owner, a child span
- * `hue.import.user` with the single attribute `user.id` is added under the trace's earliest local
- * root, which Hue reads as one of the agent's spans; `hue.import.session` with
+ * `hue.import.user` with the single attribute `user.id` is added under the agent's earliest local
+ * root (never a tool span), which Hue reads as one of the agent's spans; `hue.import.session` with
  * `gen_ai.conversation.id` likewise names a session the trace lacks. An owner the spans already
  * name is kept: Hue reads it before any added span.
  */
@@ -560,8 +595,11 @@ export function applyIdentityKeys(trace: ConvertedTrace, keys: IdentityKeys): vo
   const tool = (view: SpanView) => isToolSpan(view.attributes);
   const current = traceIdentity(trace.entries);
   const ids = new Set(views.map((view) => view.spanId));
-  const ordered = [...views].sort(byStart);
-  const root = ordered.find((view) => !view.parentSpanId || !ids.has(view.parentSpanId))!;
+  // The added span goes under the agent's earliest local root, where Hue reads it: never under a
+  // tool span, whose subtree never names the owner. A trace whose every span is a tool's, or
+  // whose parents close on themselves, has no such root and gains nothing.
+  const [root] = agentSpans(views, tool).roots.sort(byStart);
+  if (!root) return;
   const rootEntry = trace.entries.find((entry) => entry.scopeSpans[0]?.spans[0] === root.span);
   const add = (name: string, attribute: OtlpAttribute) => {
     let spanId = digestHex(`${name}:${trace.traceId}`, 16);

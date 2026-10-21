@@ -1,7 +1,7 @@
 import {
   ConversionError,
   isObject,
-  parseJsonText,
+  parseNestedJsonText,
   type JsonValue,
 } from "../traces-import-convert.js";
 import { identityText } from "./identity.js";
@@ -36,8 +36,16 @@ export function first(
   return undefined;
 }
 
-/** The metadata fields applications name the end user by. */
-export const USER_FIELDS = ["user_id", "userId", "user.id", "enduser.id"];
+/** The end user a metadata map names: the fields Hue reads in a metadata map, in its order
+ * (`userId`, `user_id`, `langfuse_user_id`), then OpenTelemetry's `user.id` and `enduser.id`
+ * as an exporter copied them in. `user.id` beside `user.account_uuid` is a Claude Code
+ * installation, not a user, and is passed over as Hue passes it over. */
+export function metadataUser(metadata: JsonObject | undefined): string | undefined {
+  const user = first(metadata, ["userId", "user_id", "langfuse_user_id"]);
+  if (user !== undefined) return user;
+  const installation = metadata?.["user.account_uuid"] !== undefined;
+  return first(metadata, installation ? ["enduser.id"] : ["user.id", "enduser.id"]);
+}
 /** The metadata fields applications name the conversation by. */
 export const SESSION_FIELDS = [
   "session_id",
@@ -68,11 +76,12 @@ export function isoNanos(value: JsonValue | undefined): bigint {
 }
 
 /** A JSON value recorded as itself or as its JSON text (a column a warehouse export stores as
- * text); text that is not JSON is undefined. Integers beyond JavaScript's range stay decimal text. */
+ * text); text that is not JSON, or nests too deep to read, is undefined. Integers beyond
+ * JavaScript's range stay decimal text. */
 export function jsonOf(value: JsonValue | undefined): JsonValue | undefined {
   if (typeof value !== "string") return value;
   try {
-    return parseJsonText(value).value as JsonValue;
+    return parseNestedJsonText(value).value as JsonValue;
   } catch {
     return undefined;
   }

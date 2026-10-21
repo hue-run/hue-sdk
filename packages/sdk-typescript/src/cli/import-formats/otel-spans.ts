@@ -2,9 +2,11 @@ import {
   BlobSink,
   canonicalJson,
   ConversionError,
+  conversionFailure,
   digestHex,
   MAX_INLINE_VALUE_BYTES,
   offloadOtlpValues,
+  sha256Hex,
   SOURCE_RECORD,
   validateSource,
   type ConvertedTrace,
@@ -16,7 +18,7 @@ import {
   type TraceImportOrigin,
 } from "../traces-import-convert.js";
 import type { TraceCollector } from "./adapter.js";
-import { rowTraceId, timesOf, type SpanRow } from "./rows.js";
+import { cyclic, rowTraceId, timesOf, type SpanRow } from "./rows.js";
 
 /**
  * Spans of formats that record OpenTelemetry's span model in a shape of their own (Jaeger,
@@ -133,7 +135,7 @@ export class OtelSpanCollector implements TraceCollector {
       this.traces.set(traceKey, draft);
     }
     draft.sourceDigests.add(sourceDigest);
-    const copy = `${span.spanKey}\u0000${canonicalJson(span.record)}\u0000${JSON.stringify(span.resource)}`;
+    const copy = `${span.spanKey}\u0000${sha256Hex(`${canonicalJson(span.record)}\u0000${JSON.stringify(span.resource)}`)}`;
     if (!draft.spans.has(copy)) draft.spans.set(copy, span);
   }
 
@@ -141,12 +143,15 @@ export class OtelSpanCollector implements TraceCollector {
     const traces: ConvertedTrace[] = [];
     const refused: Refusal[] = [];
     for (const [traceKey, draft] of this.traces) {
+      // Each draft is let go once its trace is emitted, so a run holds one copy of each record.
+      this.traces.delete(traceKey);
       const traceId = rowTraceId(this.format, traceKey);
       try {
         traces.push(this.emit(traceKey, traceId, draft, refused));
       } catch (error) {
-        if (!(error instanceof ConversionError)) throw error;
-        refused.push({ traceId, reason: error.message });
+        const failure = conversionFailure(error);
+        if (!failure) throw error;
+        refused.push({ traceId, reason: failure.message });
       }
     }
     return { traces, refused };
@@ -200,13 +205,7 @@ export class OtelSpanCollector implements TraceCollector {
       row.parentKey !== undefined && row.parentKey !== row.spanKey && rows.has(row.parentKey)
         ? row.parentKey
         : undefined;
-    for (const key of keys) {
-      const seen = new Set<string>();
-      for (let at: string | undefined = key; at !== undefined; at = parentOf(rows.get(at)!)) {
-        if (seen.has(at)) throw new ConversionError("The source hierarchy contains a cycle");
-        seen.add(at);
-      }
-    }
+    if (cyclic(rows, parentOf)) throw new ConversionError("The source hierarchy contains a cycle");
     const { starts, ends, notes } = timesOf(rows, parentOf);
     const traceNotes = new Set([...notes.values()].flat());
     const blobs = new BlobSink();

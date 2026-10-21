@@ -129,6 +129,42 @@ export interface Refusal {
 
 export class ConversionError extends Error {}
 
+/**
+ * A failure that refuses only what was being read: a ConversionError as itself, and a RangeError
+ * (a value too large or nested too deep for a reader to walk) as one. Anything else is a defect
+ * and is undefined, for the caller to rethrow.
+ */
+export function conversionFailure(error: unknown): ConversionError | undefined {
+  if (error instanceof ConversionError) return error;
+  if (error instanceof RangeError)
+    return new ConversionError("the record is too large or nested too deep to read");
+  return undefined;
+}
+
+/** How deep a value read from a source may nest: far beyond any export's records, and well
+ * inside what the readers and serializers that walk a value can follow. */
+export const MAX_SOURCE_NESTING = 512;
+
+/** Whether a parsed JSON value nests deeper than `max` levels, walked without recursion and
+ * holding only the path to the value being looked at. */
+export function nestedTooDeep(value: unknown, max = MAX_SOURCE_NESTING): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const members = (item: object) => (Array.isArray(item) ? item : Object.values(item));
+  const path: { items: unknown[]; next: number }[] = [{ items: members(value), next: 0 }];
+  while (path.length) {
+    const level = path[path.length - 1]!;
+    if (level.next >= level.items.length) {
+      path.pop();
+      continue;
+    }
+    const child = level.items[level.next++];
+    if (child === null || typeof child !== "object") continue;
+    if (path.length >= max) return true;
+    path.push({ items: members(child), next: 0 });
+  }
+  return false;
+}
+
 export const sha256Hex = (value: string | Uint8Array) =>
   createHash("sha256").update(value).digest("hex");
 export const digestHex = (text: string, length: number) => sha256Hex(text).slice(0, length);
@@ -188,6 +224,21 @@ export function parseJsonText(text: string): { value: unknown; unsafeIntegers: b
     throw error;
   }
 }
+
+/** JSON text a record holds (metadata values, tool arguments, a column a warehouse stores as text)
+ * parsed as {@link parseJsonText} parses it; text nested deeper than {@link MAX_SOURCE_NESTING}
+ * throws, so the caller keeps it as the text it is. */
+export function parseNestedJsonText(text: string): { value: unknown; unsafeIntegers: boolean } {
+  const parsed = parseJsonText(text);
+  if (nestedTooDeep(parsed.value)) throw new ConversionError("JSON text nested too deep");
+  return parsed;
+}
+
+/** Langfuse's experiment and evaluator environments (`sdk-experiment`, `langfuse-…`): traffic
+ * Langfuse itself marks as evaluation. */
+export const langfuseEvaluationEnvironment = (environment: unknown): boolean =>
+  environment === "sdk-experiment" ||
+  (typeof environment === "string" && environment.startsWith("langfuse-"));
 
 /** Refuses a source value that JavaScript or OTLP cannot retain exactly; never omits it. */
 export function validateSource(value: JsonValue, depth = 0): void {
@@ -396,9 +447,11 @@ function attributeMap(attributes: readonly OtlpAttribute[]): Map<string, OtlpVal
 
 interface OtlpSpanDraft {
   spanId: string;
+  parentSpanId?: string;
   start: bigint;
   entry: ImportEntry;
-  canonical: string;
+  /** The SHA-256 of the entry's JSON, which a copy of the span must match. */
+  digest: string;
 }
 
 interface OtlpTraceDraft {
@@ -430,29 +483,40 @@ export class OtlpTraceCollector {
       for (const groupValue of groups) {
         if (!isObject(groupValue)) continue;
         const { scopeSpans, ...resourceGroup } = groupValue;
-        const resource = isObject(resourceGroup.resource)
-          ? attributeMap(readAttributes(resourceGroup.resource.attributes) ?? [])
-          : new Map<string, OtlpValue>();
+        const resourceAttributes = isObject(resourceGroup.resource)
+          ? readAttributes(resourceGroup.resource.attributes)
+          : [];
+        const resource = attributeMap(resourceAttributes ?? []);
         for (const scopeValue of Array.isArray(scopeSpans) ? scopeSpans : []) {
           if (!isObject(scopeValue)) continue;
           const { spans, ...scopeGroup } = scopeValue;
           const scopeName = isObject(scopeGroup.scope) ? scopeGroup.scope.name : undefined;
           for (const spanValue of Array.isArray(spans) ? spans : []) {
             try {
+              if (resourceAttributes === undefined)
+                throw new ConversionError("the span's resource has malformed attributes");
               this.addSpan(spanValue, resourceGroup, scopeGroup, resource, scopeName, sourceDigest);
             } catch (error) {
-              if (!(error instanceof ConversionError)) throw error;
+              const failure = conversionFailure(error);
+              if (!failure) throw error;
               // A malformed span refuses its trace, never leaving a partial one; a span that names
               // no trace is refused alone.
-              const id = otlpTraceId(isObject(spanValue) ? spanValue.traceId : undefined);
-              if (id) this.draft(id.traceId, id.remapped).conflict ??= error.message;
-              refused.push({ ...(id ? { traceId: id.traceId } : {}), reason: error.message });
+              const traceId = isObject(spanValue) ? spanValue.traceId : undefined;
+              refused.push(this.refuse(traceId, failure.message));
             }
           }
         }
       }
     }
     return refused;
+  }
+
+  /** Refuses the trace a span names (its id as recorded), whatever else of it is read; a span
+   * that names no trace is refused alone. */
+  refuse(traceIdValue: unknown, reason: string): Refusal {
+    const id = otlpTraceId(traceIdValue);
+    if (id) this.draft(id.traceId, id.remapped).conflict ??= reason;
+    return { ...(id ? { traceId: id.traceId } : {}), reason };
   }
 
   private addSpan(
@@ -509,11 +573,11 @@ export class OtlpTraceCollector {
       ...resourceGroup,
       scopeSpans: [{ ...scopeGroup, spans: [span] }],
     };
-    const canonical = JSON.stringify(entry);
+    const digest = sha256Hex(JSON.stringify(entry));
     const held = trace.spans.get(spanId);
     if (held) {
       // The same span sent twice is one span; another payload under its id is a conflict.
-      if (held.canonical !== canonical)
+      if (held.digest !== digest)
         trace.conflict ??= `span ${spanId} appears with different content`;
       trace.sourceDigests.add(sourceDigest);
       return;
@@ -533,9 +597,10 @@ export class OtlpTraceCollector {
     trace.sourceDigests.add(sourceDigest);
     trace.spans.set(spanId, {
       spanId,
+      ...(parentSpanId ? { parentSpanId } : {}),
       start: BigInt(start),
       entry,
-      canonical,
+      digest,
     });
   }
 
@@ -562,9 +627,25 @@ export class OtlpTraceCollector {
   finish(): { traces: ConvertedTrace[]; refused: Refusal[] } {
     const traces: ConvertedTrace[] = [];
     const refused: Refusal[] = [];
-    for (const draft of this.traces.values()) {
+    for (const [key, draft] of this.traces) {
+      // Each draft is let go once its trace is converted.
+      this.traces.delete(key);
       if (draft.conflict) {
         refused.push({ traceId: draft.traceId, reason: draft.conflict });
+        continue;
+      }
+      // A parent outside the trace is a root, as OTLP allows; a parent chain that closes on
+      // itself leaves the trace without one and is refused.
+      const parents = new Map(
+        [...draft.spans.values()].map((span) => [
+          span.spanId,
+          span.parentSpanId !== undefined && draft.spans.has(span.parentSpanId)
+            ? span.parentSpanId
+            : undefined,
+        ]),
+      );
+      if (ancestryIssue(parents) === "cyclic_ancestry") {
+        refused.push({ traceId: draft.traceId, reason: "The source hierarchy contains a cycle" });
         continue;
       }
       const spans = [...draft.spans.values()].sort((a, b) =>
@@ -600,13 +681,41 @@ function otlpTraceId(value: unknown): { traceId: string; remapped: boolean } | u
     : { traceId: digestHex(`otlp.trace:${value}`, 32), remapped: true };
 }
 
+/** Whether a recorded OTLP `AnyValue` has the shape OTLP/JSON gives it: an object whose
+ * `arrayValue` and `kvlistValue` hold lists of values and of keyed values. Walked without
+ * recursion. */
+function validOtlpValue(value: unknown): boolean {
+  const stack: unknown[] = [value];
+  while (stack.length) {
+    const item = stack.pop();
+    if (!isObject(item)) return false;
+    for (const [field, keyed] of [
+      ["arrayValue", false],
+      ["kvlistValue", true],
+    ] as const) {
+      const list = item[field];
+      if (list === undefined || list === null) continue;
+      if (!isObject(list)) return false;
+      const values = list.values ?? [];
+      if (!Array.isArray(values)) return false;
+      for (const entry of values) {
+        if (!keyed) stack.push(entry);
+        else if (!isObject(entry) || typeof entry.key !== "string") return false;
+        else if (entry.value !== undefined && entry.value !== null) stack.push(entry.value);
+      }
+    }
+  }
+  return true;
+}
+
 /** An OTLP attribute list as recorded, or undefined when it is malformed. */
 function readAttributes(value: unknown): OtlpAttribute[] | undefined {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) return undefined;
   const attributes: OtlpAttribute[] = [];
   for (const item of value) {
-    if (!isObject(item) || typeof item.key !== "string" || !isObject(item.value)) return undefined;
+    if (!isObject(item) || typeof item.key !== "string" || !validOtlpValue(item.value))
+      return undefined;
     attributes.push(item as unknown as OtlpAttribute);
   }
   return attributes;
@@ -714,7 +823,8 @@ function ancestryIssue(
 
 interface LangfuseTraceDraft {
   originalTraceId: string;
-  observations: Map<string, { record: Record<string, JsonValue>; canonical: string }>;
+  /** Each observation and the SHA-256 of its canonical JSON, which a copy must match. */
+  observations: Map<string, { record: Record<string, JsonValue>; digest: string }>;
   envelopes: Map<string, string>;
   sourceDigests: Set<string>;
   conflict?: string;
@@ -734,33 +844,47 @@ export class LangfuseTraceCollector {
     for (const observation of observations) {
       const traceId = text(observation.traceId, true);
       const id = text(observation.id, true);
-      let draft = this.traces.get(traceId);
-      if (!draft) {
-        draft = {
-          originalTraceId: traceId,
-          observations: new Map(),
-          envelopes: new Map(),
-          sourceDigests: new Set(),
-        };
-        this.traces.set(traceId, draft);
-      }
+      const draft = this.draft(traceId);
       draft.sourceDigests.add(sourceDigest);
       draft.envelopes.set(sourceDigest, envelopeText);
-      const canonical = canonicalJson(observation);
+      const digest = sha256Hex(canonicalJson(observation));
       const held = draft.observations.get(id);
       if (held) {
-        if (held.canonical !== canonical)
+        if (held.digest !== digest)
           draft.conflict ??= `observation ${id} appears with different content`;
         continue;
       }
-      draft.observations.set(id, { record: observation, canonical });
+      draft.observations.set(id, { record: observation, digest });
     }
+  }
+
+  /** Refuses a trace by its Langfuse id, whatever else of it is read. */
+  refuse(traceId: string, reason: string, sourceDigest: string): void {
+    const draft = this.draft(traceId);
+    draft.sourceDigests.add(sourceDigest);
+    draft.conflict ??= reason;
+  }
+
+  private draft(traceId: string): LangfuseTraceDraft {
+    let draft = this.traces.get(traceId);
+    if (!draft) {
+      draft = {
+        originalTraceId: traceId,
+        observations: new Map(),
+        envelopes: new Map(),
+        sourceDigests: new Set(),
+      };
+      this.traces.set(traceId, draft);
+    }
+    return draft;
   }
 
   finish(): { traces: ConvertedTrace[]; refused: Refusal[] } {
     const traces: ConvertedTrace[] = [];
     const refused: Refusal[] = [];
-    for (const draft of this.traces.values()) {
+    for (const [key, draft] of this.traces) {
+      // Each draft is let go once its trace is converted.
+      this.traces.delete(key);
       const traceId = hueTraceId(draft.originalTraceId);
       if (draft.conflict) {
         refused.push({ traceId, reason: draft.conflict });
@@ -769,8 +893,9 @@ export class LangfuseTraceCollector {
       try {
         traces.push(convertLangfuseTrace(draft, traceId));
       } catch (error) {
-        if (!(error instanceof ConversionError)) throw error;
-        refused.push({ traceId, reason: error.message });
+        const failure = conversionFailure(error);
+        if (!failure) throw error;
+        refused.push({ traceId, reason: failure.message });
       }
     }
     return { traces, refused };
@@ -831,7 +956,8 @@ function convertLangfuseTrace(draft: LangfuseTraceDraft, traceId: string): Conve
   }
   // The origin markers the OTLP reader applies, read from the converted attributes with the same
   // precedence: an evaluation's or a simulated world's records are never production history,
-  // whatever environment the export was taken from.
+  // whatever environment the export was taken from. Langfuse's own experiment and evaluator
+  // environments are evaluation traffic too, as the `langfuse` format reads them.
   let production = false;
   let evaluation = false;
   let simulation = false;
@@ -917,6 +1043,7 @@ function convertLangfuseTrace(draft: LangfuseTraceDraft, traceId: string): Conve
     }
     attributes.add("hue.import.status_source", "langfuse.level");
     if (observation.environment === "production") production = true;
+    if (langfuseEvaluationEnvironment(observation.environment)) evaluation = true;
     const message = text(observation.statusMessage);
     const span: ImportSpan = {
       traceId,

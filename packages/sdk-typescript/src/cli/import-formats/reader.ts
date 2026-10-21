@@ -1,10 +1,24 @@
-import { ConversionError, sha256Hex, type ConvertedTrace } from "../traces-import-convert.js";
-import type { ConvertContext, ImportAdapter, TraceCollector, ValueSource } from "./adapter.js";
-import { decodeContainer, parseValues } from "./containers.js";
+import {
+  conversionFailure,
+  MAX_SOURCE_NESTING,
+  nestedTooDeep,
+  sha256Hex,
+  type ConvertedTrace,
+} from "../traces-import-convert.js";
+import type {
+  ConvertContext,
+  ImportAdapter,
+  Location,
+  TraceCollector,
+  ValueSource,
+} from "./adapter.js";
+import { decodeContainer, parseValues, type ParsedValue } from "./containers.js";
 import { applyIdentityKeys, traceIdentity, type IdentityKeys } from "./identity.js";
 import { binaryValues } from "./otlp-protobuf.js";
 import { adapterFor, importAdapters, unrecognizedReason } from "./registry.js";
 import { RowTraceCollector, rowTraceId } from "./rows.js";
+
+export type { Location } from "./adapter.js";
 
 /**
  * Reads source files through the containers and the format registry (`registry.ts`) and gathers
@@ -12,16 +26,12 @@ import { RowTraceCollector, rowTraceId } from "./rows.js";
  * records of a JSON array) and traces, each named with where it was found.
  */
 
-/** Records of one file reported as not read; past this many the rest are counted. */
-const MAX_SKIPPED_PER_FILE = 100;
-
-export interface Location {
-  file: string;
-  /** 1-based line of JSON Lines. */
-  line?: number;
-  /** 1-based position in a JSON array. */
-  record?: number;
-}
+/** Records of one file reported as not read, or notes on one file; past this many the rest are
+ * counted. */
+const MAX_REPORTED_PER_FILE = 100;
+/** Records of a JSON array no format reads, in a row from its start, after which the rest of the
+ * array is not looked at: it is not an export of any format. */
+const MAX_UNCLAIMED_RUN = 1000;
 
 export interface ReadResult {
   /** Every trace read, in trace id order, its identity read as Hue reads it. */
@@ -29,7 +39,39 @@ export interface ReadResult {
   supported: { file: string; format: string; traces: number }[];
   unsupported: { file: string; reason: string }[];
   skipped: (Location & { reason: string })[];
+  /** What was read with a repair, or read once though the input held it more than once. */
+  notes: (Location & { reason: string })[];
   refused: (Partial<Location> & { trace_id?: string; reason: string })[];
+}
+
+/** One file's reported records: the first `MAX_REPORTED_PER_FILE` kept, the rest counted. */
+class Reported {
+  readonly items: (Location & { reason: string })[] = [];
+  private more = 0;
+  constructor(private readonly file: string) {}
+  add(item: Omit<Location, "file"> & { reason: string }): void {
+    if (this.items.length < MAX_REPORTED_PER_FILE) this.items.push({ file: this.file, ...item });
+    else this.more++;
+  }
+  /** The kept items in the order of the file, and one counting the rest. */
+  finish(what: string): (Location & { reason: string })[] {
+    const items = this.items.sort(
+      (a, b) => (a.line ?? 0) - (b.line ?? 0) || (a.record ?? 0) - (b.record ?? 0),
+    );
+    return this.more ? [...items, { file: this.file, reason: `${this.more} more ${what}` }] : items;
+  }
+}
+
+/** Where a duplicate was first read, as the report names it from `file`. */
+function where(earlier: Location, file: string): string {
+  const position =
+    earlier.line !== undefined
+      ? `line ${earlier.line}`
+      : earlier.record !== undefined
+        ? `record ${earlier.record}`
+        : "";
+  if (earlier.file === file) return position || "earlier in the file";
+  return position ? `${earlier.file} ${position}` : earlier.file;
 }
 
 export class ImportReader {
@@ -51,7 +93,12 @@ export class ImportReader {
       unsupported?: ReadResult["unsupported"];
     },
   ) {
-    this.result = { unsupported: options.unsupported ?? [], skipped: [], refused: [] };
+    this.result = {
+      unsupported: options.unsupported ?? [],
+      skipped: [],
+      notes: [],
+      refused: [],
+    };
   }
 
   /** Reads one file's bytes; returns the size of its decoded content. */
@@ -61,26 +108,31 @@ export class ImportReader {
       this.result.unsupported.push({ file, reason: decoded.unsupported });
       return raw.byteLength;
     }
-    const parsed =
-      binaryValues(decoded.bytes, this.options.maxFileBytes) ?? parseValues(decoded.bytes);
+    const binary = binaryValues(decoded.bytes, this.options.maxFileBytes);
+    const parsed = binary ?? parseValues(decoded.bytes);
     if ("unsupported" in parsed) {
       this.result.unsupported.push({ file, reason: parsed.unsupported });
       return decoded.bytes.byteLength;
     }
+    const size = () => ("bytes" in parsed ? parsed.bytes() : decoded.bytes.byteLength);
     const digest = sha256Hex(decoded.bytes);
-    const skipped: ReadResult["skipped"] = parsed.problems.map((problem) => ({ file, ...problem }));
+    const skipped = new Reported(file);
+    const notes = new Reported(file);
+    if (decoded.note) notes.add({ reason: decoded.note });
     const failures: string[] = [];
     let claimed = false;
+    let firstReason: string | undefined;
     /** Converts a value with the format that claims it; the reason it was not read otherwise. */
     const offer = (value: unknown, source: ValueSource): string | undefined => {
       const adapter = adapterFor(value);
       if (!adapter) return unrecognizedReason(value);
       try {
-        this.convert(adapter, value, file, source);
+        this.convert(adapter, value, file, source, notes);
       } catch (error) {
-        if (!(error instanceof ConversionError)) throw error;
-        failures.push(error.message);
-        return error.message;
+        const failure = conversionFailure(error);
+        if (!failure) throw error;
+        failures.push(failure.message);
+        return failure.message;
       }
       claimed = true;
       const key = `${file}\u0000${adapter.id}`;
@@ -88,50 +140,87 @@ export class ImportReader {
         this.supported.set(key, { file, format: adapter.id, traces: 0 });
       return undefined;
     };
-    for (const item of parsed.values) {
+    const tooDeep = `JSON nested more than ${MAX_SOURCE_NESTING} levels deep`;
+    /** The records of an array no format reads whole, each offered on its own. */
+    const offerRecords = (records: unknown[], source: ValueSource, line: { line?: number }) => {
+      let run = 0;
+      let claimedAny = false;
+      for (const [index, element] of records.entries()) {
+        if (!claimedAny && run >= MAX_UNCLAIMED_RUN) {
+          skipped.add({
+            ...line,
+            reason: `${records.length - index} more records not read: no format reads the first ${MAX_UNCLAIMED_RUN}`,
+          });
+          return;
+        }
+        let problem: string | undefined;
+        if (nestedTooDeep(element)) problem = tooDeep;
+        else {
+          let text: string | undefined;
+          // A record's text is made only when a format asks for it.
+          problem = offer(element, {
+            digest,
+            unsafeIntegers: source.unsafeIntegers,
+            get text() {
+              return (text ??= JSON.stringify(element));
+            },
+            get bytes() {
+              return Buffer.byteLength(this.text);
+            },
+            ...line,
+            index,
+          });
+        }
+        if (problem === undefined) claimedAny = true;
+        else {
+          run++;
+          skipped.add({ ...line, record: index + 1, reason: problem });
+        }
+      }
+    };
+    for (const item of parsed.values as Iterable<ParsedValue>) {
       const line = item.line !== undefined ? { line: item.line } : {};
       const source: ValueSource = {
         digest,
-        text: item.text,
-        bytes: Buffer.byteLength(item.text),
+        get text() {
+          return item.text;
+        },
+        get bytes() {
+          return Buffer.byteLength(item.text);
+        },
         unsafeIntegers: item.unsafeIntegers,
         ...line,
       };
-      const reason = offer(item.value, source);
+      if (item.note) notes.add({ ...line, reason: item.note });
+      const deep = nestedTooDeep(item.value);
+      const reason = deep ? tooDeep : offer(item.value, source);
+      firstReason ??= reason;
       if (reason === undefined) continue;
-      if (Array.isArray(item.value) && item.value.length && adapterFor(item.value) === undefined) {
-        for (const [index, element] of item.value.entries()) {
-          const text = JSON.stringify(element);
-          const problem = offer(element, {
-            ...source,
-            text,
-            bytes: Buffer.byteLength(text),
-            index,
-          });
-          if (problem !== undefined)
-            skipped.push({ file, ...line, record: index + 1, reason: problem });
-        }
+      // An array no format reads whole (or too deep to read whole) is read record by record.
+      if (
+        Array.isArray(item.value) &&
+        item.value.length &&
+        (deep || adapterFor(item.value) === undefined)
+      ) {
+        offerRecords(item.value, source, line);
         continue;
       }
-      skipped.push({ file, ...line, reason });
+      skipped.add({ ...line, reason });
     }
+    for (const problem of parsed.problems) skipped.add(problem);
     if (!claimed) {
       // Nothing in the file was read: the file is reported, not each of its records.
       this.result.unsupported.push({
         file,
-        reason: failures[0] ?? unrecognizedReason(parsed.values[0]!.value),
+        reason: failures[0] ?? firstReason ?? parsed.problems[0]?.reason ?? "no value was read",
       });
-      return decoded.bytes.byteLength;
+      return size();
     }
     const names = this.fileNames.get(digest) ?? new Set<string>();
     this.fileNames.set(digest, names.add(file));
-    this.result.skipped.push(...skipped.slice(0, MAX_SKIPPED_PER_FILE));
-    if (skipped.length > MAX_SKIPPED_PER_FILE)
-      this.result.skipped.push({
-        file,
-        reason: `${skipped.length - MAX_SKIPPED_PER_FILE} more records were not read`,
-      });
-    return decoded.bytes.byteLength;
+    this.result.skipped.push(...skipped.finish("records were not read"));
+    this.result.notes.push(...notes.finish("notes"));
+    return size();
   }
 
   private rows(format: string): RowTraceCollector {
@@ -143,16 +232,36 @@ export class ImportReader {
     return collector;
   }
 
-  private convert(adapter: ImportAdapter, value: unknown, file: string, source: ValueSource): void {
+  private convert(
+    adapter: ImportAdapter,
+    value: unknown,
+    file: string,
+    source: ValueSource,
+    notes: Reported,
+  ): void {
     const at: Location = {
       file,
       ...(source.line !== undefined ? { line: source.line } : {}),
       ...(source.index !== undefined ? { record: source.index + 1 } : {}),
     };
+    // Rows the value gave and those an identical copy of which was already read elsewhere: a
+    // value that gave nothing new is noted, so a collapsed duplicate is never silent.
+    let rows = 0;
+    let duplicates = 0;
+    let earlier: Location | undefined;
+    const repeats = new Map<string, number>();
     const context: ConvertContext = {
       source,
-      row: (row) => this.rows(adapter.id).add(row, source.digest),
-      event: (event) => this.rows(adapter.id).addEvent(event, source.digest),
+      keys: this.options.keys ?? {},
+      row: (row) => {
+        rows++;
+        const copy = this.rows(adapter.id).add(row, source.digest, at);
+        if (copy) {
+          duplicates++;
+          earlier ??= copy;
+        }
+      },
+      event: (event) => this.rows(adapter.id).addEvent(event, source.digest, repeats),
       trace: (trace) => {
         trace.format = adapter.id;
         trace.sourceDigests.add(source.digest);
@@ -173,6 +282,12 @@ export class ImportReader {
       },
     };
     adapter.convert(value, context);
+    if (rows && duplicates === rows && earlier)
+      notes.add({
+        ...(at.line !== undefined ? { line: at.line } : {}),
+        ...(at.record !== undefined ? { record: at.record } : {}),
+        reason: `the same ${rows === 1 ? "record" : "records"} as ${where(earlier, file)}, read once`,
+      });
   }
 
   /** Every trace read, merged across files: the same trace from two sources is one trace when
@@ -205,7 +320,7 @@ export class ImportReader {
         for (const trace of finished.traces) {
           trace.format = adapter.id;
           // Spans the shared emitter wrote already carry the identity keys' user and session.
-          if (!rowFormat) kept.add(trace);
+          if (!rowFormat && !collector.appliesKeys) kept.add(trace);
           merge(trace);
         }
       }
@@ -217,12 +332,20 @@ export class ImportReader {
       traces.delete(traceId);
       refuse(traceId, reason);
     }
-    const ordered = [...traces.values()].sort((a, b) => (a.traceId < b.traceId ? -1 : 1));
-    for (const trace of ordered) {
-      if (kept.has(trace)) applyIdentityKeys(trace, this.options.keys ?? {});
-      const identity = traceIdentity(trace.entries);
-      if (identity) trace.identity = identity;
-      else delete trace.identity;
+    const ordered: ConvertedTrace[] = [];
+    for (const trace of [...traces.values()].sort((a, b) => (a.traceId < b.traceId ? -1 : 1))) {
+      try {
+        if (kept.has(trace)) applyIdentityKeys(trace, this.options.keys ?? {});
+        const identity = traceIdentity(trace.entries);
+        if (identity) trace.identity = identity;
+        else delete trace.identity;
+      } catch (error) {
+        const failure = conversionFailure(error);
+        if (!failure) throw error;
+        refuse(trace.traceId, failure.message);
+        continue;
+      }
+      ordered.push(trace);
       for (const digest of trace.sourceDigests)
         for (const name of this.fileNames.get(digest) ?? []) {
           const entry = this.supported.get(`${name}\u0000${trace.format}`);

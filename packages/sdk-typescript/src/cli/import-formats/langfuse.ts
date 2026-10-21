@@ -1,15 +1,17 @@
 import {
   ConversionError,
+  conversionFailure,
   isObject,
+  langfuseEvaluationEnvironment,
   LangfuseTraceCollector,
-  parseJsonText,
+  parseNestedJsonText,
   validateSource,
   type ConvertedTrace,
   type JsonValue,
   type Refusal,
 } from "../traces-import-convert.js";
 import type { ImportAdapter, TraceCollector } from "./adapter.js";
-import { identityText } from "./identity.js";
+import { identityText, type IdentityKeys } from "./identity.js";
 import { readRecords, RowTraceCollector, rowTraceId, type SpanKind, type SpanRow } from "./rows.js";
 
 /**
@@ -35,7 +37,10 @@ import { readRecords, RowTraceCollector, rowTraceId, type SpanKind, type SpanRow
  *   observation's (Observations API v2 and enriched exports copy them onto every observation);
  *   a tool observation's never do.
  * - `GENERATION` is a model call, `TOOL` a tool call, `AGENT`, `EMBEDDING` and `RETRIEVER` their
- *   GenAI operations; other types record none. `level` `ERROR` is an error with the status message.
+ *   GenAI operations; other types record none. An `EVALUATOR` (a judge assessing an output) and
+ *   everything beneath it is Langfuse's evaluation, not the agent's work: no GenAI operation,
+ *   messages or usage, and never the trace's user. `level` `ERROR` is an error with the status
+ *   message.
  * - Token usage is `usageDetails` as Langfuse totals it: input and output are the sums of every
  *   key naming them (so cached and reasoning tokens are included), cache reads
  *   `input_cached_tokens` or `input_cache_read`, cache writes `input_cache_write` or
@@ -49,6 +54,11 @@ import { readRecords, RowTraceCollector, rowTraceId, type SpanKind, type SpanRow
  *   evaluation environments (`sdk-experiment`, `langfuse-…`) and Hue's evaluation and simulation
  *   markers make the trace evaluation or simulation traffic.
  * - Copies of a record keep the latest `updatedAt`.
+ * - `--user-key` and `--session-key` replace the user and conversation the records name, as for
+ *   every row format.
+ *
+ * A page of the documented list holding an integer JavaScript cannot represent exactly refuses
+ * only the traces of the observations that hold one, as Hue's reader would refuse them.
  */
 
 type Fields = Record<string, JsonValue>;
@@ -135,18 +145,70 @@ export const langfuseObservations: ImportAdapter = {
     if (!isObject(value)) return;
     if (value.data !== undefined && value.observations !== undefined)
       throw new ConversionError("two observation envelopes in one file");
-    if (context.source.unsafeIntegers)
-      throw new ConversionError("Source JSON contains an unsafe number");
     const key = documented(value.data) ? "data" : "observations";
-    const records = value[key] as Fields[];
+    let records = value[key] as Fields[];
     const envelope = Object.fromEntries(
       Object.entries(value).filter(([name]) => name !== key),
     ) as Fields;
-    context
-      .collector(() => new LangfuseTraceCollector())
-      .add(records, envelope, context.source.digest);
+    const collector = context.collector(() => new LangfuseTraceCollector());
+    if (context.source.unsafeIntegers) {
+      // Which observations hold such an integer: read again with each marked, so only their
+      // traces are refused and the page's others read.
+      const marked = markedRecords(context.source.text, key);
+      if (!marked || marked.envelope)
+        throw new ConversionError("Source JSON contains an unsafe number");
+      const refused = new Set<string>();
+      for (const [index, observation] of records.entries())
+        if (marked.records.has(index)) refused.add(observation.traceId as string);
+      for (const traceId of refused)
+        collector.refuse(traceId, "Source JSON contains an unsafe number", context.source.digest);
+      records = records.filter((observation) => !refused.has(observation.traceId as string));
+      if (!records.length) return;
+    }
+    collector.add(records, envelope, context.source.digest);
   },
 };
+
+/** An integer JavaScript cannot represent exactly, as `markedRecords` marks one. */
+class UnsafeInteger {}
+
+/** The positions of the records of `text`'s list `key` that hold an integer JavaScript cannot
+ * represent exactly, and whether the rest of the document holds one; undefined when the text does
+ * not parse so. */
+function markedRecords(
+  text: string,
+  key: string,
+): { records: Set<number>; envelope: boolean } | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(text, (_key, item: unknown, source?: { source?: string }) =>
+      typeof item === "number" &&
+      !Number.isSafeInteger(item) &&
+      typeof source?.source === "string" &&
+      /^-?\d+$/.test(source.source)
+        ? new UnsafeInteger()
+        : item,
+    );
+  } catch {
+    return undefined;
+  }
+  const holds = (item: unknown): boolean => {
+    const stack = [item];
+    while (stack.length) {
+      const next = stack.pop();
+      if (next instanceof UnsafeInteger) return true;
+      if (next !== null && typeof next === "object")
+        for (const child of Object.values(next)) stack.push(child);
+    }
+    return false;
+  };
+  if (!isObject(value) || !Array.isArray(value[key])) return undefined;
+  const records = new Set<number>();
+  for (const [index, record] of (value[key] as unknown[]).entries())
+    if (holds(record)) records.add(index);
+  const envelope = Object.entries(value).some(([name, item]) => name !== key && holds(item));
+  return { records, envelope };
+}
 
 // --- langfuse: reading a record -----------------------------------------------------------------
 
@@ -161,6 +223,8 @@ const KINDS: Record<string, SpanKind> = {
   EMBEDDING: "embedding",
   RETRIEVER: "retrieval",
 };
+/** A judge assessing an output: Langfuse's evaluation inside a trace, and everything beneath it. */
+const EVALUATOR = "EVALUATOR";
 const EVALUATION_KEYS = ["hue.execution.id", "hue.eval.execution_id"];
 const SIMULATION_KEYS = ["hue.world.id", "hue.environment.run_id"];
 
@@ -198,7 +262,7 @@ function decoded(value: JsonValue | undefined): JsonValue | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string" || !/^\s*[[{"]/.test(value)) return value;
   try {
-    const parsed = parseJsonText(value);
+    const parsed = parseNestedJsonText(value);
     return parsed.unsafeIntegers ? value : (parsed.value as JsonValue);
   } catch {
     return value;
@@ -215,7 +279,7 @@ function metadataOf(value: JsonValue | undefined): JsonValue | undefined {
     Object.entries(fields).map(([key, item]) => {
       if (typeof item !== "string") return [key, item];
       try {
-        const parsed = parseJsonText(item);
+        const parsed = parseNestedJsonText(item);
         return [key, parsed.unsafeIntegers ? item : (parsed.value as JsonValue)];
       } catch {
         return [key, item];
@@ -248,11 +312,7 @@ function originOf(
     ...Object.keys(object(fields.attributes) ?? {}),
     ...Object.keys(resource ?? {}),
   ]);
-  if (
-    EVALUATION_KEYS.some((key) => keys.has(key)) ||
-    environment === "sdk-experiment" ||
-    environment?.startsWith("langfuse-")
-  )
+  if (EVALUATION_KEYS.some((key) => keys.has(key)) || langfuseEvaluationEnvironment(environment))
     return "evaluation";
   const scope = text(fields["scope.name"]) ?? text(object(fields.scope)?.name);
   if (SIMULATION_KEYS.some((key) => keys.has(key)) || scope === "hue.sim-gateway")
@@ -389,6 +449,7 @@ function observationRow(
     ...(input !== undefined ? { input } : {}),
     ...(output !== undefined ? { output } : {}),
     ...(level === "ERROR" ? { error: statusMessage ? { message: statusMessage } : {} } : {}),
+    ...(type === EVALUATOR ? { scoring: true } : {}),
     ...(environment && environment !== "default" ? { environment } : {}),
     ...(origin ? { origin } : {}),
     ...(resource ? { resource } : {}),
@@ -475,6 +536,10 @@ function traceRow(record: Fields): SpanRow {
  * observations of another, and emits each trace through the shared emitter. */
 class LangfuseCollector implements TraceCollector {
   private readonly traces = new Map<string, Pending[]>();
+  /** Its emitter writes `--user-key` and `--session-key` as every row format's does. */
+  readonly appliesKeys = true;
+
+  constructor(private readonly keys: IdentityKeys) {}
 
   add(pending: Pending): void {
     const held = this.traces.get(pending.row.traceKey);
@@ -483,7 +548,7 @@ class LangfuseCollector implements TraceCollector {
   }
 
   finish(): { traces: ConvertedTrace[]; refused: Refusal[] } {
-    const emitter = new RowTraceCollector(FORMAT);
+    const emitter = new RowTraceCollector(FORMAT, this.keys);
     const refused: Refusal[] = [];
     for (const [traceKey, pending] of this.traces) {
       const root = `t-${traceKey}`;
@@ -500,8 +565,9 @@ class LangfuseCollector implements TraceCollector {
           emitter.add(row, item.digest);
         }
       } catch (error) {
-        if (!(error instanceof ConversionError)) throw error;
-        refused.push({ traceId: rowTraceId(FORMAT, traceKey), reason: error.message });
+        const failure = conversionFailure(error);
+        if (!failure) throw error;
+        refused.push({ traceId: rowTraceId(FORMAT, traceKey), reason: failure.message });
       }
     }
     const finished = emitter.finish();
@@ -549,7 +615,7 @@ export const langfuse: ImportAdapter = {
   detect: (value) =>
     !langfuseObservations.detect(value) && (isRecord(value) || lists(value).length > 0),
   convert(value, context) {
-    const collector = context.collector(() => new LangfuseCollector());
+    const collector = context.collector(() => new LangfuseCollector(context.keys));
     readRecords(context, itemsOf(value), traceKeyOf, (item) => {
       const { record } = item;
       if (!isRecord(record))

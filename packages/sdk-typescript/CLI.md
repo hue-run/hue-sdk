@@ -506,7 +506,7 @@ stopped.
 `hue traces import` brings historical traces into Hue from exports you already hold: OpenTelemetry
 exports (OTLP/JSON, binary OTLP and OpenTelemetry Collector files, Jaeger, Zipkin), the exports of
 LLM observability tools (Langfuse, Braintrust, LangSmith, Arize Phoenix, MLflow, Opik, W&B Weave,
-Datadog LLM Observability, Helicone, Raindrop), OpenAI Agents SDK traces, ATIF trajectories and
+Datadog LLM Observability, Helicone, Raindrop events and spans), OpenAI Agents SDK traces, ATIF trajectories and
 plain chat transcripts. It needs no project key. `prepare` runs on the machine that holds the
 exports and sends nothing; a Hue MCP connection then authorizes the delivery
 (`prepare_trace_import`); `upload` delivers the bundle with that authorization, and
@@ -519,11 +519,21 @@ npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authoriza
 
 **Prepare.** `prepare <path>` reads a file, a directory tree or a ZIP archive (members are inflated
 in memory; encrypted members, unsafe paths and nested archives are listed, not read) and
-recognizes each file by its content, never by its name. A file may be gzip or zstd compressed
-(zstd needs Node.js 22.15 or later; at most 64 MiB decompressed) and hold one JSON document, a JSON
-array of records, JSON Lines or binary OTLP. Each line of JSON Lines, each record of a JSON array
+recognizes each file by its content, never by its name. A file may be gzip (every member) or zstd
+(every frame, skippable frames passed over; zstd needs Node.js 22.15 or later) compressed, at most
+64 MiB decompressed, and hold one JSON document, a JSON array of records, JSON Lines or binary OTLP,
+as UTF-8 or as UTF-16 after a byte order mark. Each line of JSON Lines, each record of a JSON array
 that no format reads whole, and each message of a length-prefixed protobuf file is recognized on
 its own. CSV and Parquet are not read: export JSON or JSON Lines.
+
+Damage stays local. A gzip or zstd file that breaks off, or holds bytes after its last member or
+frame, is read up to the break and the rest named in `files.notes`; one whose checksum fails is not
+read. A line that is not UTF-8 is named and the other lines read. A bare `NaN`, `Infinity` or
+`-Infinity` (Python's `json.dumps` writes them) is read as null and named in `files.notes`. A value
+nested more than 512 levels deep is named and not read, and JSON text inside a record (metadata,
+tool arguments) nested that deep is kept as the text it is. Past 1,000 records in a row from the
+start of a JSON array that no format reads, the array is reported as unrecognized without reading
+the rest.
 
 Every trace becomes gzip OTLP/JSON batches of at most 3 MiB decoded and 900 KiB on the wire,
 written to `--out` (default `<path>.hue-import`, created with mode 0700) beside `manifest.json`,
@@ -553,13 +563,14 @@ conversation (`gen_ai.conversation.id`); a tool span, tool row or tool call neve
 | `langfuse_observations` | The Langfuse observation list Hue documents | a `data` or `observations` list whose every record is an observation (`id`, `traceId`, `type`, `startTime`) without `projectId` | the observations' `userId` and `sessionId`, as `langfuse.user.id` and `langfuse.session.id` |
 | `langfuse` | Everything Langfuse writes: `GET /api/public/traces/{id}`, v1 trace and observation pages, Observations API v2 pages, `GET /api/public/sessions/{id}`, UI downloads of the traces, observations and events tables, blob-storage files of the `traces`, `observations` and `observations_v2` tables | a trace (`id`, `timestamp`, `bookmarked`, `public`), an observation (`id`, `type`, `startTime`, `traceId`) or a blob-storage observation row (`start_time`, `trace_id`, `parent_observation_id`), alone or in `data`, `observations` or `traces` | the trace's `userId` and `sessionId`, else each observation's |
 | `atif` | ATIF v1.7 and v1.8 exports, embedded subagents included | `schema_version` starting with `ATIF-` | `extra.user_id`; the run's `session_id` |
-| `braintrust` | Braintrust span rows: a UI download, the fetch or query API's answer, `bt sync pull` JSON Lines or a cloud-storage export | `span_id` and `root_span_id`, alone or in `events` or `data` | `metadata` (`user_id`, `userId`; `session_id`, `thread_id`, `conversation_id`, …), Mastra's `resourceId`, an OpenAI Agents row's `group_id` |
-| `langsmith_runs` | LangSmith runs: a `list_runs` dump, the runs query page or its v2 page, a run with its `child_runs`, bulk-export rows converted from Parquet to JSON Lines | `id`, a LangSmith `run_type` (`chain`, `llm`, `tool`, `embedding`, `retriever`, `prompt`, `parser`) and `start_time` or `dotted_order`, alone or in `runs` or `items` | run metadata (`user_id`; `thread_id`, `session_id`, `conversation_id`, …) and the v2 `thread_id`; never the run's own `session_id` (the tracing project) or `ls_user_id` |
+| `braintrust` | Braintrust span rows: a UI download, the fetch or query API's answer, `bt sync pull` JSON Lines or a cloud-storage export | `span_id` and `root_span_id`, alone or in `events` or `data` | `metadata` (`userId`, `user_id`; `session_id`, `thread_id`, `conversation_id`, …), Mastra's `resourceId`, an OpenAI Agents row's `group_id` |
+| `langsmith_runs` | LangSmith runs: a `list_runs` dump, the runs query page or its v2 page, a run with its `child_runs`, bulk-export rows converted from Parquet to JSON Lines | `id`, a LangSmith `run_type` (`chain`, `llm`, `tool`, `embedding`, `retriever`, `prompt`, `parser`) and `start_time` or `dotted_order`, alone or in `runs` or `items` | run metadata (`userId`, `user_id`; `thread_id`, `session_id`, `conversation_id`, …) and the v2 `thread_id`; never the run's own `session_id` (the tracing project) or `ls_user_id` |
 | `mlflow_traces` | MLflow `Trace.to_dict()` (`mlflow traces get`, `trace.to_json()`), a list or JSON Lines of them, `mlflow traces search --output json`, MLflow 2's form included | `info` with `trace_id` or `request_id`, and `data.spans`, alone or in `traces` | `mlflow.trace.user` and `mlflow.trace.session` metadata, else a span's `user.id` and `session.id`; never `mlflow.user` |
-| `opik_traces` | The files `opik export … project …` writes, or spans alone (the spans API page or JSON Lines) | `trace` (with `id` and `start_time`) beside `spans`; or a span with `id`, `trace_id`, an Opik `type` (`general`, `tool`, `llm`, `guardrail`) and `start_time`, alone or in `content` | metadata (`user_id`, `userId`, …); the trace's `thread_id`, else its metadata's; never `created_by` |
-| `weave_calls` | W&B Weave calls: the calls stream's JSON Lines, a list of calls, `{"calls": […]}` or `{"call": …}` | `id`, `trace_id`, `op_name` and `started_at` | `attributes` (`user_id`, `userId`, …); `thread_id`, else in `attributes`; never `wb_user_id` |
-| `openai_agents` | OpenAI Agents SDK `Trace.export()` and `Span.export()` records, one per line or in a list, or the `{"data": […]}` body its exporter posts | `"object": "trace"` with `id`, or `"object": "trace.span"` with `trace_id` | the trace metadata's `user_id` (or `userId`); `group_id`, else a conversation field of the metadata |
+| `opik_traces` | The files `opik export … project …` writes, or spans alone (the spans API page or JSON Lines) | `trace` (with `id` and `start_time`) beside `spans`; or a span with `id`, `trace_id`, an Opik `type` (`general`, `tool`, `llm`, `guardrail`) and `start_time`, alone or in `content` | metadata (`userId`, `user_id`, …); the trace's `thread_id`, else its metadata's; never `created_by` |
+| `weave_calls` | W&B Weave calls: the calls stream's JSON Lines, a list of calls, `{"calls": […]}` or `{"call": …}` | `id`, `trace_id`, `op_name` and `started_at` | `attributes` (`userId`, `user_id`, …); `thread_id`, else in `attributes`; never `wb_user_id` |
+| `openai_agents` | OpenAI Agents SDK `Trace.export()` and `Span.export()` records, one per line or in a list, or the `{"data": […]}` body its exporter posts | `"object": "trace"` with `id`, or `"object": "trace.span"` with `trace_id` | the trace metadata's `userId` (or `user_id`); `group_id`, else a conversation field of the metadata |
 | `raindrop` | Raindrop events: elements of a `POST /v1/events/track` payload, or a Query API `GET /v1/events` answer | `event` with `ai_data` (or with `event_id` and `user_id`), or `event_name` with `user_input` and `assistant_output`, alone or in `data` | `user_id`; `convo_id` |
+| `raindrop_spans` | Raindrop's span rows: a Query API `GET /v1/traces?event_id=` answer, one row, or one per line | `trace_id`, `span_id`, `span_name`, `start_time_ns` and a Raindrop `span_type` (`INTERNAL`, `LLM_GENERATION`, `LLM_GENERATION_STREAM`, `TOOL_CALL`), alone or in `data` | the association attributes Raindrop's SDKs stamp on every span (`traceloop.association.properties.user_id` and `convo_id`, `ai.telemetry.metadata.raindrop.*`); the rows name no event, so `--user-key` names a user they lack |
 | `helicone` | Helicone requests: `npx @helicone/export` JSON or JSON Lines (`--include-body` for the bodies), or the `query-clickhouse` API answer | `request_id` and `request_created_at` with `response_status`, `request_user_id` or `request_properties`, alone or in `data` | `request_user_id`, never `helicone_user` (the Helicone account); the `Helicone-Session-Id` property |
 | `openai_chat` | An OpenAI Chat Completions request, or a line of a chat JSONL file (a fine-tuning or eval dataset) | a `messages` list holding a `{role}` message, without `object` and without anything only Anthropic sends | `safety_identifier`, else `user` |
 | `openai_responses` | An OpenAI Responses `response` object, a request (with its `output` when it was logged with it), or a bare list of input and output items | `"object": "response"` with an `output` list; a value of request fields only, with an item list as `input`; or a list of Responses items | `safety_identifier`, else `user`; `conversation` |
@@ -595,7 +606,15 @@ example) is mapped to one derived from it by SHA-256, with the original kept as
   messages, plain strings) becomes GenAI message parts; any other content is kept as `input.value`
   and `output.value`. An error is an error status with its message. The trace's user and
   conversation go on its root spans (never a tool's), and each span keeps its whole source record
-  as `hue.import.source_record`.
+  as `hue.import.source_record`. An attribute the source recorded under its own name (a Raindrop
+  span's `gen_ai.*`, for example) is kept as recorded, with none of the same name added beside it.
+- A vendor's own evaluation recorded inside a production trace is read as such, not as the
+  agent's work: a Braintrust span with `purpose: "scorer"` or of type `score`, `automation`,
+  `facet`, `classifier`, `preprocessor` or `review` (online scoring adds them to production
+  traces), and a Langfuse `EVALUATOR` observation. That span and everything beneath it (a judge's
+  model call) carry no GenAI operation, model, messages, tool call or usage, their content kept as
+  `input.value` and `output.value`, and never name the trace's user or conversation, as a tool's
+  subtree never does. The trace's origin is unchanged.
 
 Rules shared by the row formats:
 
@@ -609,15 +628,32 @@ Rules shared by the row formats:
 - Copies: a record exported more than once keeps its latest copy, by the field the format records
   it in (Braintrust's `_xact_id`, Langfuse's `updatedAt`, Opik's `last_updated_at`, Helicone's
   `updated_at`, the ended copy of a LangSmith run, a Weave call, an OpenAI Agents span or a
-  Raindrop event). Copies of a span with no such field must agree, or the trace is refused.
-- Origin: Braintrust experiment rows, LangSmith runs with a `reference_example_id`, MLflow traces
-  tagged `mlflow.eval.requestId` or `mlflow.trace.sourceScorer`, Opik traces from an experiment,
-  evaluator, optimization or the playground, Weave traces with a scorer or an `Evaluation.*` op,
-  Datadog `experiment` spans and Langfuse's `sdk-experiment` and `langfuse-…` environments are
-  declared evaluation traffic.
+  Raindrop event). Copies of a span with no such field must agree, or the trace is refused. A
+  record identical to one read elsewhere (a repeated line of a chat JSONL file, an overlap of two
+  exports) is read once, and the value that added nothing new is named in `files.notes`.
+- Token counts follow the GenAI conventions: input includes cached input and output includes
+  reasoning, with the cached, cache-write and reasoning counts also kept on their own. Helicone
+  stores `prompt_tokens` without `prompt_cache_read_tokens` and `prompt_cache_write_tokens`, and
+  `completion_tokens` without `reasoning_tokens`, so those are added back. LangSmith's cache writes
+  are read under `cache_creation`, the v2 API's `cache_write`, or the sum of
+  `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens` that its Anthropic wrapper records.
+- Kinds a source recorded late: Weave records an op's kind (`attributes.weave.kind`) since January
+  2026; an earlier call from an op Weave's integrations patch (`openai.chat.completions.create`,
+  `anthropic.Messages.create`, `litellm.completion` and the rest of its model-call ops; MCP
+  `call_tool` and CrewAI tools) is read as the kind those integrations give it now.
+- Links: an MLflow span's `links` become span links, to a span of its own trace or of another.
+- Origin: Braintrust experiment rows and dataset records (`dataset_id`), LangSmith runs with a
+  `reference_example_id`, MLflow traces tagged `mlflow.eval.requestId` or
+  `mlflow.trace.sourceScorer`, Opik traces from an experiment, evaluator, optimization or the
+  playground, Weave traces with an `Evaluation.*` op or a scorer as their root (a scorer applied
+  inside the application's own op, a guardrail, is a span of its production trace), Datadog
+  `experiment` spans and every span ddtrace tags with an `experiment_id`, Helicone requests of an
+  experiment or a Helicone evaluator (the `Helicone-Experiment-Id` or `Helicone-Evaluator`
+  property, matched without regard to case), and Langfuse's `sdk-experiment` and `langfuse-…`
+  environments (in both Langfuse formats) are declared evaluation traffic.
 - Instants: Datadog's `start_ns` and `duration` are nanoseconds, and a `start_ns` too small to be
-  nanoseconds is read as milliseconds or microseconds by its size (`start_ns_read_as_ms`,
-  `start_ns_read_as_us`). An ISO instant without a zone (LangSmith, Langfuse's ClickHouse
+  nanoseconds is read as milliseconds or microseconds by its size, the span's `duration` in the
+  same unit (`start_ns_read_as_ms` and `duration_read_as_ms`, or the `_us` pair). An ISO instant without a zone (LangSmith, Langfuse's ClickHouse
   `YYYY-MM-DD HH:MM:SS.ffffff`) is UTC. Where a source records no instant, a fixed rule fills it
   in, names it on the span (`hue.import.timing`) and counts it in the report (`traces.timing`):
   - a span without a start starts at its end (`start_at_end`), else with its parent
@@ -628,8 +664,9 @@ Rules shared by the row formats:
     record in source order (`untimed_trace`); plain transcripts record none except a Responses
     object's `created_at`;
   - a format that takes an instant from another field names that too: Braintrust's `created`
-    (`start_from_created`), a LangSmith run's `dotted_order` (`start_from_dotted_order`) and a
-    Helicone request's `delay_ms` (`end_from_latency`);
+    (`start_from_created`), a LangSmith run's `dotted_order` (`start_from_dotted_order`), a
+    Helicone request's `delay_ms` (`end_from_latency`) and a Raindrop span's `duration_ns`
+    (`end_from_duration`);
   - an event recorded without a time (a Braintrust log row, an MLflow span event) is placed at its
     span's start (`event_at_span_start`).
 
@@ -655,19 +692,27 @@ is one of:
 - a JSON Pointer into the source record: `/metadata/customer/id`.
 
 The key is read on the agent's spans as the owner is: the roots' value when they name one, else the
-other spans', never a tool span's, and spans that disagree name nobody. For a row format the key's
-value is written as the root's `user.id` (or `gen_ai.conversation.id`) in place of the user the
-record names. A trace kept as recorded or converted span for span (OTLP, Jaeger, Zipkin, Phoenix,
-the documented Langfuse list, ATIF) that names no owner gains one child span of its earliest root,
+other spans', never a tool span's, and spans that disagree name nobody. For a row format (the
+`langfuse` format among them) the key's value is written as the root's `user.id` (or
+`gen_ai.conversation.id`) in place of the user the record names. A trace kept as recorded or
+converted span for span (OTLP, Jaeger, Zipkin, Phoenix, the documented Langfuse list, ATIF) that
+names no owner gains one child span of the agent's earliest local root (never a tool span),
 `hue.import.user` with the single attribute `user.id` (or `hue.import.session` with
 `gen_ai.conversation.id`), so its recorded spans keep their bytes and a trace also sent live does
-not conflict. An owner the spans already name is kept.
+not conflict. An owner the spans already name is kept, and a trace with no root but tool spans
+gains nothing.
 
 **Limits and refusals.** A malformed record refuses its trace, never the file: an OTLP trace with a
-malformed span is refused rather than imported without it. The same trace in two files is one trace
-when the copies agree and a refusal when they differ. A trace with more than 100,000 spans, 512
-batches or 10,000 values is refused and named. An input of more than 25,000 traces, or whose
-manifest would exceed 32 MiB (4 MiB compressed), is refused whole.
+malformed span (an attribute value of no OTLP shape, a protobuf span that does not decode) or whose
+parents close on themselves is refused rather than imported without it, and the request's other
+traces are read. A page of the documented Langfuse list holding an integer too large to represent
+exactly refuses only the traces of the observations that hold one. The same trace in two files is
+one trace when the copies agree and a refusal when they differ. A trace with more than 100,000
+spans, 512 batches or 10,000 values is refused and named. An input of more than 25,000 traces, more
+than 256 MiB decompressed (every trace is held until all are read; prepare a larger export in
+parts, each to its own `--out`), or whose manifest would exceed 32 MiB (4 MiB compressed), is
+refused whole. The messages of one length-prefixed protobuf file share the 64 MiB a file may
+decompress to.
 
 **Report.** `prepare` reports what it read and what it could not, down to the line; `--json` prints
 the report as one object:
@@ -680,8 +725,11 @@ the report as one object:
   document of no recognized format, an OTLP logs or metrics export, an export page with no
   records, an encrypted or nested ZIP member);
 - `files.skipped`: each line of JSON Lines (`line`), record of a JSON array (`record`) or message
-  of a length-prefixed protobuf file (`line`) that could not be read, with the reason; the rest of
-  the file is read, and past 100 in one file the rest are counted in one entry;
+  of a length-prefixed protobuf file (`line`) that could not be read, with the reason, in file
+  order; the rest of the file is read, and past 100 in one file the rest are counted in one entry;
+- `files.notes`: what was read with a repair or read once though the input held it more than once
+  (a gzip or zstd file read up to a break, `NaN` read as null, a record identical to one read
+  elsewhere), with its `line` or `record`; past 100 in one file the rest are counted;
 - `traces.refused`: each trace or record refused, with its `file`, `line`, `record` and `trace_id`
   where known and the reason;
 - `traces.timing`: the traces whose instants a rule supplied, per rule;

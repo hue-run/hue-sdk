@@ -5,10 +5,10 @@ import {
   count,
   first,
   isoNanos,
+  metadataUser,
   object,
   SESSION_FIELDS,
   text,
-  USER_FIELDS,
   type JsonObject,
 } from "./row-platform-fields.js";
 import { readRecords, type SpanKind, type SpanRow } from "./rows.js";
@@ -24,7 +24,8 @@ import { readRecords, type SpanKind, type SpanRow } from "./rows.js";
  *   no operation. Token counts (`usage`) are read from `llm` spans, `prompt_tokens` and
  *   `completion_tokens` with the provider's own cache and reasoning counts (`original_usage.*`).
  * - The conversation is the trace's `thread_id`, else its metadata's; the user comes from the
- *   metadata (`user_id`, `userId`, …). `created_by` names who logged it, never the end user.
+ *   metadata (`userId`, `user_id`, …, in the order Hue reads a metadata map). `created_by` names
+ *   who logged it, never the end user.
  * - A trace from an experiment, evaluator, optimization or the playground (`source`, `experiment`)
  *   is evaluation traffic; `environment` is the deployment environment.
  * - A record exported more than once keeps the copy updated last (`last_updated_at`).
@@ -125,7 +126,7 @@ function traceRow(trace: JsonObject): SpanRow {
   const id = trace.id as string;
   const row = readRecord(trace, id, id, undefined);
   const metadata = object(trace.metadata);
-  const user = first(metadata, USER_FIELDS);
+  const user = metadataUser(metadata);
   const session = identityText(trace.thread_id) ?? first(metadata, SESSION_FIELDS);
   if (user !== undefined) row.user = user;
   if (session !== undefined) row.session = session;
@@ -170,7 +171,7 @@ function spanRow(span: JsonObject): SpanRow {
     };
   else {
     const metadata = object(span.metadata);
-    const user = first(metadata, USER_FIELDS);
+    const user = metadataUser(metadata);
     const session = first(metadata, SESSION_FIELDS);
     if (user !== undefined) row.user = user;
     if (session !== undefined) row.session = session;

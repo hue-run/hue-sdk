@@ -5,10 +5,10 @@ import {
   count,
   first,
   isoNanos,
+  metadataUser,
   object,
   SESSION_FIELDS,
   text,
-  USER_FIELDS,
   type JsonObject,
 } from "./row-platform-fields.js";
 import { readRecords, type SpanKind, type SpanRow } from "./rows.js";
@@ -20,15 +20,21 @@ import { readRecords, type SpanKind, type SpanRow } from "./rows.js";
  * and the call read answer (`{"call": …}`).
  *
  * - The op's kind (`attributes.weave.kind`) names the span's: `llm` a model call, `tool` a tool
- *   call, `agent`, and `search` a retrieval; `guardrail`, `scorer` and ops without one record no
- *   operation. The name is the call's `display_name`, else its op's name.
+ *   call, `agent`, and `search` a retrieval; `guardrail`, `scorer` and other ops record no
+ *   operation. Weave records kinds since January 2026; a call without one from an op Weave's
+ *   integrations patch (`openai.chat.completions.create`, `anthropic.Messages.create`,
+ *   `litellm.completion`, … a model call; `mcp.server.fastmcp.FastMCP.call_tool` and
+ *   `crewai_tools.*._run` a tool call) is read as the kind those integrations give it now. The
+ *   name is the call's `display_name`, else its op's name.
  * - Token counts come from an `llm` call's `summary.usage`, recorded per model; Weave sums a
  *   parent's usage over its children, so no other call's is read.
  * - The conversation is the call's `thread_id`, else its `attributes`' (`thread_id`,
- *   `session_id`, …); the user comes from its `attributes` (`user_id`, `userId`, …). `wb_user_id`
- *   names the W&B account that logged the call, never the end user.
- * - A trace with a scorer or an `Evaluation.*` op is evaluation traffic. A call exported both
- *   before and after it ended keeps the ended copy.
+ *   `session_id`, …); the user comes from its `attributes` (`userId`, `user_id`, …, in the order
+ *   Hue reads a metadata map). `wb_user_id` names the W&B account that logged the call, never the
+ *   end user.
+ * - A trace with an `Evaluation.*` op, or whose root is a scorer, is evaluation traffic; a scorer
+ *   applied inside the application's own op (a guardrail) is a span of its production trace. A
+ *   call exported both before and after it ended keeps the ended copy.
  */
 
 const isCall = (value: unknown): value is JsonObject =>
@@ -56,6 +62,25 @@ const KINDS: Record<string, SpanKind> = {
 /** An op's own name from its ref (`weave:///<entity>/<project>/op/<name>:<digest>`). */
 const opName = (ref: string) => /\/op\/([^/:]+)(?::[^/]*)?$/.exec(ref)?.[1] ?? ref;
 
+/** The ops Weave's integrations patch, by the kind they give each since kinds were recorded
+ * (weave `integrations/*`): a call from before then has the op but not the kind. */
+const INTEGRATION_KINDS: [RegExp, SpanKind][] = [
+  [/^openai\.(?:beta\.)?chat\.completions\.(?:create|parse)$/, "llm"],
+  [/^openai\.responses\.(?:create|parse)$/, "llm"],
+  [/^anthropic\.(?:beta\.)?(?:Async)?Messages\.(?:create|stream)$/, "llm"],
+  [/^(?:cerebras|groq|groq\.async)\.chat\.completions\.create$/, "llm"],
+  [/^mistralai\.(?:async_client\.)?chat\.(?:complete|stream)$/, "llm"],
+  [/^cohere\.(?:Async)?Client(?:V2)?\.chat(?:_stream)?$/, "llm"],
+  [/^litellm\.a?completion$/, "llm"],
+  [/^huggingface_hub\.(?:Async)?InferenceClient\.chat_completion$/, "llm"],
+  [/^google\.genai\.models\.(?:Async)?Models\.generate_content(?:_stream)?$/, "llm"],
+  [/^vertexai\.(?:GenerativeModel\.generate_content|ChatSession\.send_message)(?:_async)?$/, "llm"],
+  [/^BedrockRuntime\.(?:converse|invoke)$/, "llm"],
+  [/^crewai\.LLM\.call$/, "llm"],
+  [/^mcp\.server\.fastmcp\.FastMCP\.call_tool$/, "tool"],
+  [/^crewai_tools\.[^.]+\._run$/, "tool"],
+];
+
 function readCall(call: JsonObject, context: ConvertContext): void {
   const traceKey = text(call.trace_id);
   const spanKey = text(call.id);
@@ -67,7 +92,12 @@ function readCall(call: JsonObject, context: ConvertContext): void {
   if (call.summary != null && !summary) throw new ConversionError("summary is not an object");
   const op = opName(call.op_name as string);
   const weaveKind = text(object(attributes?.weave)?.kind);
-  const kind = weaveKind && Object.hasOwn(KINDS, weaveKind) ? KINDS[weaveKind] : undefined;
+  const kind =
+    weaveKind !== undefined
+      ? Object.hasOwn(KINDS, weaveKind)
+        ? KINDS[weaveKind]
+        : undefined
+      : INTEGRATION_KINDS.find(([pattern]) => pattern.test(op))?.[1];
   const start = isoNanos(call.started_at);
   const end = call.ended_at == null ? undefined : isoNanos(call.ended_at);
   const inputs = call.inputs ?? undefined;
@@ -116,12 +146,13 @@ function readCall(call: JsonObject, context: ConvertContext): void {
       ...(output !== undefined ? { result: output } : {}),
     };
   else {
-    const user = first(attributes, USER_FIELDS);
+    const user = metadataUser(attributes);
     const session = identityText(call.thread_id) ?? first(attributes, SESSION_FIELDS);
     if (user !== undefined) row.user = user;
     if (session !== undefined) row.session = session;
   }
-  if (weaveKind === "scorer" || op.startsWith("Evaluation.")) row.origin = "evaluation";
+  if (op.startsWith("Evaluation.") || (weaveKind === "scorer" && row.parentKey === undefined))
+    row.origin = "evaluation";
   context.row(row);
 }
 

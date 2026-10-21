@@ -379,6 +379,82 @@ describe("Langfuse exports", () => {
     expect(identity(traceIdOf(page.data[0].traceId))).toEqual({ user: "c-9" });
   });
 
+  test("--user-key replaces the user a Langfuse trace names, on its root", async () => {
+    const trace = copy(fixture.traceWithObservations);
+    trace.userId = "own-user";
+    trace.metadata = { customer: "key-user" };
+    const { identity, spans } = await bundleOf(
+      { "trace.json": JSON.stringify(trace) },
+      "--user-key",
+      "customer",
+    );
+    const traceId = traceIdOf(trace.id);
+    expect(identity(traceId)).toMatchObject({ user: "key-user" });
+    const emitted = await spans(traceId);
+    expect(str(named(emitted, trace.name), "user.id")).toBe("key-user");
+    expect(emitted.some((span) => span.name === "hue.import.user")).toBe(false);
+  });
+
+  test("reads an EVALUATOR and everything beneath it as Langfuse's evaluation, not the agent's", async () => {
+    const trace = copy(fixture.traceWithObservations);
+    trace.userId = null;
+    const [generation] = trace.observations;
+    const evaluator = {
+      ...copy(generation),
+      id: "c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f",
+      type: "EVALUATOR",
+      name: "helpfulness",
+      model: null,
+      metadata: { userId: "judge-user" },
+    };
+    const judge = {
+      ...copy(generation),
+      id: "d2e3f4a5-b6c7-4d8e-9fa0-1b2c3d4e5f60",
+      parentObservationId: evaluator.id,
+      name: "judge-call",
+      userId: "judge-user",
+      input: [{ role: "user", content: "Rate this reply from 1 to 5." }],
+    };
+    trace.observations.push(evaluator, judge);
+    const { report, identity, spans } = await bundleOf({ "trace.json": JSON.stringify(trace) });
+    const traceId = traceIdOf(trace.id);
+    // The judge's user never owns the trace; nothing else names one.
+    expect(identity(traceId)?.user).toBeUndefined();
+    expect(report.traces.by_origin.evaluation).toBe(0);
+    const emitted = await spans(traceId);
+    const call = named(emitted, "judge-call");
+    for (const key of [
+      "gen_ai.operation.name",
+      "gen_ai.request.model",
+      "gen_ai.input.messages",
+      "gen_ai.usage.input_tokens",
+    ])
+      expect(attr(call, key)).toBeUndefined();
+    expect(json(call, "input.value")).toEqual(judge.input);
+    expect(attr(named(emitted, "helpfulness"), "langfuse.observation.metadata")).toBeUndefined();
+    // The agent's own model call keeps its GenAI attributes.
+    expect(str(named(emitted, generation.name), "gen_ai.operation.name")).toBe("chat");
+  });
+
+  test("reads the documented list's experiment environments and unsafe integers per trace", async () => {
+    const strip = ({ projectId: _projectId, ...observation }: Records) => observation;
+    const [first, second] = fixture.observationsPage.data.map(strip);
+    const experiment = { ...first, environment: "sdk-experiment", userId: "u-exp" };
+    const big = { ...second, traceId: "trace-with-big-id", metadata: { message_id: "__BIG__" } };
+    const text = JSON.stringify({ data: [experiment, big] }).replace(
+      '"__BIG__"',
+      "1234567890123456789",
+    );
+    const { report, manifest } = await bundleOf({ "observations.json": text });
+    expect(report.formats).toEqual({ langfuse_observations: 1 });
+    expect(manifest.traces).toHaveLength(1);
+    expect(manifest.traces[0]).toMatchObject({ origin: "evaluation", identity: { user: "u-exp" } });
+    // Only the trace whose observation holds the integer is refused; the page's others are read.
+    expect(report.traces.refused).toEqual([
+      { trace_id: traceIdOf("trace-with-big-id"), reason: "Source JSON contains an unsafe number" },
+    ]);
+  });
+
   test("leaves Hue's documented observation list to langfuse_observations", () => {
     const record = fixture.observationsPage.data[0];
     const { projectId: _projectId, ...documented } = record;

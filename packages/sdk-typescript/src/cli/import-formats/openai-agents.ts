@@ -1,6 +1,13 @@
-import { ConversionError, isObject, unixNano, type JsonValue } from "../traces-import-convert.js";
+import {
+  ConversionError,
+  isObject,
+  parseNestedJsonText,
+  unixNano,
+  type JsonValue,
+} from "../traces-import-convert.js";
 import type { ConvertContext, ImportAdapter } from "./adapter.js";
 import { identityText } from "./identity.js";
+import { metadataUser } from "./row-platform-fields.js";
 import { readRecords, type SpanKind, type SpanRow } from "./rows.js";
 
 /**
@@ -18,7 +25,8 @@ import { readRecords, type SpanKind, type SpanRow } from "./rows.js";
  *   SDK exports no content for it), `function` a tool call with its arguments and result.
  *   `handoff`, `guardrail`, `custom` (the SDK's task and turn spans among them), `mcp_tools` and
  *   the voice spans record no GenAI operation and keep their data as attributes.
- * - `group_id` is the conversation; the trace metadata's `user_id` (or `userId`) is the end user.
+ * - `group_id` is the conversation; the trace metadata's `userId` (or `user_id`) is the end user,
+ *   read as Hue reads a metadata map.
  * - `started_at` and `ended_at` are ISO 8601 instants. The trace record has none, so it spans its
  *   spans (`start_from_trace`, `end_from_children`).
  * - The ids (`trace_…`, `span_…`) are no OpenTelemetry ids: they are mapped by SHA-256 and kept.
@@ -52,7 +60,6 @@ function envelopeRecords(value: unknown): unknown[] | undefined {
     : undefined;
 }
 
-const USER_FIELDS = ["user_id", "userId"];
 const SESSION_FIELDS = [
   "session_id",
   "sessionId",
@@ -98,7 +105,7 @@ function usageOf(value: JsonValue | undefined): Usage | undefined {
 function argumentsOf(value: JsonValue | undefined): JsonValue | undefined {
   if (typeof value !== "string") return value ?? undefined;
   try {
-    return JSON.parse(value) as JsonValue;
+    return parseNestedJsonText(value).value as JsonValue;
   } catch {
     return value;
   }
@@ -109,7 +116,7 @@ function readTrace(record: JsonObject, context: ConvertContext): void {
   if (!traceKey) throw new ConversionError("a trace without an id");
   const metadata = object(record.metadata);
   if (record.metadata != null && !metadata) throw new ConversionError("metadata is not an object");
-  const user = first(metadata, USER_FIELDS);
+  const user = metadataUser(metadata);
   const session = identityText(record.group_id) ?? first(metadata, SESSION_FIELDS);
   context.row({
     traceKey,

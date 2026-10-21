@@ -119,6 +119,10 @@ describe("format detection", () => {
     for (const event of track) expect(claims(event)).toEqual(["raindrop"]);
     const query = JSON.parse(await fixture("raindrop-query.json")) as Record<string, any>;
     expect(claims(query)).toEqual(["raindrop"]);
+    // A traces answer whole, and each of its span rows alone.
+    const traces = JSON.parse(await fixture("raindrop-traces.json")) as Record<string, any>;
+    expect(claims(traces)).toEqual(["raindrop_spans"]);
+    for (const row of traces.data) expect(claims(row)).toEqual(["raindrop_spans"]);
     expect(claims({ data: query.data[0] })).toEqual(["raindrop"]);
     // The ingest body an OpenAI Agents exporter posts, and a Helicone API answer.
     const agents = lines(await fixture("openai-agents.jsonl"));
@@ -394,6 +398,42 @@ describe("Raindrop", () => {
   });
 });
 
+describe("Raindrop span rows", () => {
+  test("reads a traces answer as one trace of spans: content, tool calls, tokens and the user", async () => {
+    const report = await prepare(join(FIXTURES, "raindrop-traces.json"));
+    expect(report.formats).toEqual({ raindrop_spans: 1 });
+    expect(report.traces.timing).toEqual({ end_from_duration: 1 });
+    const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const { trace, spans } = await bundle(report);
+    expect(trace(traceId).identity).toEqual({ user: "customer-3307", session: "convo-2c7e91" });
+    const emitted = await spans(traceId);
+    const root = byName(emitted, "support.reply");
+    expect(root.spanId).toBe("00f067aa0ba902b7");
+    expect(str(root, "user.id")).toBe("customer-3307");
+    expect(str(root, "traceloop.association.properties.event_id")).toBe("turn_1842");
+    const llm = byName(emitted, "ai.generateText");
+    expect(llm.startTimeUnixNano).toBe("1792317601200000000");
+    expect(str(llm, "gen_ai.operation.name")).toBe("chat");
+    expect(str(llm, "gen_ai.request.model")).toBe("gpt-4.1-mini");
+    expect(str(llm, "gen_ai.provider.name")).toBe("openai");
+    expect(attr(llm, "gen_ai.usage.input_tokens")).toEqual({ intValue: "96" });
+    expect(json(llm, "gen_ai.input.messages")).toEqual([
+      { role: "system", parts: [{ type: "text", content: "You answer questions about orders." }] },
+      { role: "user", parts: [{ type: "text", content: "Where is order 12?" }] },
+    ]);
+    const tool = byName(emitted, "lookup_order");
+    expect(str(tool, "gen_ai.operation.name")).toBe("execute_tool");
+    expect(json(tool, "gen_ai.tool.call.arguments")).toEqual({
+      id: 12,
+      account: "account-acted-on",
+    });
+    expect(json(tool, "gen_ai.tool.call.result")).toEqual({ status: "shipped" });
+    expect(tool.status.code).toBe(2);
+    expect(tool.endTimeUnixNano).toBe("1792317601620000000");
+    expect(attr(tool, "user.id")).toBeUndefined();
+  });
+});
+
 describe("Helicone", () => {
   test("groups a session's requests into one trace of model calls and reads the user", async () => {
     const report = await prepare(join(FIXTURES, "helicone-export.jsonl"));
@@ -438,6 +478,58 @@ describe("Helicone", () => {
     ]);
     // `helicone_user` is the Helicone account, never the end user.
     expect(str(draft!, "user.id")).toBe("customer-5120");
+  });
+
+  test("counts tokens as the GenAI conventions do, finds embeddings by target_url and marks experiments", async () => {
+    const [, , anthropic] = lines(await fixture("helicone-export.jsonl"));
+    const cached = {
+      ...anthropic!,
+      request_id: "b16e7f4d-8a2c-4d3f-9e5b-6c7d8e9f0a1b",
+      // Helicone stores Anthropic's input without the cache reads and writes beside it.
+      prompt_tokens: 10,
+      prompt_cache_read_tokens: 1000,
+      prompt_cache_write_tokens: 200,
+      completion_tokens: 30,
+      reasoning_tokens: 12,
+    };
+    const embedding = {
+      ...anthropic!,
+      request_id: "c27f8a5e-9b3d-4e4a-8f6c-7d8e9f0a1b2c",
+      target_url: "https://api.example.test/v1/embeddings",
+      request_body: { model: "text-embedding-3-small", input: "order 12" },
+      response_body: { object: "list", data: [] },
+    };
+    const experiment = {
+      ...anthropic!,
+      request_id: "d3809b6f-0c4e-4f5b-9a7d-8e9f0a1b2c3d",
+      request_properties: { "helicone-experiment-id": "exp-1" },
+    };
+    const judged = {
+      ...anthropic!,
+      request_id: "e491ac70-1d5f-4a6c-8b8e-9f0a1b2c3d4e",
+      request_properties: { "Helicone-Evaluator": "helpfulness" },
+    };
+    const root = await scratch({
+      "requests.jsonl": [cached, embedding, experiment, judged]
+        .map((record) => JSON.stringify(record))
+        .join("\n"),
+    });
+    const report = await prepare(root);
+    const { trace, spans } = await bundle(report);
+    const [counted] = await spans(derived("helicone", cached.request_id));
+    expect(attr(counted!, "gen_ai.usage.input_tokens")).toEqual({ intValue: "1210" });
+    expect(attr(counted!, "gen_ai.usage.output_tokens")).toEqual({ intValue: "42" });
+    expect(attr(counted!, "gen_ai.usage.cache_read.input_tokens")).toEqual({ intValue: "1000" });
+    expect(attr(counted!, "gen_ai.usage.reasoning.output_tokens")).toEqual({ intValue: "12" });
+    const [embedded] = await spans(derived("helicone", embedding.request_id));
+    expect(str(embedded!, "gen_ai.operation.name")).toBe("embeddings");
+    expect(str(embedded!, "helicone.request.path")).toBe("/v1/embeddings");
+    expect(attr(embedded!, "gen_ai.input.messages")).toBeUndefined();
+    // Helicone's experiments and evaluators, whatever the case of the property, never feed a
+    // user's World.
+    for (const record of [experiment, judged])
+      expect(trace(derived("helicone", record.request_id)).origin).toBe("evaluation");
+    expect(trace(derived("helicone", cached.request_id)).origin).toBe("unknown");
   });
 
   test("keeps a request's latest export, marks a failed one, and refuses only a malformed request's trace", async () => {

@@ -1,4 +1,10 @@
-import { ConversionError, isObject, unixNano, type JsonValue } from "../traces-import-convert.js";
+import {
+  ConversionError,
+  isObject,
+  parseNestedJsonText,
+  unixNano,
+  type JsonValue,
+} from "../traces-import-convert.js";
 import type { ConvertContext, ImportAdapter } from "./adapter.js";
 import { identityText } from "./identity.js";
 import { nanosFrom, readRecords, type SpanRow } from "./rows.js";
@@ -17,6 +23,15 @@ import { requestContent, requestInstructions, responseContent } from "./transcri
  *   which is the Helicone account. The conversation is the session id.
  * - A span runs from `request_created_at` to `response_created_at`; without a response time it
  *   ends `delay_ms` after it starts (`end_from_latency`).
+ * - Helicone stores token counts with the cached and reasoning tokens taken out
+ *   (`prompt_tokens` without `prompt_cache_read_tokens` and `prompt_cache_write_tokens`,
+ *   `completion_tokens` without `reasoning_tokens`): they are added back, as the GenAI
+ *   conventions count input and output, and kept as their own counts too.
+ * - The path is that of `target_url` (the ClickHouse export's field), else `request_path`; a
+ *   request to an embeddings path is an embedding.
+ * - A request of a Helicone experiment (the `Helicone-Experiment-Id` property) or made by a
+ *   Helicone evaluator (`Helicone-Evaluator`), matched without regard to case as Helicone matches
+ *   them, is evaluation traffic.
  * - A body Helicone left unfetched (`{"helicone_message": …}`) is no content.
  * - A request exported twice keeps its latest `updated_at`.
  *
@@ -51,7 +66,7 @@ function body(value: JsonValue | undefined): JsonValue | undefined {
   if (typeof value === "string") {
     if (!value) return undefined;
     try {
-      parsed = JSON.parse(value) as JsonValue;
+      parsed = parseNestedJsonText(value).value as JsonValue;
     } catch {
       return value;
     }
@@ -63,6 +78,39 @@ function body(value: JsonValue | undefined): JsonValue | undefined {
 
 /** A duration in milliseconds as nanoseconds; zero is allowed. */
 const milliseconds = (value: number): bigint => (value === 0 ? 0n : nanosFrom(value, "ms"));
+
+/** Properties that mark Helicone's own evaluation traffic, lower-cased as Helicone compares
+ * them. */
+const EVALUATION_PROPERTIES = new Set(["helicone-experiment-id", "helicone-evaluator"]);
+
+/** The request's path: `target_url`'s, else `request_path` (the older Postgres export's). */
+function pathOf(record: JsonObject): string {
+  const target = text(record.target_url);
+  if (target)
+    try {
+      return new URL(target).pathname;
+    } catch {
+      // Not a URL: the recorded path, if any, is read instead.
+    }
+  return text(record.request_path) ?? "";
+}
+
+/** Input and output as the GenAI conventions count them: Helicone's counts with the cached and
+ * reasoning tokens it took out added back. */
+function usageOf(record: JsonObject): NonNullable<SpanRow["usage"]> {
+  const prompt = count(record.prompt_tokens);
+  const completion = count(record.completion_tokens);
+  const cacheRead = count(record.prompt_cache_read_tokens);
+  const cacheWrite = count(record.prompt_cache_write_tokens);
+  const reasoning = count(record.reasoning_tokens);
+  return {
+    input: prompt === undefined ? undefined : prompt + (cacheRead ?? 0) + (cacheWrite ?? 0),
+    output: completion === undefined ? undefined : completion + (reasoning ?? 0),
+    cacheRead,
+    cacheWrite,
+    reasoning,
+  };
+}
 
 function readRequest(record: JsonObject, context: ConvertContext): void {
   const requestId = text(record.request_id);
@@ -82,7 +130,7 @@ function readRequest(record: JsonObject, context: ConvertContext): void {
     end = start + milliseconds(record.delay_ms);
     timing = "end_from_latency";
   }
-  const path = text(record.request_path) ?? "";
+  const path = pathOf(record);
   const embedding = /\/embeddings\/?$/.test(path);
   const requestBody = body(record.request_body);
   const responseBody = body(record.response_body);
@@ -111,13 +159,7 @@ function readRequest(record: JsonObject, context: ConvertContext): void {
       : {}),
     ...(responseBody !== undefined ? { output: responseContent(responseBody)! } : {}),
     ...(system !== undefined ? { systemInstructions: system } : {}),
-    usage: {
-      input: count(record.prompt_tokens),
-      output: count(record.completion_tokens),
-      cacheRead: count(record.prompt_cache_read_tokens),
-      cacheWrite: count(record.prompt_cache_write_tokens),
-      reasoning: count(record.reasoning_tokens),
-    },
+    usage: usageOf(record),
     ...(user !== undefined ? { user } : {}),
     ...(session !== undefined ? { session } : {}),
     attributes: {
@@ -136,6 +178,8 @@ function readRequest(record: JsonObject, context: ConvertContext): void {
     record,
     ...(text(record.updated_at) ? { revision: text(record.updated_at)! } : {}),
   };
+  if (Object.keys(properties ?? {}).some((key) => EVALUATION_PROPERTIES.has(key.toLowerCase())))
+    row.origin = "evaluation";
   if (typeof status === "number" && status >= 400) {
     const message = text(object(object(responseBody)?.error)?.message);
     row.error = { message: message ?? `HTTP ${status}`, type: String(status) };

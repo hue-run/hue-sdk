@@ -5,11 +5,11 @@ import {
   count,
   first,
   isoNanos,
+  metadataUser,
   object,
   objectField,
   SESSION_FIELDS,
   text,
-  USER_FIELDS,
   type JsonObject,
 } from "./row-platform-fields.js";
 import { readRecords, type SpanKind, type SpanRow } from "./rows.js";
@@ -27,8 +27,9 @@ import { readRecords, type SpanKind, type SpanRow } from "./rows.js";
  *   `start_time` starts at the instant its `dotted_order` records for it.
  * - `run_type` names the kind: `llm` a model call, `tool` a tool call, `embedding` and
  *   `retriever`; `chain`, `prompt` and `parser` record no operation.
- * - The user and conversation come from the run's metadata (`user_id`, `thread_id`, `session_id`,
- *   `conversation_id`, …) and the v2 `thread_id`; never from the run's own `session_id` (v2
+ * - The user and conversation come from the run's metadata (`userId` or `user_id`, read in the
+ *   order Hue reads a metadata map; `thread_id`, `session_id`, `conversation_id`, …) and the v2
+ *   `thread_id`; never from the run's own `session_id` (v2
  *   `project_id`), which names the tracing project, nor `ls_user_id`, the LangSmith account whose
  *   key traced it.
  * - Token counts are read from `llm` runs only: `list_runs` sums a chain's counts over its
@@ -155,6 +156,17 @@ const errorType = (message: string | undefined): string | undefined =>
 const detail = (details: JsonValue | undefined, name: string) =>
   count(object(details)?.[name]) ?? count(object(object(details)?.raw)?.[name]);
 
+/** Cache writes as LangSmith records them: `cache_creation`, the v2 API's `cache_write`, or, as
+ * LangSmith's own Anthropic wrapper records them, the sum of `ephemeral_5m_input_tokens` and
+ * `ephemeral_1h_input_tokens`. */
+function cacheWrites(details: JsonValue | undefined): number | undefined {
+  const recorded = detail(details, "cache_creation") ?? detail(details, "cache_write");
+  if (recorded !== undefined) return recorded;
+  const short = detail(details, "ephemeral_5m_input_tokens");
+  const long = detail(details, "ephemeral_1h_input_tokens");
+  return short === undefined && long === undefined ? undefined : (short ?? 0) + (long ?? 0);
+}
+
 function readRun(run: Run, context: ConvertContext): void {
   const { traceKey, parentKey } = placement(run);
   if (traceKey === undefined) throw new ConversionError("a run without a trace_id");
@@ -239,9 +251,7 @@ function readRun(run: Run, context: ConvertContext): void {
       cacheRead:
         detail(run.prompt_token_details, "cache_read") ??
         detail(usage?.input_token_details, "cache_read"),
-      cacheWrite:
-        detail(run.prompt_token_details, "cache_creation") ??
-        detail(usage?.input_token_details, "cache_creation"),
+      cacheWrite: cacheWrites(run.prompt_token_details) ?? cacheWrites(usage?.input_token_details),
       reasoning:
         detail(run.completion_token_details, "reasoning") ??
         detail(usage?.output_token_details, "reasoning"),
@@ -258,7 +268,7 @@ function readRun(run: Run, context: ConvertContext): void {
     const callId = text(extra?.tool_call_id) ?? returned.callId;
     if (callId) row.tool.callId = callId;
   } else {
-    const user = first(metadata, USER_FIELDS);
+    const user = metadataUser(metadata);
     const session = first(metadata, SESSION_FIELDS) ?? identityText(run.thread_id);
     if (user !== undefined) row.user = user;
     if (session !== undefined) row.session = session;
