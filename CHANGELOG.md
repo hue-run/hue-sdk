@@ -8,7 +8,7 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### Unreleased
+### [0.22.0] - 2026-10-21
 
 #### Added
 
