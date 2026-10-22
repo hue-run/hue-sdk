@@ -19,6 +19,8 @@ const apiKey = "synthetic-platform-key";
 type Value = { stringValue?: string; intValue?: string };
 type Span = {
   name: string;
+  spanId?: string;
+  parentSpanId?: string;
   attributes?: { key: string; value: Value }[];
   status?: { code?: number; message?: string };
 };
@@ -174,6 +176,47 @@ test("a Tool Router session execute records tool_slug and arguments under the se
     tool_slug: "SLACK_SEND_MESSAGE",
     arguments: { channel: "C1", text: "hi" },
   });
+});
+
+test("the platform call runs inside its span, so spans it creates parent under it", async () => {
+  let hueRef: ReturnType<typeof createHue> | undefined;
+  const composio = fakeComposio(() => hueRef!.withSpan("inner_http", async () => composioReceipt));
+  const { spans } = await exported(async (hue) => {
+    hueRef = hue;
+    instrumentComposio(hue, composio);
+    await composio.tools.execute("GMAIL_FETCH_EMAILS", { userId: "u" });
+  });
+  const tool = spans.find((item) => item.name === "execute_tool GMAIL_FETCH_EMAILS")!;
+  const inner = spans.find((item) => item.name === "inner_http")!;
+  expect(inner.parentSpanId).toBe(tool.spanId);
+});
+
+test("a throwing argument getter and a synchronous throw reach the caller unchanged", async () => {
+  const composio = fakeComposio();
+  const hostile = Object.defineProperty({}, "userId", {
+    get() {
+      throw new Error("synthetic getter");
+    },
+    enumerable: true,
+  });
+  const { spans } = await exported(async (hue) => {
+    instrumentComposio(hue, composio);
+    expect(await composio.tools.execute("GMAIL_FETCH_EMAILS", hostile)).toBe(composioReceipt);
+    expect(composio.calls).toEqual([["GMAIL_FETCH_EMAILS", hostile]]);
+  });
+  expect(spans.filter((item) => item.name.startsWith("execute_tool"))).toHaveLength(0);
+  const throwing = fakeComposio(() => {
+    throw new Error("synthetic sync throw");
+  });
+  const second = await exported(async (hue) => {
+    instrumentComposio(hue, throwing);
+    expect(() => throwing.tools.execute("GMAIL_FETCH_EMAILS", { userId: "u" })).toThrow(
+      "synthetic sync throw",
+    );
+  });
+  expect(
+    second.spans.find((item) => item.name === "execute_tool GMAIL_FETCH_EMAILS")?.status?.code,
+  ).toBe(2);
 });
 
 test("a rejected Composio call marks the span as an error and stays the caller's rejection", async () => {

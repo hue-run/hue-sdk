@@ -29,19 +29,46 @@ function defined(fields: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
 }
 
-/** Replaces `target[method]` with a version that records a tool span alongside the original call.
- * The caller receives the original return value, so a Pipedream `HttpResponsePromise` keeps
- * `withRawResponse()`; the span settles with it and a rejection stays the caller's to handle. */
+/** Replaces `target[method]` with a version that runs the original call inside a tool span. The
+ * span is active while the original runs, so spans from the platform SDK's own instrumentation
+ * join it. The caller receives the original return value (a Pipedream `HttpResponsePromise`
+ * keeps `withRawResponse()`); the span settles with it and a rejection stays the caller's. */
 function patch(hue: HueClient, target: unknown, method: string, describe: Describe): void {
   if (target === null || typeof target !== "object" || instrumented.has(target)) return;
   const original = Reflect.get(target, method);
   if (typeof original !== "function") return;
   instrumented.add(target);
   Reflect.set(target, method, function (this: unknown, ...args: unknown[]) {
-    const call = describe(args);
-    const result = Reflect.apply(original, this ?? target, args);
-    if (call) hue.tool(call.name, call.input, () => result, call.options).catch(() => undefined);
-    return result;
+    const receiver = this ?? target;
+    let call: ReturnType<Describe>;
+    try {
+      call = describe(args);
+    } catch {
+      // A throwing argument getter is the application's problem to see, not a reason to drop its call.
+      call = undefined;
+    }
+    if (!call) return Reflect.apply(original, receiver, args);
+    let outcome: { returned: unknown } | { thrown: unknown } | undefined;
+    const traced = hue.tool(
+      call.name,
+      call.input,
+      () => {
+        try {
+          const returned: unknown = Reflect.apply(original, receiver, args);
+          outcome = { returned };
+          return returned;
+        } catch (thrown) {
+          outcome = { thrown };
+          throw thrown;
+        }
+      },
+      call.options,
+    );
+    traced.catch(() => undefined);
+    // withSpan calls back before its first await, so the original has already run here.
+    if (outcome === undefined) return traced;
+    if ("thrown" in outcome) throw outcome.thrown;
+    return outcome.returned;
   });
 }
 
