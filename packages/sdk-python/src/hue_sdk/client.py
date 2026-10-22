@@ -33,7 +33,6 @@ from ._attachment import (
     Attachment,
     PathFile,
     PlacedAttachment,
-    holds_attachment,
     locate_parts,
     read_path,
 )
@@ -58,7 +57,7 @@ from ._tool_endpoint import ToolEndpoint, tool_endpoint_attributes
 from ._version import __version__
 from .processors import HUE_TRACER_SCOPE, BoundedLogProcessor, BoundedSpanProcessor
 from .receipts import TraceReceiptField, TraceVerificationResult, verify_trace
-from .snapshots import snapshot_content
+from .snapshots import MAX_CONTENT_SNAPSHOT_NODES, snapshot_content
 from .transport import (
     DEFAULT_BASE_URL,
     TRUNCATED_KEY,
@@ -84,14 +83,19 @@ def _recorded_as_json(value: Any) -> bool:
     """Whether a span attribute passed to a helper is recorded as JSON text: an attachment, a
     value holding one, or JSON data OpenTelemetry cannot hold as an attribute (a dict, or a list
     or tuple that is not of one primitive type), as the TypeScript SDK records it."""
-    if holds_attachment(value):
-        return True
-    if isinstance(value, Mapping):
+    if isinstance(value, (Attachment, Mapping)):
         return True
     if not isinstance(value, (list, tuple)):
         return False
+    if type(value) not in (list, tuple):
+        raise ValueError("Attribute arrays must be built-in lists or tuples.")
+    if len(value) >= MAX_CONTENT_SNAPSHOT_NODES:
+        raise ValueError("Attribute array exceeds its traversal limit.")
     first: type | None = None
-    for item in value:
+    for index, item in enumerate(value, 1):
+        # A shared list may grow after the length check.
+        if index >= MAX_CONTENT_SNAPSHOT_NODES:
+            raise ValueError("Attribute array exceeds its traversal limit.")
         if item is None:
             continue
         if type(item) not in (bool, str, int, float):
@@ -144,7 +148,7 @@ def _utf8_byte_size(value: str, limit: int) -> int:
 
 def _is_label(value: Any) -> bool:
     """A non-blank string of at most 256 UTF-16 code units, matching TypeScript's ``isLabel``."""
-    if type(value) is not str or not value.strip() or "\x00" in value:
+    if type(value) is not str or len(value) > 256 or not value.strip() or "\x00" in value:
         return False
     try:
         return len(value.encode("utf-16-le")) // 2 <= 256
@@ -154,7 +158,7 @@ def _is_label(value: Any) -> bool:
 
 def _is_source_label(value: Any) -> bool:
     """A source label that is UTF-16 bounded and safe to export."""
-    if type(value) is not str or not value.strip() or "\x00" in value:
+    if type(value) is not str or len(value) > 256 or not value.strip() or "\x00" in value:
         return False
     try:
         return len(value.encode("utf-16-le")) // 2 <= 256 and value.encode("utf-8") is not None
@@ -164,7 +168,7 @@ def _is_source_label(value: Any) -> bool:
 
 def _identifier(value: Any) -> str:
     """Validate a workspace identifier with TypeScript/Fern's UTF-16 limit."""
-    if type(value) is not str or not value or "\x00" in value:
+    if type(value) is not str or not value or len(value) > 4096 or "\x00" in value:
         raise ValueError("Workspace identifiers must contain 1–4096 valid characters.")
     try:
         units = len(value.encode("utf-16-le")) // 2
@@ -241,10 +245,6 @@ class HueSpan:
         A value that is a dict, a list OpenTelemetry cannot hold (not of one primitive type) or an
         ``Attachment`` is recorded as JSON text, with each attachment as its digest part and its
         bytes uploaded."""
-        if not _recorded_as_json(value):
-            plain = cast(AttributeValue, value)
-            self._client._instrument(lambda: self.otel_span.set_attribute(name, plain))
-            return
 
         def record() -> None:
             attributes, placed = self._client._attribute_values({name: value})
@@ -1075,10 +1075,10 @@ class Hue:
         result = dict(attributes)
         placed: list[tuple[str, list[PlacedAttachment], Any]] = []
         for key, value in attributes.items():
-            if not _recorded_as_json(value):
-                continue
             found: list[PlacedAttachment] = []
             try:
+                if not _recorded_as_json(value):
+                    continue
                 copied = snapshot_content(
                     value, attachments=found, capture_content=self.capture_content
                 )
@@ -1343,22 +1343,25 @@ class Hue:
         }
         if call_id is not None:
             attributes["gen_ai.tool.call.id"] = self._metadata_string(call_id, "unknown")
-        if mcp is not None:
-            if isinstance(mcp, Mapping):
-                for key, field, valid in (
-                    ("mcp.server.name", "name", _is_label),
-                    ("mcp.server.version", "version", _is_label),
-                    ("hue.mcp.provider", "provider", _is_source_label),
-                    ("hue.mcp.surface", "surface", _is_source_label),
-                ):
-                    value = mcp.get(field)
-                    if value is None:
-                        continue
-                    if valid(value):
-                        attributes[key] = value
-                    elif self._active:
-                        self._record_issue()
-            elif self._active:
+        if self._active and mcp is not None:
+            try:
+                if isinstance(mcp, Mapping):
+                    for key, field, valid in (
+                        ("mcp.server.name", "name", _is_label),
+                        ("mcp.server.version", "version", _is_label),
+                        ("hue.mcp.provider", "provider", _is_source_label),
+                        ("hue.mcp.surface", "surface", _is_source_label),
+                    ):
+                        value = mcp.get(field)
+                        if value is None:
+                            continue
+                        if valid(value):
+                            attributes[key] = value
+                        else:
+                            self._record_issue()
+                else:
+                    self._record_issue()
+            except Exception:
                 self._record_issue()
         if self._active and self.capture_content and endpoint is not None:
             try:

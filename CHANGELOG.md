@@ -8,6 +8,16 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.23.1] - 2026-10-22
+
+#### Fixed
+
+- Safe initialization reports a fixed diagnostic without reading or exposing arbitrary
+  properties of a provider's exception.
+- Optional tool, subagent, model and usage metadata cannot prevent application callbacks
+  from running. Disabled and closed helpers skip that metadata; active failures are counted
+  without retrying application work.
+
 ### [0.23.0] - 2026-10-21
 
 #### Added
@@ -1765,6 +1775,25 @@ No registry release is claimed until publication and registry acceptance complet
 - Documented runtime and integration matrix, including dependency-resolution and cross-language content and delivery boundaries; verified release archives and registry bytes.
 
 ## hue-run (Python)
+
+### [0.13.5] - 2026-10-22
+
+#### Fixed
+
+- Live-span announcements use a separate bounded background transport. A slow advisory
+  request cannot hold completed spans, explicit flushes or shutdown. Busy slots skip new
+  announcements, and ended spans stop advisory retries without retaining application content.
+- Optional custom-attribute and MCP metadata inspection stays inside the failure boundary.
+  Disabled clients skip it; oversized primitive arrays are omitted and counted. Classification
+  no longer traverses a concurrently mutating mapping before the application can run.
+- Reject oversized labels and workspace identifiers before allocating encoding buffers.
+
+#### Documentation
+
+- Lead the Python guide with a shared safe client for serving requests and explain async,
+  streaming and serverless lifecycle boundaries. Real async OpenAI streaming tests cover
+  completion, cancellation and early close with capture enabled, disabled and a rejected
+  collector request.
 
 ### [0.13.4] - 2026-10-20
 

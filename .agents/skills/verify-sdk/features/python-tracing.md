@@ -11,6 +11,9 @@ An application opens `Hue(base_url, api_key, ...)`, records spans, model calls a
 - `py-media` inspects bounded, nonempty media and exports exact digests and blob entries.
 - `py-file-upload` covers opt-in `record_file` uploads and name validation.
 - `py-attachment` places `hue_sdk.Attachment` in recorded values and uploads it under `<attribute>#<pointer>` or `body#<pointer>`.
+- `py-serving-isolation` preserves results, original exceptions and operation counts when metadata lookup or iteration fails; disabled clients never inspect optional metadata, and primitive attribute arrays have bounded traversal.
+- `py-async-serving` exercises the real `AsyncOpenAI` HTTP stream through full consumption, early close and real task cancellation, with capture enabled or disabled and tracing enabled or disabled. Request context and cleanup stay intact and the provider and tool each run once.
+- `py-advisory-isolation` keeps completed spans and explicit flushes independent of slow live-announcement acknowledgements, including an advisory request already in flight. Advisory delivery has one bounded slot and never holds shutdown.
 
 ## How to get to it (user POV)
 
@@ -41,6 +44,8 @@ Preconditions:
 - **Behavior test.** `uv run --frozen --all-groups pytest tests/test_sdk.py -q -k redact`. Expected: all selected tests pass in about 2 s.
 - **Sub-agents (`py-subagent`).** `uv run --frozen --all-groups pytest tests/test_sdk.py -q -k subagent`. Expected: `6 passed` in about 2 s.
 - **Static checks** (3.5 s): `uv run --frozen --all-groups ruff check src tests && uv run --frozen --all-groups mypy`.
+- **Serving isolation.** Run `uv run --frozen --all-groups pytest tests/test_isolation.py -k "attribute or mcp"` and `uv run --frozen --all-groups pytest tests/test_async_serving.py`. The optional compatibility group supplies the real async provider client; all HTTP responses are synthetic.
+- **Advisory isolation.** Run `uv run --frozen --all-groups pytest tests/test_live_spans.py`. Inspect the delayed-advisory regressions and resource/capability checks; a successful completed-record flush is no longer a barrier for observing a live announcement.
 
 ## Gotchas
 

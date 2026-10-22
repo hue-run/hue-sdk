@@ -552,8 +552,8 @@ the Langfuse project's own keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, a
 `HUE_API_KEY`:
 
 ```sh
-npx -y @hue-run/sdk@0.23.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.23.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.23.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.23.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 - It reads Langfuse Cloud and self-hosted v4 through the Observations API v2, and self-hosted v3
@@ -1325,7 +1325,7 @@ existing-provider flush callbacks and recovery. Local/CI runners remain availabl
 
 ## Serving safely
 
-Use `createHueSafe(options)` for best-effort startup. Invalid initialization returns a disabled client that keeps your `onExportIssue` hook and records the reason as an instrumentation failure. Pass `enabled: false` to disable Hue without a key or a `captureContent` choice; disabled helpers still execute the application callback, and `inject()` keeps propagating the application's own trace context. `flushSafe({ timeoutMillis: 1000 })` and `shutdownSafe({ timeoutMillis: 1000 })` return `{ ok, timedOut, report }` without rejecting. Strict initialization, connection checks and `flush()` remain available for diagnostics; do not gate application readiness or responses on them.
+Use `createHueSafe(options)` for best-effort startup. Invalid initialization returns a disabled client that keeps your `onExportIssue` hook and records a fixed initialization-failure diagnostic without inspecting or exposing the original error. Pass `enabled: false` to disable Hue without a key or a `captureContent` choice; disabled helpers still execute the application callback, and `inject()` keeps propagating the application's own trace context. `flushSafe({ timeoutMillis: 1000 })` and `shutdownSafe({ timeoutMillis: 1000 })` return `{ ok, timedOut, report }` without rejecting. Strict initialization, connection checks and `flush()` remain available for diagnostics; do not gate application readiness or responses on them.
 
 Capture/serialization/redaction/provider failures omit unsafe telemetry, record failures, and preserve the original business result/error. Async diagnostic rejections are contained; diagnostics are rate-limited. The default `maxQueueBytes` is 8 MiB across traces/logs including in-flight work, alongside the existing record cap. `pendingBytes` is a current queue gauge; `droppedSpans`, `droppedLogs` and `instrumentationFailures` are cumulative failure counters; `uploadedValues` and `uploadFallbacks` count completed uploads and upload fallbacks for whole attributes, eligible binary or large text media, and opt-in `recordFile` uploads. Whole-attribute fallbacks refused at export keep a prefix; media fallbacks keep a digest; helper upload fallbacks keep the file event; a value whose upload failed after export keeps its entry as well. This is a telemetry budget, not a total process memory ceiling. A timeout bounds the caller and does not cancel a borrowed provider. Never retry the business operation to recover telemetry. See [production setup](https://docs.hue.run/sdks/typescript#production-setup).
 
