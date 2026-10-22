@@ -1068,7 +1068,7 @@ describe("Braintrust", () => {
         span_id: "2".repeat(16),
         root_span_id: mastraTrace,
         span_parents: ["1".repeat(16)],
-        span_attributes: { name: "mcp tool: 'search_threads'", type: "tool" },
+        span_attributes: { name: "mcp_tool: 'search_threads' on 'gmail'", type: "tool" },
         input: [
           {
             role: "assistant",
@@ -1083,7 +1083,7 @@ describe("Braintrust", () => {
           },
         ],
         output: { role: "tool", content: '{"threads":[]}', tool_call_id: "call_9" },
-        metadata: { spanType: "mcp_tool_call", resourceId: "owner-1" },
+        metadata: { spanType: "mcp_tool_call", mcpServer: "gmail", resourceId: "owner-1" },
         metrics: { start: 1792500001, end: 1792500002 },
       },
       // An OpenAI Agents trace: its ids are no OpenTelemetry ids, its conversation is group_id;

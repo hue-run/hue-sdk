@@ -217,7 +217,9 @@ function readRow(record: Row, context: ConvertContext): void {
   if (kind === "tool") {
     const requested = toolArguments(record.input);
     const returned = toolResult(record.output);
-    const quoted = /'([^']+)'\s*$/.exec(name)?.[1];
+    // Mastra names a tool span `tool: '<tool>'` and an MCP call `mcp_tool: '<tool>' on '<server>'`:
+    // the first quoted name is the tool's, the trailing one its server's.
+    const quoted = /'([^']+)'/.exec(name)?.[1];
     row.tool = {
       name: text(metadata?.toolName) ?? text(metadata?.tool_name) ?? quoted ?? name,
       ...(requested.arguments !== undefined ? { arguments: requested.arguments } : {}),
