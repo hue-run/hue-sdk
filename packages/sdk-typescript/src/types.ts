@@ -248,6 +248,21 @@ export interface ToolOptions extends Pick<SpanOptions, "parentContext"> {
    * to that server rather than inferred from the tool name.
    */
   mcp?: McpServerInfo;
+  /** Connector platform that ran this tool: Composio, Pipedream or another dispatcher. */
+  integration?: ToolIntegration;
+}
+
+/**
+ * Recorded as `hue.integration.platform`, `hue.integration.toolkit` and `hue.integration.version`,
+ * the fields Hue's platform translators read to recognize a dispatched app operation.
+ */
+export interface ToolIntegration {
+  /** Platform identifier such as `composio` or `pipedream`. */
+  platform: string;
+  /** App or toolkit slug on that platform, when the platform states it. */
+  toolkit?: string;
+  /** Tool or component version the call pinned, when present. */
+  version?: string;
 }
 
 /** Providers whose hosted tool calls {@link HueClient.recordProviderToolCalls} can read. */
