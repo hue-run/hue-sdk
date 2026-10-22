@@ -141,9 +141,11 @@ def test_async_provider_stream_preserves_work_cleanup_and_context(
                     await first_chunk.wait()
                     # consume() now awaits the provider's next chunk, which the server holds.
                     task.cancel("synthetic-disconnect")
-                    with pytest.raises(asyncio.CancelledError) as caught:
+                    with pytest.raises(asyncio.CancelledError):
                         await task
-                    assert caught.value is cancellations[0]
+                    # Python 3.10 can replace cancellation when it crosses a Task boundary.
+                    # Identity across Hue's cleanup is asserted inside consume(), above.
+                    assert task.cancelled()
                 else:
                     iterator = reply()
                     assert await anext(iterator) == "answer"

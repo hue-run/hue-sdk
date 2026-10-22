@@ -590,18 +590,20 @@ def test_receiver_without_the_header_gets_one_request_of_placeholders_at_most(re
 def test_no_request_of_placeholders_follows_the_acknowledgement_that_turned_live_spans_off(
     receiver,
 ):
-    # Enough placeholder bytes for two exports of the 4 MiB batch target; the first
-    # acknowledgement lacks the header.
+    # The burst exceeds the advisory transport's single-batch budget; the first
+    # acknowledgement lacks the header and must stop every later announcement.
     receiver.legacy = True
     large = "x" * 60_000
-    # Placeholders may use a quarter of the queue's bytes; keep that above the two exports.
+    # Placeholders may use a quarter of the queue's bytes; keep that above the burst.
     with Hue(receiver.url, KEY, capture_content=False, max_queue_bytes=64 * 1024 * 1024) as hue:
         with ExitStack() as stack:
             for index in range(80):
                 stack.enter_context(
                     hue.span(f"burst-{index}", attributes={"gen_ai.request.model": large})
                 )
-            wait_for(queued(hue, 80))
+            # At 64 records the worker can export before the caller observes all 80 queued.
+            # Observe the actual acknowledgement instead of that transient queue count.
+            wait_for(lambda: hue.export_status.live_spans_rejected)
             assert flush_advisories(hue)
             assert hue.export_status.live_spans_rejected
             assert len([r for r in receiver.requests if r[0].endswith("/traces")]) == 1
