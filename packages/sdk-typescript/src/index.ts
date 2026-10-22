@@ -9,6 +9,7 @@ export { Attachment, type AttachmentOptions } from "./attachment.js";
 export { createHueTransport, HueTransport, HueExportError } from "./transport.js";
 export type { RecordValue } from "./transport.js";
 export { hueExperimentalTelemetry } from "./experimental-telemetry.js";
+export { instrumentComposio, instrumentPipedream } from "./platforms.js";
 export { contentPrefixes } from "./privacy.js";
 export { HueTraceVerificationError } from "./receipt.js";
 export type * from "./types.js";

@@ -552,8 +552,8 @@ the Langfuse project's own keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, a
 `HUE_API_KEY`:
 
 ```sh
-npx -y @hue-run/sdk@0.23.2 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.23.2 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.24.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.24.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 - It reads Langfuse Cloud and self-hosted v4 through the Observations API v2, and self-hosted v3
@@ -797,6 +797,51 @@ by `serverLabel` inside the recorded result, so before export the TypeScript SDK
 results. The label can only be read when AI SDK recorded the result: `hueTelemetry(hue)` with
 `captureContent: false` records none, whereas an application whose AI SDK integration records
 outputs and exports through Hue's attached processors keeps the label.
+
+## Composio and Pipedream
+
+An agent usually calls `composio.tools.execute(...)` or `pipedream.actions.run(...)` inside its
+own tool function and traces only that wrapper, so the platform call that ran the app operation
+never becomes a span. Since TypeScript `0.24.0`, `instrumentComposio(hue, composio)` and
+`instrumentPipedream(hue, pipedream)` patch the method on the client instance you already hold
+and return the same instance. Each platform call then records one `execute_tool <tool>` span
+under the active span. The SDK takes no dependency on `@composio/core` or `@pipedream/sdk`.
+
+```ts
+import { Composio } from "@composio/core";
+import { PipedreamClient } from "@pipedream/sdk";
+import { instrumentComposio, instrumentPipedream } from "@hue-run/sdk";
+
+const composio = instrumentComposio(hue, new Composio({ apiKey: process.env.COMPOSIO_API_KEY }));
+const pipedream = instrumentPipedream(hue, new PipedreamClient({ projectId, clientId, clientSecret, projectEnvironment }));
+
+// Each call below records its own span, even inside a wrapper tool.
+await composio.tools.execute("GMAIL_FETCH_EMAILS", { userId, connectedAccountId, version, arguments: { max_results: 5 } });
+await pipedream.actions.run({ id: "gmail-send-email", externalUserId, configuredProps });
+```
+
+| Call                                                   | `gen_ai.tool.name`           | `gen_ai.tool.call.arguments` (content)                                 | `url.full` (content, `client_config`)                                  |
+| ------------------------------------------------------ | ---------------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `composio.tools.execute(slug, params)`                 | `slug`, e.g. `GMAIL_FETCH_EMAILS` | `{ connected_account_id, arguments, user_id, version }` from `params` | `<baseURL>/api/v3.1/tools/execute/<slug>`                              |
+| `session.execute(slug, arguments)` (Tool Router)       | `slug`                       | `{ tool_slug, arguments }`                                             | `<baseURL>/api/v3.1/tool_router/session/<sessionId>/execute`          |
+| `pipedream.actions.run({ id, externalUserId, ... })`   | `id`, e.g. `gmail-send-email` | `{ id, version, external_user_id, configured_props }`                 | `<baseUrl>/v1/connect/<projectId>/actions/run`                         |
+
+Every span also records `gen_ai.operation.name` `execute_tool`, `hue.integration.platform`
+(`composio` or `pipedream`), `hue.integration.version` when the call pins a `version`,
+`http.request.method` `POST` and, as `gen_ai.tool.call.result`, the response the SDK returned:
+Composio's `{ data, error, successful, logId }` receipt or Pipedream's `{ exports, os, ret }`. The
+arguments use the field names of the platform's REST request, which is what Hue's platform
+translators read. Composio `customAuthParams` and other fields outside that request body are
+not recorded. Content and the URL follow `captureContent` and the redactor like any other tool
+span; metadata-only export keeps the span, tool name and platform. A disabled client returns the
+client untouched, and instrumenting the same instance twice records one span per call.
+
+The caller still receives the SDK's own return value, so a Pipedream `HttpResponsePromise` keeps
+`withRawResponse()`, and a rejected call rejects for the caller as before while the span records
+the error. `ToolOptions.integration` (`{ platform, toolkit?, version? }`) records the same three
+`hue.integration.*` attributes on a hand-written `tool()` span for another dispatcher. Call shapes
+follow Composio's [Executing tools directly](https://docs.composio.dev/docs/tools-direct/executing-tools)
+and Pipedream's [Run action](https://pipedream.com/docs/connect/api-reference/run-action).
 
 ## Privacy and content
 

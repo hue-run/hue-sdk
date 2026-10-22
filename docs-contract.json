@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:a0cf03b838653830b00de5275375b7d1a1c1c4a606bb1ef61a832eb318f42f10",
+    "sha256": "sha256:321aabb2d1c6bcb524410c5345b4531df42b280ed5c79b1f348bf8338a715d64",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -262,6 +262,7 @@
             "SpanOptions",
             "TokenUsage",
             "ToolEndpoint",
+            "ToolIntegration",
             "ToolOptions",
             "TraceReceipt",
             "TraceReceiptField",
@@ -271,7 +272,9 @@
             "createHue",
             "createHueSafe",
             "createHueTransport",
-            "hueExperimentalTelemetry"
+            "hueExperimentalTelemetry",
+            "instrumentComposio",
+            "instrumentPipedream"
           ]
         },
         "@hue-run/sdk/ai-sdk": {
@@ -744,7 +747,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.23.2"
+      "version": "0.24.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -753,10 +756,10 @@
     "description": "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.8.21"
+      "version": "0.8.22"
     },
     "name": "hue",
-    "sha256": "sha256:9fd720e853de5f9a3a8bec19b50e28d4b6ace9a0fe4f2fc10c3292ae1e6413c7",
+    "sha256": "sha256:52698795103038b96e337f2e253a2d44422f97421c6c41ea877a7cca1b84ca3c",
     "source": "skills/hue/SKILL.md"
   }
 }

@@ -8,6 +8,25 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.24.0] - 2026-10-22
+
+#### Added
+
+- `instrumentComposio(hue, composio)` and `instrumentPipedream(hue, pipedream)` patch
+  `composio.tools.execute`, a Tool Router `session.execute` and `pipedream.actions.run` on the
+  client instance the application holds, so each platform call records one
+  `execute_tool <tool>` span even when the application traces only its wrapper tool. The span
+  carries the tool slug or component key as `gen_ai.tool.name`, the platform's REST request
+  fields (`connected_account_id`, `arguments`, `user_id`, `version`; `tool_slug`, `arguments`;
+  `id`, `version`, `external_user_id`, `configured_props`) as `gen_ai.tool.call.arguments`, the
+  SDK's response as `gen_ai.tool.call.result`, and the configured endpoint as `url.full` with
+  `http.request.method` `POST`. Content follows `captureContent` and the redactor; the caller's
+  return value and rejections are unchanged; a disabled client returns the client untouched. No
+  dependency on `@composio/core` or `@pipedream/sdk`.
+- **Wire** `ToolOptions.integration` (`{ platform, toolkit?, version? }`) records
+  `hue.integration.platform`, `hue.integration.toolkit` and `hue.integration.version` on a tool
+  span. The platform helpers above set `platform` and the pinned `version`.
+
 ### [0.23.2] - 2026-10-22
 
 #### Fixed
@@ -2564,6 +2583,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.22 (2026-10-22): pin `@hue-run/sdk@0.24.0` and route Composio and Pipedream SDK calls through `instrumentComposio` / `instrumentPipedream`.
 - 0.8.18 (2026-10-20): the TypeScript installation command pins `@hue-run/sdk@0.21.1`.
 - 0.8.17 (2026-10-20): pin Python `0.13.4`, document released HTTP endpoint evidence, and include Node 26.
 - 0.8.16 (2026-10-20): the TypeScript installation command pins `@hue-run/sdk@0.21.0`.

@@ -529,6 +529,9 @@ export class HueClient {
       stamp("mcp.server.version", options.mcp?.version);
       stamp("hue.mcp.provider", options.mcp?.provider);
       stamp("hue.mcp.surface", options.mcp?.surface);
+      stamp("hue.integration.platform", options.integration?.platform);
+      stamp("hue.integration.toolkit", options.integration?.toolkit);
+      stamp("hue.integration.version", options.integration?.version);
       if (this.captureContent && options.endpoint !== undefined)
         Object.assign(attributes, toolEndpointAttributes(options.endpoint));
       spanOptions = {

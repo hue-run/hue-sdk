@@ -28,6 +28,11 @@ An application creates a client with `createHue`, records spans and tools, and r
 - `ts-media` inspects bounded, nonempty media and exports exact digests and blob entries.
 - `ts-file-upload` covers opt-in `recordFile` uploads and name validation.
 - `ts-attachment` places `Attachment` in recorded values and uploads it under `<attribute>#<pointer>` or `body#<pointer>`.
+- `ts-platforms` records one `execute_tool` span per `composio.tools.execute`, Tool Router
+  `session.execute` and `pipedream.actions.run` call on a client wrapped with `instrumentComposio`
+  or `instrumentPipedream`: REST request field names as arguments, the SDK response as result,
+  `hue.integration.platform`/`version` and the configured endpoint, with the caller's return
+  value unchanged. Verify with `bun test tests/platforms.test.ts`.
 - `ts-ai-sdk` records AI SDK 7 calls through `hueTelemetry(hue)`, with the end user and conversation from the call's runtime context (`userId`, then `sessionId` or `threadId`, or the keys `HueTelemetryOptions` names) as `user.id` and `gen_ai.conversation.id`.
 
 ## How to get to it (user POV)
