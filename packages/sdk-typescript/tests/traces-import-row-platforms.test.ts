@@ -625,8 +625,11 @@ describe("MLflow traces", () => {
           "b.json": JSON.stringify(second),
         });
         expect(report.traces.refused).toEqual([]);
+        // Tuesday's info sorts first, so its copy is the one read, and the note says so when it
+        // is the later file's.
+        const kept = second === tuesday ? " from this copy" : "";
         expect(report.files.notes).toEqual([
-          { file: "b.json", reason: "the same records as a.json, read once" },
+          { file: "b.json", reason: `the same records as a.json, read once${kept}` },
         ]);
         prepared.push(await bundle(report.output_directory));
       }
@@ -636,7 +639,46 @@ describe("MLflow traces", () => {
       expect((json(agent, "hue.import.source_record") as { info: unknown }).info).toEqual(
         tuesday.info,
       );
+      // A third copy names the file whose copy is kept.
+      const three = await prepareFiles({
+        "a.json": JSON.stringify(monday),
+        "b.json": JSON.stringify(tuesday),
+        "c.json": JSON.stringify(monday),
+      });
+      expect(three.files.notes).toEqual([
+        { file: "b.json", reason: "the same records as a.json, read once from this copy" },
+        { file: "c.json", reason: "the same records as b.json, read once" },
+      ]);
     }
+  });
+});
+
+describe("MLflow trace info", () => {
+  test("refuses a trace whose info a source record cannot hold, with its root or without", async () => {
+    // The info is part of the record of each root, a span whose parent is outside the export
+    // included, so a NUL in its text refuses the trace either way.
+    const trace = JSON.parse(await fixture("mlflow-trace.json")) as Record<string, any>;
+    const broken = (hex: string, root: boolean) => {
+      const copy = structuredClone(trace);
+      copy.info.trace_id = `tr-${hex}`;
+      copy.info.tags["probe.tag"] = "a\u0000b";
+      for (const span of copy.data.spans)
+        span.trace_id = Buffer.from(hex, "hex").toString("base64");
+      if (!root) copy.data.spans = copy.data.spans.slice(1);
+      return copy;
+    };
+    const rooted = "0123456789abcdef0123456789abcdef";
+    const rootless = "fedcba9876543210fedcba9876543210";
+    const report = await prepareFiles({
+      "a.json": JSON.stringify(broken(rooted, true)),
+      "b.json": JSON.stringify(broken(rootless, false)),
+      "c.json": JSON.stringify(trace),
+    });
+    expect(report.totals.traces).toBe(1);
+    expect(report.traces.refused).toEqual([
+      { file: "a.json", trace_id: rooted, reason: "Source JSON contains invalid text" },
+      { file: "b.json", trace_id: rootless, reason: "Source JSON contains invalid text" },
+    ]);
   });
 });
 

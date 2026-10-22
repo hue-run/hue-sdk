@@ -104,24 +104,28 @@ export class ImportReader {
     };
   }
 
-  /** Reads one file's bytes; returns the size of its decoded content, or what decompressing it
-   * counted when more (see {@link decodeContainer}). */
-  read(file: string, raw: Uint8Array): number {
+  /** Reads one file's bytes; returns what its content decompressed to (`held`) and what that
+   * counts against the bounds (`counted`, at least `held`): each zstd frame at least a minimum, and
+   * damage more (see {@link decodeContainer}). */
+  read(file: string, raw: Uint8Array): { held: number; counted: number } {
     const decoded = decodeContainer(raw, this.options.maxFileBytes);
-    // What decompressing the file counted, damage and zstd's per-frame minimum included.
-    const counted = decoded.counted ?? 0;
+    const sized = (held: number, counted = 0) => ({ held, counted: Math.max(held, counted) });
     if ("unsupported" in decoded) {
       this.result.unsupported.push({ file, reason: decoded.unsupported });
-      return Math.max(raw.byteLength, counted);
+      return sized(Math.max(raw.byteLength, decoded.held ?? 0), decoded.counted);
     }
     const binary = binaryValues(decoded.bytes, this.options.maxFileBytes);
     const parsed = binary ?? parseValues(decoded.bytes);
     if ("unsupported" in parsed) {
       this.result.unsupported.push({ file, reason: parsed.unsupported });
-      return Math.max(decoded.bytes.byteLength, counted);
+      return sized(decoded.bytes.byteLength, decoded.counted);
     }
+    // A length-prefixed file counts what its messages count, or what undoing its own compression
+    // counted when that is more.
     const size = () =>
-      Math.max("bytes" in parsed ? parsed.bytes() : decoded.bytes.byteLength, counted);
+      "counted" in parsed
+        ? sized(parsed.bytes(), Math.max(parsed.counted(), decoded.counted ?? 0))
+        : sized(decoded.bytes.byteLength, decoded.counted);
     const digest = sha256Hex(decoded.bytes);
     const skipped = new Reported(file);
     const notes = new Reported(file);
@@ -252,9 +256,11 @@ export class ImportReader {
       ...(source.index !== undefined ? { record: source.index + 1 } : {}),
     };
     // Rows the value gave and those an identical copy of which was already read elsewhere: a
-    // value that gave nothing new is noted, so a collapsed duplicate is never silent.
+    // value that gave nothing new is noted, so a collapsed duplicate is never silent. When every
+    // copy read here is the one kept (an MLflow trace whose info sorts first), the note says so.
     let rows = 0;
     let duplicates = 0;
+    let replaced = 0;
     let earlier: Location | undefined;
     const repeats = new Map<string, number>();
     const context: ConvertContext = {
@@ -265,7 +271,8 @@ export class ImportReader {
         const copy = this.rows(adapter.id).add(row, source.digest, at);
         if (copy) {
           duplicates++;
-          earlier ??= copy;
+          if (copy.replaced) replaced++;
+          earlier ??= copy.earlier;
         }
       },
       event: (event) => this.rows(adapter.id).addEvent(event, source.digest, repeats),
@@ -296,7 +303,7 @@ export class ImportReader {
       notes.add({
         ...(at.line !== undefined ? { line: at.line } : {}),
         ...(at.record !== undefined ? { record: at.record } : {}),
-        reason: `the same ${rows === 1 ? "record" : "records"} as ${where(earlier, file)}, read once`,
+        reason: `the same ${rows === 1 ? "record" : "records"} as ${where(earlier, file)}, read once${replaced === rows ? " from this copy" : ""}`,
       });
   }
 

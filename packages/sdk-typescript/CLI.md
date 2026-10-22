@@ -540,9 +540,11 @@ Every trace becomes gzip OTLP/JSON batches of at most 3 MiB decoded and 900 KiB 
 written to `--out` (default `<path>.hue-import`, created with mode 0700) beside `manifest.json`,
 which declares each trace's id, span count, batches (by the SHA-256 of each gzip body), large
 values, history owner and origin. A text value over 1 MiB is stored as a value of its own and
-listed in `hue.blobs`, as the exporter lists the values it uploads. Nothing about where a file sat
-or what it was called reaches a span: a renamed, reordered or re-zipped copy of the bundle prepares
-to byte-identical batches and the same manifest digest.
+listed in `hue.blobs`, as the exporter lists the values it uploads. A span that no batch can hold,
+though each of its values is under 1 MiB, has its largest text values stored the same way until a
+batch can, its source record last. Nothing about where a file sat or what it was called reaches a
+span: a renamed, reordered or re-zipped copy of the bundle prepares to byte-identical batches and
+the same manifest digest.
 
 **Formats.** Each value is read by the first format whose rule it matches, in the order
 `hue traces --help` lists them; each rule asks for keys the other formats' records lack. The format
@@ -585,8 +587,9 @@ number or text, bytes or an id as hex or as standard or URL-safe base64, padded 
 at its default written or left out, and the user and conversation are read alike from either
 copy, as Hue reads them. A trace or span id that is not an OpenTelemetry id (an exporter's UUID,
 for example) is mapped to one derived from it by SHA-256, with the original kept as
-`hue.import.original_trace_id` or `hue.import.original_span_id`; base64 without its padding is
-read as an id only as an encoder writes the id's bytes.
+`hue.import.original_trace_id` or `hue.import.original_span_id`. Base64 without its padding is
+read as the id it encodes only as an encoder writes the id's bytes, and its text is kept the same
+way, since a vendor's own id of that length (a 22-character short UUID) can read as base64 too.
 
 - Jaeger UI JSON, Zipkin v2 and Phoenix spans are written as the OTLP spans they were, as the
   OpenTelemetry Collector converts Jaeger and Zipkin spans. Attributes keep their own names
@@ -646,7 +649,8 @@ Rules shared by the row formats:
   MLflow trace's `info`, which a later export may extend, is not compared, and one export's is
   kept, the same whichever file is read first. A record identical to one read elsewhere (a
   repeated line of a chat JSONL file, an overlap of two exports) is read once, and the value that
-  added nothing new is named in `files.notes`.
+  added nothing new is named in `files.notes`. When the later file's MLflow `info` is the one kept,
+  its note ends `read once from this copy`.
 - Token counts follow the GenAI conventions: input includes cached input and output includes
   reasoning, with the cached, cache-write and reasoning counts also kept on their own. Helicone
   stores `prompt_tokens` without `prompt_cache_read_tokens` and `prompt_cache_write_tokens`, and
@@ -741,9 +745,12 @@ repeat more than 64 MiB of conversation (each turn's model span holds the conver
 An input of more than 25,000 traces, more than 256 MiB decompressed (every trace is held until all
 are read; prepare a larger export in parts, each to its own `--out`), or whose manifest would exceed
 32 MiB (4 MiB compressed), is refused whole. The messages of one length-prefixed protobuf file share
-the 64 MiB a file may decompress to. Each zstd frame counts at least 1 KiB against these bounds,
-and a frame that does not decompress at least 1 MiB: 65,536 tiny frames fill one file's bound, and
-256 damaged zstd files the input's.
+the 64 MiB a file may decompress to. Each zstd frame counts at least 128 bytes against these bounds,
+as does each member of a damaged gzip file, which is read member by member, and a zstd frame that
+does not decompress counts at least 1 MiB: 524,288 tiny frames fill one file's bound, and 256
+damaged zstd files the input's. A file over its bound counts more than that bound against the
+input's, so four such files refuse the input. Each refusal says whether content decompresses past
+the bound or its frames count past it; a file refused for its frames reads once decompressed.
 
 **Report.** `prepare` reports what it read and what it could not, down to the line; `--json` prints
 the report as one object:
@@ -768,7 +775,8 @@ the report as one object:
   other trace and can contribute to a World if Hue resolves their owner from the imported records;
 - `traces.by_origin`: the origin each source recorded (`production`, `evaluation`, `simulation` or
   `unknown`); evaluation and simulation traffic is imported and kept out of production history;
-- `traces.remapped`: the traces and spans whose vendor ids were mapped.
+- `traces.remapped`: the traces and spans whose ids were mapped, their text kept as
+  `hue.import.original_trace_id` and `hue.import.original_span_id`.
 
 An existing `--out` directory is accepted only while it holds nothing but an earlier preparation
 and no upload has started in it.

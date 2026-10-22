@@ -250,12 +250,16 @@ describe("containers", () => {
 
     expect(decodeContainer(zlib.gzipSync("x".repeat(2048)), 1024)).toEqual({
       unsupported: "a gzip file that decompresses to more than 1024 bytes",
+      held: 1025,
+      counted: 1025,
     });
     expect(decodeContainer(Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x01]), 1024)).toEqual({
       unsupported: "a damaged gzip file",
     });
+    // What the outer layer decompressed to counts against the input's bound.
     expect(decodeContainer(zlib.gzipSync(zlib.gzipSync("{}")), 1024)).toEqual({
       unsupported: "a file compressed twice; decompress it first",
+      held: zlib.gzipSync("{}").byteLength,
     });
   });
 

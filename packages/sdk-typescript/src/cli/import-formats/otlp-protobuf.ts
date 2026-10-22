@@ -9,7 +9,7 @@ import {
   type OtlpValue,
 } from "../traces-import-convert.js";
 import type { ImportAdapter } from "./adapter.js";
-import { readZstd, type ParsedValue } from "./containers.js";
+import { MIN_DAMAGED_BYTES, MIN_FRAME_BYTES, readZstd, type ParsedValue } from "./containers.js";
 
 /**
  * Binary OTLP trace files: one protobuf `ExportTraceServiceRequest` (an OTLP/HTTP request body,
@@ -401,26 +401,29 @@ function decoded(traces: DecodedTraces, line?: number, note?: string): ParsedVal
 
 /** One length-prefixed message's bytes, a zstd message decompressed frame by frame (see
  * {@link readZstd}), with what it counts against the bound and a note on bytes after its frames.
- * `budget` is what the file may still count. */
+ * `room` is what the file's messages may still decompress to, and `budget` what they may still
+ * count. */
 function frameBytes(
   frame: Uint8Array,
+  room: number,
   budget: number,
 ): { bytes: Uint8Array; counted: number; note?: string } {
   if (!isZstd(frame)) {
-    if (frame.byteLength > budget) throw new Oversized();
+    if (frame.byteLength > Math.min(room, budget)) throw new Oversized(frame.byteLength > room);
     return { bytes: frame, counted: frame.byteLength };
   }
   if (typeof zlib.zstdDecompressSync !== "function")
     throw new ConversionError(
       "a zstd message, which this Node.js cannot decompress (Node.js 22.15 or later can)",
     );
-  const read = readZstd(frame, Math.max(0, budget));
-  if (read.kind === "oversized") throw new Oversized();
+  const read = readZstd(frame, Math.max(0, room), Math.max(0, budget));
+  if (read.kind === "oversized") throw new Oversized(read.content);
   // Bytes after a message's frames (zero padding) are named and its frames read, as a zstd file's
   // are; a frame that breaks off or does not decompress whole damages the message, which counts
   // what its frames did.
-  if (read.kind === "mismatched" || (read.stop && (read.stop !== "trailing" || !read.frames)))
-    throw new DamagedZstd(read.size);
+  if (read.kind === "mismatched") throw new DamagedZstd(read.held, read.size);
+  if (read.stop && (read.stop !== "trailing" || !read.frames))
+    throw new DamagedZstd(read.bytes.byteLength, read.size);
   return {
     bytes: read.bytes,
     counted: read.size,
@@ -461,23 +464,34 @@ function messageValue(bytes: Uint8Array, zstd: boolean, line: number, note?: str
   return decoded(decodeTraces(bytes), line, note);
 }
 
-/** The file's messages together decompress past the bound of one file. */
-class Oversized extends Error {}
+/** The file's messages together decompress past the bound of one file (`content`), or count past
+ * it though they decompress to less. */
+class Oversized extends Error {
+  constructor(readonly content: boolean) {
+    super();
+  }
+}
 
-/** A damaged zstd message, and what its frames count against the bound, the damaged one included
- * (see {@link readZstd}). */
+/** A damaged zstd message: what its frames decompressed to, and what they count against the bound,
+ * the damaged one included (see {@link readZstd}). */
 class DamagedZstd extends ConversionError {
-  constructor(readonly counted: number) {
+  constructor(
+    readonly held: number,
+    readonly counted: number,
+  ) {
     super("a damaged zstd message");
   }
 }
 
 /** The values of a binary OTLP file, read one at a time; the messages that could not be read are
- * added to `problems` as they are met, and `bytes` grows to the file's decompressed size. */
+ * added to `problems` as they are met. `bytes` grows to what the file decompressed to, and
+ * `counted` to what that counts against the bound, each zstd frame at least {@link MIN_FRAME_BYTES}
+ * and a damaged one at least {@link MIN_DAMAGED_BYTES}. */
 export interface BinaryValues {
   values: Iterable<ParsedValue>;
   problems: { line: number; reason: string }[];
   bytes: () => number;
+  counted: () => number;
 }
 
 /**
@@ -496,7 +510,8 @@ export function binaryValues(
   if (bytes[0] === 0x0a)
     try {
       const value = decoded(decodeTraces(bytes));
-      return { values: [value], problems: [], bytes: () => bytes.byteLength };
+      const size = () => bytes.byteLength;
+      return { values: [value], problems: [], bytes: size, counted: size };
     } catch (error) {
       if (!(error instanceof ConversionError)) throw error;
       // Not one message: perhaps length-prefixed messages.
@@ -523,27 +538,42 @@ export function binaryValues(
       ? undefined
       : { unsupported: `not an OTLP trace request: ${requestError}` };
   const problems: BinaryValues["problems"] = [];
+  /** What the messages read decompressed to, and what that counts against the bound. */
+  let held = 0;
   let total = 0;
   function* values(): Generator<ParsedValue> {
     for (const [index, frame] of frames.entries()) {
       // A message counts what it decompressed to, whether or not it then reads.
+      let kept = frame.byteLength;
       let size = frame.byteLength;
       try {
-        const read = frameBytes(frame, maxBytes - total);
+        const read = frameBytes(frame, maxBytes - held, maxBytes - total);
+        kept = read.bytes.byteLength;
         size = read.counted;
         const value = messageValue(read.bytes, isZstd(frame), index + 1, read.note);
+        held += kept;
         total += size;
         yield value;
       } catch (error) {
         if (error instanceof Oversized) {
+          // The file counts past the bound, as one that is not read does (see decodeContainer).
+          if (error.content) held = maxBytes + 1;
+          total = maxBytes + 1;
+          const rest = `this message and the ${frames.length - index - 1} after it were not read`;
           problems.push({
             line: index + 1,
-            reason: `the messages decompress to more than ${maxBytes} bytes; this message and the ${frames.length - index - 1} after it were not read`,
+            reason: error.content
+              ? `the messages decompress to more than ${maxBytes} bytes; ${rest}`
+              : `the messages count for more than ${maxBytes} bytes, each zstd frame at least ${MIN_FRAME_BYTES} and a damaged one at least ${MIN_DAMAGED_BYTES}; ${rest}`,
           });
           return;
         }
         if (!(error instanceof ConversionError)) throw error;
-        if (error instanceof DamagedZstd) size = Math.max(size, error.counted);
+        if (error instanceof DamagedZstd) {
+          kept = Math.max(kept, error.held);
+          size = Math.max(size, error.counted);
+        }
+        held += kept;
         total += size;
         problems.push({ line: index + 1, reason: `not an OTLP trace message: ${error.message}` });
       }
@@ -551,7 +581,12 @@ export function binaryValues(
     if (truncated)
       problems.push({ line: frames.length + 1, reason: "a truncated length-prefixed message" });
   }
-  return { values: values(), problems, bytes: () => Math.max(total, bytes.byteLength) };
+  return {
+    values: values(),
+    problems,
+    bytes: () => Math.max(held, bytes.byteLength),
+    counted: () => Math.max(total, held, bytes.byteLength),
+  };
 }
 
 export const otlpProtobuf: ImportAdapter = {

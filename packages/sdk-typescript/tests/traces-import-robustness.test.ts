@@ -359,22 +359,31 @@ describe("damaged containers", () => {
       note: "7 bytes after the last gzip member are not gzip and were not read",
     });
     expect(Buffer.from((trailing as { bytes: Uint8Array }).bytes).toString()).toBe(lines(1, 10));
-    // A file that reads whole but fails its checksum is not trusted.
+    // A file that reads whole but fails its checksum is not trusted; what its member decompressed
+    // to still counts against the input's bound.
     const corrupt = Buffer.from(whole);
     corrupt[corrupt.byteLength - 6]! ^= 0xff;
-    expect(decodeContainer(corrupt, 1 << 20)).toEqual({ unsupported: "a damaged gzip file" });
+    const size = Buffer.byteLength(lines(1, 10));
+    expect(decodeContainer(corrupt, 1 << 20)).toEqual({
+      unsupported: "a damaged gzip file",
+      held: size,
+      counted: size,
+    });
   });
 
   test("reads no member of a gzip file read up to a break when a member fails its checksum", () => {
     const first = zlib.gzipSync(Buffer.from(lines(1, 3)));
     const second = zlib.gzipSync(Buffer.from(lines(4, 7)));
     // The CRC-32, then the size, of the first member's data.
+    const size = Buffer.byteLength(lines(1, 3));
     for (const at of [first.byteLength - 8, first.byteLength - 4]) {
       const corrupt = Buffer.from(first);
       corrupt[at]! ^= 0xff;
       for (const rest of [Buffer.from("garbage"), second.subarray(0, 20)])
         expect(decodeContainer(Buffer.concat([corrupt, second, rest]), 1 << 20)).toEqual({
           unsupported: "a damaged gzip file",
+          held: size,
+          counted: size,
         });
     }
     // The members that match their trailers are read up to the break.
@@ -392,11 +401,16 @@ describe("damaged containers", () => {
     const wrong = Buffer.from(second);
     wrong[wrong.byteLength - 8]! ^= 0xff;
     // The file holds the last member's whole CRC-32 and none or part of its size.
+    const sizes = [lines(1, 3), lines(4, 7)].map((text) => Buffer.byteLength(text));
     for (const cut of [4, 2])
-      for (const members of [[wrong], [first, wrong]])
+      for (const members of [[wrong], [first, wrong]]) {
+        const held = members.length === 1 ? sizes[1]! : sizes[0]! + sizes[1]!;
         expect(decodeContainer(Buffer.concat(members).subarray(0, -cut), 1 << 20)).toEqual({
           unsupported: "a damaged gzip file",
+          held,
+          counted: held,
         });
+      }
     // A matching CRC-32 is read up to the break.
     expect(decodeContainer(Buffer.concat([first, second]).subarray(0, -4), 1 << 20)).toEqual({
       bytes: Buffer.from(lines(1, 3) + lines(4, 7)),
@@ -450,12 +464,18 @@ describe("damaged containers", () => {
       const second = zlib.zstdCompressSync(Buffer.from(lines(4, 7)), checksummed);
       const corrupt = Buffer.from(second);
       corrupt[corrupt.byteLength - 1]! ^= 0xff;
-      // Each frame counts at least 1 KiB against the bound, and a damaged one at least 1 MiB.
-      const damage = 1024 + 1024 * 1024;
-      expect(decodeContainer(Buffer.concat([first, corrupt]), 1 << 20)).toEqual({
+      // A frame counts what it holds, at least 128 bytes, and a damaged one at least 1 MiB; what
+      // the frames decompressed to is held.
+      const [size, secondSize] = [lines(1, 3), lines(4, 7)].map((text) => Buffer.byteLength(text));
+      const damage = size! + 1024 * 1024;
+      const refused = (held: number) => ({
         unsupported: "a damaged zstd file",
+        held: size! + held,
         counted: damage,
       });
+      expect(decodeContainer(Buffer.concat([first, corrupt]), 1 << 20)).toEqual(
+        refused(secondSize!),
+      );
       // A frame whose content is one byte longer or shorter than its header declares, with a
       // checksum or without one, as gzip's size field: the low byte of the declared size.
       for (const frame of [second, zlib.zstdCompressSync(Buffer.from(lines(4, 7)))])
@@ -463,11 +483,35 @@ describe("damaged containers", () => {
           const resized = Buffer.from(frame);
           const descriptor = resized[4]!;
           resized[5 + ((descriptor >> 5) & 1 ? 0 : 1) + [0, 1, 2, 4][descriptor & 3]!]! ^= flip;
-          expect(decodeContainer(Buffer.concat([first, resized]), 1 << 20)).toEqual({
-            unsupported: "a damaged zstd file",
-            counted: damage,
-          });
+          expect(decodeContainer(Buffer.concat([first, resized]), 1 << 20)).toEqual(
+            refused(secondSize!),
+          );
         }
+      // A frame that declares far less than it holds fails as a wrong source size, or as too
+      // small a destination, not as corruption: it is refused the same.
+      const content = Buffer.from(lines(10, 400));
+      const shrunk = zlib.zstdCompressSync(content);
+      const descriptor = shrunk[4]!;
+      expect(descriptor >> 6).toBe(1);
+      shrunk.writeUInt16LE(300 - 256, 5 + ((descriptor >> 5) & 1 ? 0 : 1));
+      // Two 128 KiB runs and a raw block, in a frame that declares 300 bytes.
+      const block = (last: boolean, type: number, size: number) => {
+        const header = (size << 3) | (type << 1) | (last ? 1 : 0);
+        return Buffer.from([header & 0xff, (header >> 8) & 0xff, header >> 16]);
+      };
+      const runs = Buffer.concat([
+        Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x40, (17 - 10) << 3, 300 - 256, 0]),
+        block(false, 1, 131_072),
+        Buffer.from("A"),
+        block(false, 1, 131_072),
+        Buffer.from("A"),
+        block(true, 0, 4),
+        Buffer.from("tail"),
+      ]);
+      expect(decodeContainer(Buffer.concat([first, shrunk]), 1 << 20)).toEqual(
+        refused(content.byteLength),
+      );
+      expect(decodeContainer(Buffer.concat([first, runs]), 1 << 20)).toEqual(refused(262_148));
       // A frame whose blocks do not decompress (literals that name a table the frame never
       // set) is damage the read stops at, as gzip's is.
       const damaged = Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0x25, 0, 0, 0x03, 0, 0, 0]);
@@ -480,13 +524,29 @@ describe("damaged containers", () => {
       expect(decodeContainer(Buffer.concat([first, second.subarray(0, -2)]), 1 << 20)).toEqual({
         bytes: Buffer.from(lines(1, 3)),
         note: "the zstd file breaks off; what follows the last complete frame was not read",
-        counted: 1024,
       });
     },
   );
 
   test.skipIf(typeof zlib.zstdCompressSync !== "function")(
-    "counts each zstd frame at least 1 KiB and holds a tiny one at its size",
+    "reads more than 65,536 zstd frames when what they hold is within the bound",
+    () => {
+      // A JSON Lines file written one frame per record: 70,000 frames of 300 bytes hold 21 MB.
+      const line = Buffer.from(`${JSON.stringify({ text: "x".repeat(288) })}\n`);
+      const frame = zlib.zstdCompressSync(line);
+      const decoded = decodeContainer(
+        Buffer.concat(Array.from({ length: 70_000 }, () => frame)),
+        64 * 1024 * 1024,
+      );
+      if ("unsupported" in decoded) throw new Error(decoded.unsupported);
+      expect(line.byteLength).toBe(300);
+      expect(decoded.bytes.byteLength).toBe(70_000 * 300);
+      expect(decoded.counted).toBeUndefined();
+    },
+  );
+
+  test.skipIf(typeof zlib.zstdCompressSync !== "function")(
+    "counts each zstd frame at least 128 bytes and holds a tiny one at its size",
     () => {
       const tiny = (count: number) =>
         Buffer.concat(
@@ -495,16 +555,99 @@ describe("damaged containers", () => {
       const read = readZstd(tiny(500), 1 << 20);
       if (read.kind !== "read") throw new Error(`read as ${read.kind}`);
       expect(read.frames).toBe(500);
-      expect(read.size).toBe(500 * 1024);
+      expect(read.size).toBe(500 * 128);
       // zlib decompresses each frame into a 16 KiB chunk; only the byte it holds is kept.
       expect(read.bytes.toString()).toBe("\n".repeat(500));
       expect(read.bytes.buffer.byteLength).toBeLessThan(65_536);
-      // The bound limits how many frames a file holds, whatever they decompress to.
-      expect(decodeContainer(tiny(1_025), 1 << 20)).toEqual({
+      // The bound limits how many frames a file holds. Past it, the file is refused for its
+      // frames, with the advice to decompress it first, and counts past the bound against the
+      // input's. 8,192 tiny frames fill 1 MiB.
+      expect(decodeContainer(tiny(8_193), 1 << 20)).toEqual({
+        unsupported:
+          "a zstd file whose frames count for more than 1048576 bytes, each at least 128; decompress it first",
+        held: 8_192,
+        counted: (1 << 20) + 1,
+      });
+      // Content past the bound is named as such.
+      expect(
+        decodeContainer(zlib.zstdCompressSync(Buffer.alloc((1 << 20) + 1, 0x20)), 1 << 20),
+      ).toEqual({
         unsupported: "a zstd file that decompresses to more than 1048576 bytes",
+        held: (1 << 20) + 1,
+        counted: (1 << 20) + 1,
       });
     },
   );
+
+  test.skipIf(typeof zlib.zstdCompressSync !== "function")(
+    "copies each zstd frame's output before decompressing the next, holding no frame's chunk",
+    () => {
+      // An output the read still needed after the next frame's would be overwritten here: each
+      // is overwritten two frames later.
+      const decompress = zlib.zstdDecompressSync;
+      const outputs: Buffer[] = [];
+      const spy = spyOn(zlib, "zstdDecompressSync").mockImplementation(((
+        frame: Uint8Array,
+        options?: zlib.ZstdOptions,
+      ) => {
+        outputs.at(-2)?.fill(0);
+        const output = decompress(frame, options);
+        outputs.push(output);
+        return output;
+      }) as typeof zlib.zstdDecompressSync);
+      try {
+        const records = Array.from({ length: 100 }, (_, index) => `${index}\n`);
+        const read = readZstd(
+          Buffer.concat(records.map((record) => zlib.zstdCompressSync(Buffer.from(record)))),
+          1 << 20,
+        );
+        if (read.kind !== "read") throw new Error(`read as ${read.kind}`);
+        expect(outputs).toHaveLength(100);
+        expect(read.bytes.toString()).toBe(records.join(""));
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  test("reads a damaged gzip file member by member, each counted at least 128 bytes", () => {
+    const records = (count: number) => Array.from({ length: count }, (_, index) => `${index}\n`);
+    // Bytes after the last member send the file through the member-by-member read.
+    const members = (count: number) =>
+      Buffer.concat([
+        ...records(count).map((record) => zlib.gzipSync(Buffer.from(record))),
+        Buffer.from("garbage"),
+      ]);
+    // Each member's output is copied before the next is inflated, as each zstd frame's is.
+    const inflate = zlib.inflateRawSync;
+    const outputs: Buffer[] = [];
+    const spy = spyOn(zlib, "inflateRawSync").mockImplementation(((
+      data: zlib.InputType,
+      options?: zlib.ZlibOptions,
+    ) => {
+      outputs.at(-2)?.fill(0);
+      const inflated = inflate(data, options) as unknown as { buffer: Buffer };
+      outputs.push(inflated.buffer);
+      return inflated;
+    }) as unknown as typeof zlib.inflateRawSync);
+    try {
+      expect(decodeContainer(members(100), 1 << 20)).toEqual({
+        bytes: Buffer.from(records(100).join("")),
+        note: "7 bytes after the last gzip member are not gzip and were not read",
+        counted: 100 * 128,
+      });
+      expect(outputs).toHaveLength(100);
+    } finally {
+      spy.mockRestore();
+    }
+    // 8,192 tiny members fill 1 MiB, as tiny zstd frames do.
+    expect(decodeContainer(members(8_193), 1 << 20)).toEqual({
+      unsupported:
+        "a gzip file whose members count for more than 1048576 bytes, each at least 128; decompress it first",
+      held: Buffer.byteLength(records(8_192).join("")),
+      counted: (1 << 20) + 1,
+    });
+  });
 
   test.skipIf(typeof zlib.zstdCompressSync !== "function")(
     "reads a zstd frame again without its checks only when they could be its damage",
@@ -533,7 +676,45 @@ describe("damaged containers", () => {
       // A file that does not decompress counts at least 1 MiB against the input's bound, so
       // many of them stop the run instead of each costing a decompression.
       const reader = new ImportReader({ maxFileBytes: 64 * 1024 * 1024 });
-      expect(reader.read("damaged.jsonl.zst", bare)).toBe(1024 * 1024);
+      expect(reader.read("damaged.jsonl.zst", bare)).toEqual({
+        held: bare.byteLength,
+        counted: 1024 * 1024,
+      });
+    },
+  );
+
+  test.skipIf(typeof zlib.zstdCompressSync !== "function")(
+    "counts a file over its bound past the bound against the input's",
+    () => {
+      // Each is decompressed up to the bound before it is refused, so the input bound limits how
+      // many are.
+      const reader = new ImportReader({ maxFileBytes: 1 << 20 });
+      const over = Buffer.alloc((1 << 20) + 1, 0x20);
+      const past = { held: (1 << 20) + 1, counted: (1 << 20) + 1 };
+      expect(reader.read("big.json.gz", zlib.gzipSync(over))).toEqual(past);
+      expect(reader.read("big.json.zst", zlib.zstdCompressSync(over))).toEqual(past);
+      const tiny = zlib.zstdCompressSync(Buffer.from("\n"));
+      expect(
+        reader.read("frames.jsonl.zst", Buffer.concat(Array.from({ length: 8_193 }, () => tiny))),
+      ).toEqual({ held: 8_193 * tiny.byteLength, counted: (1 << 20) + 1 });
+    },
+  );
+});
+
+describe("the input bound, counted", () => {
+  test.skipIf(typeof zlib.zstdCompressSync !== "function")(
+    "names what the input counts for when its damage, not its content, passes the bound",
+    async () => {
+      // 257 zstd files that do not decompress, each counted as 1 MiB, hold a few kilobytes.
+      const bare = Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0x25, 0, 0, 0x03, 0, 0, 0]);
+      const files = Object.fromEntries(
+        Array.from({ length: 257 }, (_, index) => [`damaged-${index}.jsonl.zst`, bare]),
+      );
+      const { code, stderr } = await prepare(await scratch(files));
+      expect(code).not.toBe(0);
+      expect(stderr).toContain(
+        "The input counts for more than 268435456 bytes, each zstd frame or gzip member read on its own at least 128 and a damaged zstd frame at least 1048576; prepare it in parts, each to its own --out",
+      );
     },
   );
 });

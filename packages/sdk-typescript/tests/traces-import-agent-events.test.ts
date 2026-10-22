@@ -985,6 +985,93 @@ describe("chat transcripts", () => {
     expect(rest).toEqual([]);
   });
 
+  test("stores a span's largest values apart when no batch holds it, its source record last", async () => {
+    // A request logged without its reply whose last message holds an image: the agent's input and
+    // its source record each carry the 800,000-character data URL, each within the 1 MiB inline
+    // limit, together past the 900 KiB a batch takes on the wire.
+    // 600,000 bytes that do not compress, as an image's do not.
+    const pixels = Buffer.concat(
+      Array.from({ length: 9_375 }, (_, index) =>
+        createHash("sha512").update(`pixels ${index}`).digest(),
+      ),
+    ).toString("base64");
+    expect(pixels).toHaveLength(800_000);
+    const url = `data:image/png;base64,${pixels}`;
+    const chat = {
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "What is in this image?" },
+            { type: "image_url", image_url: { url } },
+          ],
+        },
+      ],
+    };
+    // A tool's large result likewise: the result of its span, and the block it keeps.
+    const fetched = {
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "user", content: "fetch it" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_1", type: "function", function: { name: "fetch", arguments: "{}" } },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_1", content: pixels },
+      ],
+    };
+    const report = await prepare(
+      await scratch({
+        "requests.jsonl": [chat, fetched].map((line) => JSON.stringify(line)).join("\n"),
+      }),
+    );
+    expect(report.traces.refused).toEqual([]);
+    expect(report.formats).toEqual({ openai_chat: 2 });
+    const { trace, spans } = await bundle(report);
+    /** The values a span stores apart, by key: each read back whole from the bundle. */
+    const stored = async (span: Span) => {
+      const listed = (attr(span, "hue.blobs")?.arrayValue?.values ?? []) as {
+        stringValue: string;
+      }[];
+      const values: Record<string, unknown> = {};
+      for (const { stringValue } of listed) {
+        const entry = JSON.parse(stringValue) as { key: string; sha256: string };
+        const bytes = await readFile(join(report.output_directory, `${entry.sha256}.blob`));
+        expect(sha256(bytes.toString("utf8"))).toBe(entry.sha256);
+        values[entry.key] = JSON.parse(bytes.toString("utf8"));
+      }
+      return values;
+    };
+    const chatId = derived("openai_chat", sha256(canonical(chat)));
+    const [agent] = await spans(chatId);
+    // The agent's input is stored apart and its first 16 KiB kept; its source record stays whole.
+    expect(attr(agent!, "hue.truncated")).toEqual({
+      arrayValue: { values: [{ stringValue: "gen_ai.input.messages" }] },
+    });
+    const { "gen_ai.input.messages": input } = await stored(agent!);
+    expect(input).toEqual([
+      { role: "user", parts: [{ type: "text", content: "hi" }] },
+      { role: "assistant", parts: [{ type: "text", content: "hello" }] },
+      expect.objectContaining({ role: "user" }),
+    ]);
+    expect(JSON.stringify(input)).toContain(pixels);
+    expect(str(agent!, "gen_ai.input.messages")).toHaveLength(16 * 1024);
+    expect(json(agent!, "hue.import.source_record")).toEqual(chat);
+    expect(trace(chatId).blobs).toHaveLength(1);
+    const tool = byName(
+      await spans(derived("openai_chat", sha256(canonical(fetched)))),
+      "execute_tool fetch",
+    );
+    expect(await stored(tool)).toEqual({ "gen_ai.tool.call.result": pixels });
+    expect(json(tool, "hue.import.source_record")).toEqual(fetched.messages[2]);
+  });
+
   test("reads a Helicone request body whose Responses input is untyped messages", async () => {
     const record = {
       request_id: "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",

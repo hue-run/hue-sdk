@@ -910,7 +910,8 @@ describe("OTLP protobuf", () => {
             "the messages decompress to more than 4000000 bytes; this message and the 0 after it were not read",
         },
       ]);
-      expect(read.bytes()).toBe(3_000_000);
+      // The third message decompresses past the bound, so the file counts past it.
+      expect(read.bytes()).toBe(4_000_001);
       // A frame compressed as a stream declares no size: it counts what it decompressed to, at
       // least the 1 MiB any damaged frame counts, and the message after it is read.
       const streamed = damage(
@@ -931,9 +932,10 @@ describe("OTLP protobuf", () => {
       expect(rest.problems).toEqual([
         { line: 1, reason: "not an OTLP trace message: a damaged zstd message" },
       ]);
-      expect(rest.bytes()).toBe(1024 * 1024 + request.byteLength);
+      expect(rest.bytes()).toBe(1_000 + request.byteLength);
+      expect(rest.counted()).toBe(1024 * 1024 + request.byteLength);
       // Each frame of a message counts, whichever runtime reads it: Node.js decompresses only the
-      // first frame of a buffer on its own, Bun every one. A frame counts at least 1 KiB.
+      // first frame of a buffer on its own, Bun every one. A frame counts at least 128 bytes.
       const twoFrames = Buffer.concat([
         zlib.zstdCompressSync(Buffer.alloc(300, 0x0a), checksummed),
         damage(zlib.zstdCompressSync(Buffer.alloc(1_500_000, 0xff), checksummed)),
@@ -949,7 +951,8 @@ describe("OTLP protobuf", () => {
             "the messages decompress to more than 2000000 bytes; this message and the 1 after it were not read",
         },
       ]);
-      expect(both.bytes()).toBe(1_024 + 1_500_000);
+      expect(both.bytes()).toBe(2_000_001);
+      expect(both.counted()).toBe(2_000_001);
       const halves = [request.subarray(0, 40), request.subarray(40)];
       const split = binaryValues(
         lengthPrefixed(Buffer.concat(halves.map((half) => zlib.zstdCompressSync(half)))),
@@ -994,10 +997,74 @@ describe("OTLP protobuf", () => {
         {
           line: 5,
           reason:
-            "the messages decompress to more than 4194304 bytes; this message and the 5 after it were not read",
+            "the messages count for more than 4194304 bytes, each zstd frame at least 128 and a damaged one at least 1048576; this message and the 5 after it were not read",
         },
       ]);
-      expect(read.bytes()).toBe(4 * 1024 * 1024);
+      // They hold 13 bytes each and count past the bound.
+      expect(read.bytes()).toBe(
+        lengthPrefixed(...Array.from({ length: 10 }, () => broken)).byteLength,
+      );
+      expect(read.counted()).toBe(4 * 1024 * 1024 + 1);
+    },
+  );
+
+  test.skipIf(typeof zlib.zstdCompressSync !== "function")(
+    "reads a Collector file of many small zstd messages that hold less than the bound",
+    async () => {
+      // One export request per span, as a Collector without a batch processor writes them: 1,500
+      // messages of about 500 bytes hold about 750 KB of a 1 MB bound.
+      const request = encodeRequest({
+        resourceSpans: [
+          {
+            resource: { attributes: [{ key: "service.name", value: { stringValue: "agent" } }] },
+            scopeSpans: [
+              {
+                scope: { name: "probe" },
+                spans: [
+                  {
+                    traceId: "5b8efff798038103d269b633813fc60c",
+                    spanId: "eee19b7ec3c1b174",
+                    name: "chat",
+                    kind: 3,
+                    startTimeUnixNano: "1760000000000000000",
+                    endTimeUnixNano: "1760000000500000000",
+                    attributes: [
+                      { key: "gen_ai.operation.name", value: { stringValue: "chat" } },
+                      { key: "gen_ai.prompt", value: { stringValue: "question ".repeat(45) } },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      const message = zlib.zstdCompressSync(request);
+      const read = binaryValues(
+        lengthPrefixed(...Array.from({ length: 1_500 }, () => message)),
+        1_000_000,
+      );
+      if (!read || "unsupported" in read) throw new Error("not read as binary OTLP");
+      expect(request.byteLength).toBeGreaterThan(400);
+      expect(request.byteLength).toBeLessThan(600);
+      expect([...read.values]).toHaveLength(1_500);
+      expect(read.problems).toEqual([]);
+      expect(read.counted()).toBe(1_500 * request.byteLength);
+      // Tiny messages count at least 128 bytes each: 7,813 of them pass a 1 MB bound.
+      const tiny = zlib.zstdCompressSync(Buffer.alloc(0));
+      const many = binaryValues(
+        lengthPrefixed(...Array.from({ length: 7_900 }, () => tiny)),
+        1_000_000,
+      );
+      if (!many || "unsupported" in many) throw new Error("not read as binary OTLP");
+      expect([...many.values]).toHaveLength(7_812);
+      expect(many.problems).toEqual([
+        {
+          line: 7_813,
+          reason:
+            "the messages count for more than 1000000 bytes, each zstd frame at least 128 and a damaged one at least 1048576; this message and the 87 after it were not read",
+        },
+      ]);
     },
   );
 
@@ -1172,9 +1239,10 @@ describe("One trace across files of several formats", () => {
       const manifest = JSON.parse(
         await readFile(join(report.output_directory as string, "manifest.json"), "utf8"),
       ) as TraceImportManifest;
-      batches.push(manifest.traces[0]!.batches);
+      batches.push([manifest.traces[0]!.batches, report.traces.remapped]);
     }
-    // The copy kept does not depend on the order the files were read in.
+    // The copy kept, and so the ids it counts as mapped, do not depend on the order the files
+    // were read in.
     expect(batches[1]).toEqual(batches[0]);
     // A value at its default is still a value: a zero is not an absent value.
     const retries = (value: unknown) => {
@@ -1244,6 +1312,24 @@ describe("One trace across files of several formats", () => {
     expect(
       (await spans(traceId)).map((span) => str(span, "hue.import.original_span_id")).sort(),
     ).toEqual(["span-000001", "span-000002"]);
+  });
+
+  test("keeps the text of an id read from base64 without its padding", async () => {
+    // A 22-character short UUID and an 11-character span id that read as an encoder's base64,
+    // their last letters' spare bits zero: each is read as the id it encodes, and its text is
+    // kept and counted as a mapped id's is, since a vendor's id of that length can read so too.
+    const request = await fixtureJson("otlp-request.json");
+    const [first] = request.resourceSpans[0].scopeSpans[0].spans;
+    const span = { ...structuredClone(first), traceId: "vytxeTZskVKR7C7WgdSP3A" };
+    span.spanId = "V1StGXR8_Z4";
+    delete span.parentSpanId;
+    request.resourceSpans[0].scopeSpans[0].spans = [span];
+    const { report, spans } = await prepareFile("request.json", JSON.stringify(request));
+    expect(report.traces.remapped).toEqual({ traces: 1, spans: 1 });
+    const [read] = await spans(Buffer.from("vytxeTZskVKR7C7WgdSP3A", "base64url").toString("hex"));
+    expect(read!.spanId).toBe(Buffer.from("V1StGXR8_Z4", "base64url").toString("hex"));
+    expect(str(read!, "hue.import.original_trace_id")).toBe("vytxeTZskVKR7C7WgdSP3A");
+    expect(str(read!, "hue.import.original_span_id")).toBe("V1StGXR8_Z4");
   });
 
   test("refuses the trace when two formats hold one span with different content", async () => {

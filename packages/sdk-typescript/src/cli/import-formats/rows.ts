@@ -263,8 +263,13 @@ export class RowTraceCollector implements TraceCollector {
   /**
    * Adds a row read at `at`. Returns where an identical copy of the record was read before, when
    * one was read somewhere else: the record is then read once, and the caller may say so.
+   * `replaced` tells that the copy read here is the one kept, its context sorting first.
    */
-  add(row: SpanRow, sourceDigest: string, at?: Location): Location | undefined {
+  add(
+    row: SpanRow,
+    sourceDigest: string,
+    at?: Location,
+  ): { earlier: Location; replaced: boolean } | undefined {
     key(row.traceKey, "trace id");
     key(row.spanKey, "span id");
     validateSource(row.record);
@@ -278,17 +283,22 @@ export class RowTraceCollector implements TraceCollector {
       return undefined;
     }
     if (held.digest === digest) {
-      if (
-        row.context &&
-        held.row.context &&
-        contextText(row.context) < contextText(held.row.context)
-      )
-        held.row = row;
+      const earlier = held.at;
       const elsewhere =
         at &&
-        held.at &&
-        (held.at.file !== at.file || held.at.line !== at.line || held.at.record !== at.record);
-      return elsewhere ? held.at : undefined;
+        earlier &&
+        (earlier.file !== at.file || earlier.line !== at.line || earlier.record !== at.record);
+      // The copy kept is where it was read, so a later copy names it.
+      const replaced =
+        row.context !== undefined &&
+        held.row.context !== undefined &&
+        contextText(row.context) < contextText(held.row.context);
+      if (replaced) {
+        held.row = row;
+        if (at) held.at = at;
+        else delete held.at;
+      }
+      return elsewhere ? { earlier, replaced } : undefined;
     }
     const order = compareRevisions(held.row.revision, row.revision);
     if (order === undefined || order === 0)

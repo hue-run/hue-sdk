@@ -21,6 +21,7 @@ import { crc32, deflateRawSync, gunzipSync, gzipSync } from "node:zlib";
 import { runTracesCommand, TRACES_USAGE, type TracesCommandIo } from "../src/cli/traces-import.js";
 import {
   batchEntries,
+  BlobSink,
   integerQuotient,
   manifestTotals,
   validateManifest,
@@ -1383,6 +1384,92 @@ describe("hue traces import prepare", () => {
     expect(integerQuotient(0, 5)).toBe(0);
     expect(integerQuotient(2_621_440 * 921_600 * 9, 1_000_003 * 10)).toBe(
       Math.floor((2_621_440 * 921_600 * 9) / (1_000_003 * 10)),
+    );
+  });
+
+  test("stores a span's largest values apart only when no batch holds it alone", () => {
+    // Two values of 700 KB of base64 that do not compress further, each within the 1 MiB inline
+    // limit: together past the 900 KiB a batch takes on the wire.
+    let seed = 0;
+    const noise = (length: number) =>
+      Buffer.concat(
+        Array.from({ length: Math.ceil(length / 40) }, () =>
+          createHash("sha256").update(`hue-import-fit ${seed++}`).digest().subarray(0, 30),
+        ),
+      )
+        .toString("base64")
+        .slice(0, length);
+    const entry = (
+      spanId: string,
+      attributes: { key: string; value: { stringValue: string } }[],
+    ) => ({
+      resource: { attributes: [] },
+      scopeSpans: [
+        {
+          scope: { name: "fit" },
+          spans: [
+            {
+              traceId: T1,
+              spanId,
+              name: "s",
+              kind: 1,
+              startTimeUnixNano: "1",
+              endTimeUnixNano: "2",
+              attributes,
+              status: { code: 0 },
+            },
+          ],
+        },
+      ],
+    });
+    const [record, input, small] = [noise(700_000), noise(690_000), noise(1_000)];
+    const entries = [
+      entry("0000000000000001", [
+        { key: "hue.import.source_record", value: { stringValue: record } },
+        { key: "gen_ai.input.messages", value: { stringValue: input } },
+      ]),
+      entry("0000000000000002", [{ key: "input.value", value: { stringValue: small } }]),
+    ];
+    expect(() => batchEntries(entries)).toThrow("One span exceeds the import batch bounds");
+    const blobs = new BlobSink();
+    const batches = batchEntries(entries, blobs);
+    expect(batches.map((batch) => batch.spanIds)).toEqual([
+      ["0000000000000001"],
+      ["0000000000000002"],
+    ]);
+    for (const batch of batches) expect(batch.body.byteLength).toBeLessThanOrEqual(900 * 1024);
+    // The smaller value is stored apart, not the source record, and the other span is as it was.
+    expect(blobs.sorted().map((blob) => Buffer.from(blob.bytes).toString())).toEqual([input]);
+    const spans = batches.map(
+      (batch) =>
+        (JSON.parse(gunzipSync(batch.body).toString()) as any).resourceSpans[0].scopeSpans[0]
+          .spans[0],
+    );
+    const values = (span: any) =>
+      Object.fromEntries(span.attributes.map((item: any) => [item.key, item.value]));
+    expect(values(spans[0])).toEqual({
+      "hue.import.source_record": { stringValue: record },
+      "gen_ai.input.messages": { stringValue: input.slice(0, 16 * 1024) },
+      "hue.blobs": {
+        arrayValue: {
+          values: [
+            {
+              stringValue: JSON.stringify({
+                key: "gen_ai.input.messages",
+                sha256: sha256(input),
+                size: input.length,
+                content_type: "text/plain; charset=utf-8",
+              }),
+            },
+          ],
+        },
+      },
+      "hue.truncated": { arrayValue: { values: [{ stringValue: "gen_ai.input.messages" }] } },
+    });
+    expect(spans[1]).toEqual(entries[1]!.scopeSpans[0]!.spans[0]);
+    // The same entries pack the same way again.
+    expect(batchEntries(entries, new BlobSink()).map((batch) => batch.sha256)).toEqual(
+      batches.map((batch) => batch.sha256),
     );
   });
 

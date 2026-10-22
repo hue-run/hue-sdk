@@ -25,9 +25,13 @@ refuses to publish a version without a matching entry below.
 - **Wire** A dotted `--user-key` or `--session-key` finds a key an MLflow trace records in a span's
   own attributes or in the trace's tags, not only in its metadata: a span's attributes first, then
   the trace's metadata, then its tags. A JSONPath or JSON Pointer reads the trace's `info` on each
-  of its root spans, a span whose parent is outside the export included. Two exports of one MLflow
-  trace whose `info` differs, as when a tag was added between them, are read once, keeping one
-  export's `info`, the same whichever file is read first; when the trace's root had no parent, the
+  of its root spans, a span whose parent is outside the export included. Such a root keeps the
+  `info` in its source record, so a trace whose `info` holds what a source record may not (text
+  with a NUL or an unpaired surrogate, an unsafe integer, nesting past 64 levels) is refused also
+  when the export lacks the trace's root, as it was with the root. Two exports of one MLflow trace
+  whose `info` differs, as when a tag was added between them, are read once, keeping one export's
+  `info`, the same whichever file is read first, and the note in `files.notes` ends `read once from
+  this copy` when the later file's copy is the one kept; when the trace's root had no parent, the
   trace was refused with `span … appears with different content`.
 - A zstd file with a frame whose content fails its checksum, or is longer or shorter than the frame
   declares, is not read, as a gzip file with a member that fails its trailer is not; the frames
@@ -35,12 +39,26 @@ refuses to publish a version without a matching entry below.
   not decompress, is still read up to the damage. Each zstd message of a length-prefixed protobuf
   file is read frame by frame, where Node.js read only its first frame, bytes after its last frame
   (zero padding) are named in `files.notes`, and a damaged one counts what its frames decompressed
-  to against the file's 64 MiB bound. Each zstd frame counts at least 1 KiB against that bound, so
-  the bound also limits how many frames a file or message holds, and a file of many tiny frames is
-  held in memory at its size, not 16 KiB a frame. A frame that does not decompress counts at least
-  1 MiB, against the input's 256 MiB bound as well, so repeated damage ends the read instead of
-  being decompressed copy after copy. A frame is read again without its checksum and declared size
+  to against the file's 64 MiB bound. A frame is read again without its checksum and declared size
   only when they could be the damage.
+- Each zstd frame counts at least 128 bytes against the file's 64 MiB bound and the input's 256 MiB
+  bound, and so does each member of a damaged gzip file, which is read member by member. 524,288
+  tiny frames fill a file's bound and 2,097,152 the input's, which bounds how many frames are
+  decompressed, while frames of real content count what they hold. A zstd frame that does not
+  decompress counts at least 1 MiB against both bounds, so 256 damaged zstd files fill the input's.
+  A file of tiny frames, and a damaged gzip file of tiny members, is held in memory at its size,
+  not 16 KiB a frame or member. A file over its own bound counts more than that bound against the
+  input's, so four such files refuse the input; each was listed in `files.unsupported` and counted
+  only its size on disk. Each refusal says whether content decompresses past the bound (`a zstd
+  file that decompresses to more than 67108864 bytes`) or its frames count past it (`a zstd file
+  whose frames count for more than 67108864 bytes, each at least 128; decompress it first`), for a
+  file, for a length-prefixed file's messages and for the input.
+- **Wire** A span that no batch holds alone, though each of its values is within the 1 MiB inline
+  limit, has its largest text values stored as values of their own and listed in `hue.blobs` until
+  a batch holds it, its source record last. Such a trace was refused with `One span exceeds the
+  import batch bounds`: a transcript whose agent span holds a large image both as its input and in
+  its source record, as a request logged without its reply or an image before the first turn does,
+  or whose tool span holds a large result.
 - A gzip file that breaks off inside a member's 8-byte trailer is not read when the CRC-32 it holds
   does not match the member's data; it was read up to the break.
 - **Wire** Once `--user-key` decides a converted trace's user, or that it has none, no span's
@@ -60,7 +78,9 @@ refuses to publish a version without a matching entry below.
   base64 without its padding, is read as the id it encodes; it was mapped to an id derived from its
   text. Without padding, an id is read so only as an encoder writes its bytes, and other text of
   that length is mapped as before, so two ids that differ only in bits base64 leaves unused stay
-  two.
+  two. An id read from base64 without its padding keeps its text as `hue.import.original_trace_id`
+  or `hue.import.original_span_id` and counts in `traces.remapped`, since a vendor's own id of that
+  length (a 22-character short UUID) can read as base64 too.
 - **Wire** Each `execute_tool` span of a chat transcript keeps the block that holds its result,
   else its call, as `hue.import.source_record` rather than the whole message, so a message of many
   parallel calls is not copied into every call's span. Each result answers one call, the first

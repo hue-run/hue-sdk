@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { z } from "zod/v4";
-import { blobEntry, blobPrefix, BLOBS_KEY, MAX_BLOB_ENTRIES, textContentType } from "../blobs.js";
+import {
+  BLOB_PREFIX_BYTES,
+  blobEntry,
+  blobPrefix,
+  BLOBS_KEY,
+  MAX_BLOB_ENTRIES,
+  textContentType,
+} from "../blobs.js";
 import { TRUNCATED_KEY } from "../privacy.js";
 import { hueSpanId, hueTraceId } from "./langfuse.js";
 
@@ -328,6 +335,11 @@ export function anyValue(value: JsonValue): OtlpValue {
 export class BlobSink {
   readonly blobs = new Map<string, PreparedBlob>();
 
+  /** `held` are the values the trace already stores apart. */
+  constructor(held: readonly PreparedBlob[] = []) {
+    for (const blob of held) this.blobs.set(blob.sha256, blob);
+  }
+
   /** Stores a text whole and returns what its record keeps: the first 16 KiB and the `hue.blobs`
    * entry; undefined when the text is over the limit of one stored value. */
   place(key: string, text: string): { prefix: string; entry: string } | undefined {
@@ -558,20 +570,20 @@ interface OtlpSpanDraft {
   parentSpanId?: string;
   start: bigint;
   entry: ImportEntry;
-  /** The SHA-256 of the entry's content ({@link otlpContent}), which a copy of the span must
-   * match. */
+  /** The SHA-256 of the entry's content ({@link otlpContent}) without the ids' text kept beside
+   * it, which a copy of the span must match. */
   digest: string;
+  /** Whether the entry keeps its trace id's and its span id's text (see {@link keepsText}). */
+  keeps: { traceId: boolean; spanId: boolean };
 }
 
 interface OtlpTraceDraft {
   traceId: string;
   /** The format that read the trace's first span. */
   format?: string;
-  remappedTraceId: boolean;
   spans: Map<string, OtlpSpanDraft>;
   blobs: BlobSink;
   sourceDigests: Set<string>;
-  remappedSpans: number;
   evaluation: boolean;
   simulation: boolean;
   production: boolean;
@@ -642,9 +654,9 @@ export class OtlpTraceCollector {
   /** Refuses the trace a span names (its id as recorded), whatever else of it is read; a span
    * that names no trace is refused alone. */
   refuse(traceIdValue: unknown, reason: string): Refusal {
-    const id = otlpTraceId(traceIdValue);
-    if (id) this.draft(id.traceId, id.remapped).conflict ??= reason;
-    return { ...(id ? { traceId: id.traceId } : {}), reason };
+    const traceId = otlpTraceId(traceIdValue);
+    if (traceId) this.draft(traceId).conflict ??= reason;
+    return { ...(traceId ? { traceId } : {}), reason };
   }
 
   private addSpan(
@@ -659,17 +671,15 @@ export class OtlpTraceCollector {
     if (!isObject(value)) throw new ConversionError("a span that is not a JSON object");
     const span: Record<string, unknown> = { ...value };
     const originalTraceId = span.traceId;
-    const id = otlpTraceId(originalTraceId);
-    if (typeof originalTraceId !== "string" || !id)
+    const traceId = otlpTraceId(originalTraceId);
+    if (typeof originalTraceId !== "string" || !traceId)
       throw new ConversionError("a span without a trace id");
-    const { traceId, remapped: remappedTraceId } = id;
     const originalSpanId = span.spanId;
     if (typeof originalSpanId !== "string" || !originalSpanId)
       throw new ConversionError("a span without a span id");
     const mapSpanId = (original: string) =>
       normalizeId(original, 16) ?? digestHex(`otlp.span:${traceId}:${original}`, 16);
     const spanId = mapSpanId(originalSpanId);
-    const remappedSpanId = normalizeId(originalSpanId, 16) === undefined;
     span.traceId = traceId;
     span.spanId = spanId;
     const parent = span.parentSpanId;
@@ -691,19 +701,44 @@ export class OtlpTraceCollector {
     const attributes = readAttributes(span.attributes);
     if (attributes === undefined)
       throw new ConversionError(`span ${spanId} has malformed attributes`);
-    const trace = this.draft(traceId, remappedTraceId);
+    const trace = this.draft(traceId);
     trace.format ??= format;
-    const kept = [...attributes];
-    if (remappedTraceId)
-      kept.push({ key: "hue.import.original_trace_id", value: { stringValue: originalTraceId } });
-    if (remappedSpanId)
-      kept.push({ key: "hue.import.original_span_id", value: { stringValue: originalSpanId } });
-    span.attributes = offloadOtlpValues(kept, trace.blobs);
+    const keeps = {
+      traceId: keepsText(originalTraceId, 32),
+      spanId: keepsText(originalSpanId, 16),
+    };
+    const texts: OtlpAttribute[] = [
+      ...(keeps.traceId
+        ? [{ key: "hue.import.original_trace_id", value: { stringValue: originalTraceId } }]
+        : []),
+      ...(keeps.spanId
+        ? [{ key: "hue.import.original_span_id", value: { stringValue: originalSpanId } }]
+        : []),
+    ];
+    span.attributes = offloadOtlpValues([...attributes, ...texts], trace.blobs);
     const entry: ImportEntry = {
       ...resourceGroup,
       scopeSpans: [{ ...scopeGroup, spans: [span] }],
     };
-    const digest = sha256Hex(otlpContent(entry) ?? "");
+    // Copies compare without the ids' text, so one that spells an id another way (binary, base64
+    // padded or not) is the same span.
+    const compared: ImportEntry = {
+      ...resourceGroup,
+      scopeSpans: [
+        {
+          ...scopeGroup,
+          spans: [
+            {
+              ...span,
+              attributes: (span.attributes as OtlpAttribute[]).filter(
+                (attribute) => !texts.includes(attribute),
+              ),
+            },
+          ],
+        },
+      ],
+    };
+    const digest = sha256Hex(otlpContent(compared) ?? "");
     const held = trace.spans.get(spanId);
     if (held) {
       // The same span sent twice is one span, whatever encoding carried each copy; another
@@ -711,11 +746,14 @@ export class OtlpTraceCollector {
       if (held.digest !== digest)
         trace.conflict ??= `span ${spanId} appears with different content`;
       // Of two encodings of one span, the copy kept does not depend on which was read first.
-      else if (JSON.stringify(entry) < JSON.stringify(held.entry)) held.entry = entry;
+      else if (JSON.stringify(entry) < JSON.stringify(held.entry)) {
+        held.entry = entry;
+        held.keeps = keeps;
+      }
       trace.sourceDigests.add(sourceDigest);
       return;
     }
-    const map = attributeMap(kept);
+    const map = attributeMap(attributes);
     for (const key of EVALUATION_KEYS)
       if (map.has(key) || resource.has(key)) trace.evaluation = true;
     for (const key of SIMULATION_KEYS)
@@ -726,7 +764,6 @@ export class OtlpTraceCollector {
       stringOf(resource.get("deployment.environment")) === "production"
     )
       trace.production = true;
-    if (remappedSpanId) trace.remappedSpans++;
     trace.sourceDigests.add(sourceDigest);
     trace.spans.set(spanId, {
       spanId,
@@ -734,19 +771,18 @@ export class OtlpTraceCollector {
       start: BigInt(start),
       entry,
       digest,
+      keeps,
     });
   }
 
-  private draft(traceId: string, remappedTraceId: boolean): OtlpTraceDraft {
+  private draft(traceId: string): OtlpTraceDraft {
     let trace = this.traces.get(traceId);
     if (!trace) {
       trace = {
         traceId,
-        remappedTraceId,
         spans: new Map(),
         blobs: new BlobSink(),
         sourceDigests: new Set(),
-        remappedSpans: 0,
         evaluation: false,
         simulation: false,
         production: false,
@@ -797,8 +833,9 @@ export class OtlpTraceCollector {
               ? "production"
               : "unknown",
         sourceDigests: draft.sourceDigests,
-        remappedTraceId: draft.remappedTraceId,
-        remappedSpans: draft.remappedSpans,
+        // As the copies kept name them, whichever was read first.
+        remappedTraceId: spans.some((span) => span.keeps.traceId),
+        remappedSpans: spans.filter((span) => span.keeps.spanId).length,
       });
     }
     return { traces, refused };
@@ -806,13 +843,17 @@ export class OtlpTraceCollector {
 }
 
 /** A span's OpenTelemetry trace id: the recorded one, or one derived from an id that is not. */
-function otlpTraceId(value: unknown): { traceId: string; remapped: boolean } | undefined {
+function otlpTraceId(value: unknown): string | undefined {
   if (typeof value !== "string" || !value) return undefined;
-  const traceId = normalizeId(value, 32);
-  return traceId
-    ? { traceId, remapped: false }
-    : { traceId: digestHex(`otlp.trace:${value}`, 32), remapped: true };
+  return normalizeId(value, 32) ?? digestHex(`otlp.trace:${value}`, 32);
 }
+
+/** Whether an id's text is kept beside it (`hue.import.original_trace_id` or
+ * `hue.import.original_span_id`): one that is no OpenTelemetry id, mapped by SHA-256, and one read
+ * from base64 without its padding, which a vendor's own id of that length can also be (a
+ * 22-character short UUID, an 11-character span id). */
+const keepsText = (value: string, length: 32 | 16) =>
+  normalizeId(value, length) === undefined || value.length === (length === 32 ? 22 : 11);
 
 /** Whether a recorded OTLP `AnyValue` has the shape OTLP/JSON gives it: an object whose
  * `arrayValue` and `kvlistValue` hold lists of values and of keyed values. Walked without
@@ -854,14 +895,20 @@ function readAttributes(value: unknown): OtlpAttribute[] | undefined {
   return attributes;
 }
 
-/** A recorded span's string values over the inline limit stored apart from it, listed beside
- * any values its exporter already listed. */
-export function offloadOtlpValues(attributes: OtlpAttribute[], blobs: BlobSink): OtlpAttribute[] {
-  const over = attributes.filter(
-    (attribute) =>
-      typeof attribute.value.stringValue === "string" &&
-      Buffer.byteLength(attribute.value.stringValue, "utf8") > MAX_INLINE_VALUE_BYTES,
-  );
+/** An attribute whose value is text. */
+type TextAttribute = OtlpAttribute & { value: { stringValue: string } };
+const isText = (attribute: OtlpAttribute): attribute is TextAttribute =>
+  typeof attribute.value.stringValue === "string";
+
+/** A recorded span's string values over the inline limit (or those `chosen`) stored apart from
+ * it, listed beside any values its exporter already listed. */
+export function offloadOtlpValues(
+  attributes: OtlpAttribute[],
+  blobs: BlobSink,
+  chosen: (attribute: TextAttribute) => boolean = (attribute) =>
+    Buffer.byteLength(attribute.value.stringValue, "utf8") > MAX_INLINE_VALUE_BYTES,
+): OtlpAttribute[] {
+  const over = attributes.filter(isText).filter(chosen);
   if (!over.length) return attributes;
   const listedValues = (key: string): string[] | undefined => {
     const found = attributes.find((attribute) => attribute.key === key);
@@ -878,7 +925,7 @@ export function offloadOtlpValues(attributes: OtlpAttribute[], blobs: BlobSink):
   );
   for (const attribute of over) {
     if (listed.length >= MAX_BLOB_ENTRIES) break;
-    const placed = blobs.place(attribute.key, attribute.value.stringValue!);
+    const placed = blobs.place(attribute.key, attribute.value.stringValue);
     if (!placed) continue;
     const at = result.indexOf(attribute);
     result[at] = { key: attribute.key, value: { stringValue: placed.prefix } };
@@ -1959,14 +2006,78 @@ const spanIdOf = (entry: ImportEntry): string => {
   return typeof span?.spanId === "string" ? span.spanId : "";
 };
 
+/** An entry as a batch carries it. */
+interface BatchPart {
+  json: string;
+  bytes: number;
+}
+const batchPart = (entry: ImportEntry): BatchPart => {
+  const json = JSON.stringify(entry);
+  return { json, bytes: Buffer.byteLength(json) };
+};
+
+/** Whether a batch holds the entry alone: 3 MiB decoded and 900 KiB on the wire. */
+const fitsAlone = (part: BatchPart) =>
+  BATCH_FRAME_BYTES + part.bytes <= MAX_BATCH_DECODED_BYTES &&
+  gzipSync(`${BATCH_PREFIX}${part.json}${BATCH_SUFFIX}`, { level: 6 }).byteLength <=
+    MAX_BATCH_WIRE_BYTES;
+
+/** The import's own copies of what a span was read from, kept inline as recorded while another
+ * value can be stored apart instead. */
+const ARCHIVES = new Set([SOURCE_RECORD, SOURCE_ENVELOPE]);
+
+/** A span no batch holds alone though each of its values is within the inline limit (a large
+ * image both in its messages and in its source record), its largest text values stored apart
+ * through `blobs`, as a longer value is, one at a time until a batch holds it, its source record
+ * last; undefined when that is not enough. */
+function fitEntry(entry: ImportEntry, blobs: BlobSink): BatchPart | undefined {
+  const [scope, ...scopes] = entry.scopeSpans;
+  const [span, ...spans] = scope?.spans ?? [];
+  if (!scope || !span || !Array.isArray(span.attributes)) return undefined;
+  let attributes = span.attributes as OtlpAttribute[];
+  for (;;) {
+    // The largest text value that storing apart shortens (one longer than the prefix it keeps),
+    // the source record only when no other is left.
+    let largest: OtlpAttribute | undefined;
+    let largestBytes = 0;
+    for (const attribute of attributes.filter(isText)) {
+      const bytes = Buffer.byteLength(attribute.value.stringValue, "utf8");
+      if (bytes <= BLOB_PREFIX_BYTES) continue;
+      const archive = ARCHIVES.has(attribute.key);
+      const held = largest !== undefined && ARCHIVES.has(largest.key);
+      if (!largest || (held && !archive) || (held === archive && bytes > largestBytes))
+        [largest, largestBytes] = [attribute, bytes];
+    }
+    if (!largest) return undefined;
+    const next = offloadOtlpValues(attributes, blobs, (attribute) => attribute === largest);
+    // Not stored apart: the span lists as many values as it may, or lists them malformed.
+    if (next.includes(largest)) return undefined;
+    attributes = next;
+    const part = batchPart({
+      ...entry,
+      scopeSpans: [{ ...scope, spans: [{ ...span, attributes }, ...spans] }, ...scopes],
+    });
+    if (fitsAlone(part)) return part;
+  }
+}
+
 /**
  * The trace's entries packed into gzip OTLP/JSON batches in order, each at most 3 MiB decoded
- * and 900 KiB on the wire. Packing is linear and the output depends on the entries alone, so the
- * same trace packs to the same batches whatever bundle it came from.
+ * and 900 KiB on the wire. A span no batch holds alone has its largest text values stored apart
+ * through `blobs` until one does (see {@link fitEntry}); without `blobs`, or when that is not
+ * enough, the trace is refused. Packing is linear and the output depends on the entries alone, so
+ * the same trace packs to the same batches whatever bundle it came from.
  */
-export function batchEntries(entries: readonly ImportEntry[]): PreparedBatch[] {
+export function batchEntries(entries: readonly ImportEntry[], blobs?: BlobSink): PreparedBatch[] {
   const batches: PreparedBatch[] = [];
-  const parts: { json: string; bytes: number }[] = [];
+  const parts: BatchPart[] = [];
+  /** The entry at `index` fitted to a batch of its own, or the trace refused. */
+  const fit = (index: number): BatchPart => {
+    const part = blobs && fitEntry(entries[index]!, blobs);
+    if (!part) throw new ConversionError("One span exceeds the import batch bounds");
+    parts[index] = part;
+    return part;
+  };
   const encode = (from: number, to: number) => {
     const decoded = Buffer.from(
       `${BATCH_PREFIX}${parts
@@ -2000,7 +2111,11 @@ export function batchEntries(entries: readonly ImportEntry[]): PreparedBatch[] {
     let end = to;
     let encoded = encode(from, end);
     while (encoded.body.byteLength > MAX_BATCH_WIRE_BYTES) {
-      if (end - from === 1) throw new ConversionError("One span exceeds the import batch bounds");
+      if (end - from === 1) {
+        fit(from);
+        encoded = encode(from, end);
+        continue;
+      }
       // Shrink toward the wire cap by the observed compression ratio rather than re-encoding
       // per entry.
       const budget = integerQuotient(
@@ -2021,13 +2136,8 @@ export function batchEntries(entries: readonly ImportEntry[]): PreparedBatch[] {
   let pendingBytes = BATCH_FRAME_BYTES;
   let index = 0;
   while (index < entries.length) {
-    let part = parts[index];
-    if (!part) {
-      const json = JSON.stringify(entries[index]);
-      part = parts[index] = { json, bytes: Buffer.byteLength(json) };
-    }
-    if (BATCH_FRAME_BYTES + part.bytes > MAX_BATCH_DECODED_BYTES)
-      throw new ConversionError("One span exceeds the import batch bounds");
+    let part = (parts[index] ??= batchPart(entries[index]!));
+    if (BATCH_FRAME_BYTES + part.bytes > MAX_BATCH_DECODED_BYTES) part = fit(index);
     const grown = pendingBytes + (index > start ? 1 : 0) + part.bytes;
     if (grown <= MAX_BATCH_DECODED_BYTES) {
       pendingBytes = grown;
