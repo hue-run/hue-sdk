@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.23.1`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.23.2`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -381,8 +381,8 @@ and Hue never receives or stores them. The command is part of the `hue` executab
 #   LANGFUSE_PUBLIC_KEY=pk-lf-...
 #   LANGFUSE_SECRET_KEY=sk-lf-...
 #   LANGFUSE_BASE_URL=https://cloud.langfuse.com
-npx -y @hue-run/sdk@0.23.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.23.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.23.2 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.23.2 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` come from the environment or `--env-path`
@@ -527,21 +527,24 @@ that no format reads whole, and each message of a length-prefixed protobuf file 
 its own. CSV and Parquet are not read: export JSON or JSON Lines.
 
 Damage stays local. A gzip or zstd file that breaks off, or holds bytes after its last member or
-frame, is read up to the break and the rest named in `files.notes`; one whose checksum fails is not
-read. A line that is not UTF-8 is named and the other lines read. A bare `NaN`, `Infinity` or
-`-Infinity` (Python's `json.dumps` writes them) is read as null and named in `files.notes`. A value
-nested more than 512 levels deep is named and not read, and JSON text inside a record (metadata,
-tool arguments) nested that deep is kept as the text it is. Past 1,000 records in a row from the
-start of a JSON array that no format reads, the array is reported as unrecognized without reading
-the rest.
+frame, is read up to the break and the rest named in `files.notes`, as is a zstd message of a
+length-prefixed protobuf file with bytes after its last frame; one whose content fails its
+checksum or the size its member or frame declares is not read. A line that is not UTF-8 is named and
+the other lines read. A bare `NaN`, `Infinity` or `-Infinity` (Python's `json.dumps` writes them) is
+read as null and named in `files.notes`. A value nested more than 512 levels deep is named and not
+read, and JSON text inside a record (metadata, tool arguments) nested that deep is kept as the text
+it is. Past 1,000 records in a row from the start of a JSON array that no format reads, the array is
+reported as unrecognized without reading the rest.
 
 Every trace becomes gzip OTLP/JSON batches of at most 3 MiB decoded and 900 KiB on the wire,
 written to `--out` (default `<path>.hue-import`, created with mode 0700) beside `manifest.json`,
 which declares each trace's id, span count, batches (by the SHA-256 of each gzip body), large
 values, history owner and origin. A text value over 1 MiB is stored as a value of its own and
-listed in `hue.blobs`, as the exporter lists the values it uploads. Nothing about where a file sat
-or what it was called reaches a span: a renamed, reordered or re-zipped copy of the bundle prepares
-to byte-identical batches and the same manifest digest.
+listed in `hue.blobs`, as the exporter lists the values it uploads. A span that no batch can hold,
+though each of its values is under 1 MiB, has its largest text values stored the same way until a
+batch can, its source record last. Nothing about where a file sat or what it was called reaches a
+span: a renamed, reordered or re-zipped copy of the bundle prepares to byte-identical batches and
+the same manifest digest.
 
 **Formats.** Each value is read by the first format whose rule it matches, in the order
 `hue traces --help` lists them; each rule asks for keys the other formats' records lack. The format
@@ -573,14 +576,20 @@ conversation (`gen_ai.conversation.id`); a tool span, tool row or tool call neve
 | `raindrop_spans` | Raindrop's span rows: a Query API `GET /v1/traces?event_id=` answer, one row, or one per line | `trace_id`, `span_id`, `span_name`, `start_time_ns` and a Raindrop `span_type` (`INTERNAL`, `LLM_GENERATION`, `LLM_GENERATION_STREAM`, `TOOL_CALL`), alone or in `data` | the association attributes Raindrop's SDKs stamp on every span (`traceloop.association.properties.user_id` and `convo_id`, `ai.telemetry.metadata.raindrop.*`); the rows name no event, so `--user-key` names a user they lack |
 | `helicone` | Helicone requests: `npx @helicone/export` JSON or JSON Lines (`--include-body` for the bodies), or the `query-clickhouse` API answer | `request_id` and `request_created_at` with `response_status`, `request_user_id` or `request_properties`, alone or in `data` | `request_user_id`, never `helicone_user` (the Helicone account); the `Helicone-Session-Id` property |
 | `openai_chat` | An OpenAI Chat Completions request, or a line of a chat JSONL file (a fine-tuning or eval dataset) | a `messages` list holding a `{role}` message, without `object` and without anything only Anthropic sends | `safety_identifier`, else `user` |
-| `openai_responses` | An OpenAI Responses `response` object, a request (with its `output` when it was logged with it), or a bare list of input and output items | `"object": "response"` with an `output` list; a value of request fields only, with an item list as `input`; or a list of Responses items | `safety_identifier`, else `user`; `conversation` |
+| `openai_responses` | An OpenAI Responses `response` object, a request (with its `output` when it was logged with it), or a bare list of input and output items | `"object": "response"` with an `output` list; a value of request fields only, with text or a list of items and messages as `input`; or a list of Responses items | `safety_identifier`, else `user`; `conversation` |
 | `anthropic_messages` | An Anthropic Messages request or response | a response (`"type": "message"`, `"role": "assistant"`, `content`, `model`), or a `messages` request carrying something only Anthropic sends (`system`, `anthropic_version`, `stop_sequences`, an `input_schema` tool, a `tool_use` or other Anthropic content block) and nothing only OpenAI sends | `metadata.user_id` |
 
 **How each kind of format is converted.** OTLP/JSON, binary OTLP and Jaeger API v3 spans are kept
 exactly as recorded, and the spans of one trace split between files of these formats are read as
-one trace. A trace or span id that is not an OpenTelemetry id (an exporter's UUID, for example) is
-mapped to one derived from it by SHA-256, with the original kept as `hue.import.original_trace_id`
-or `hue.import.original_span_id`.
+one trace. A span that two files hold is read once when the copies differ only in encoding: key
+order, an int64 or a uint32 as a number or decimal text, an enum by name or number, a double as a
+number or text, bytes or an id as hex or as standard or URL-safe base64, padded or not, or a field
+at its default written or left out, and the user and conversation are read alike from either
+copy, as Hue reads them. A trace or span id that is not an OpenTelemetry id (an exporter's UUID,
+for example) is mapped to one derived from it by SHA-256, with the original kept as
+`hue.import.original_trace_id` or `hue.import.original_span_id`. Base64 without its padding is
+read as the id it encodes only as an encoder writes the id's bytes, and its text is kept the same
+way, since a vendor's own id of that length (a 22-character short UUID) can read as base64 too.
 
 - Jaeger UI JSON, Zipkin v2 and Phoenix spans are written as the OTLP spans they were, as the
   OpenTelemetry Collector converts Jaeger and Zipkin spans. Attributes keep their own names
@@ -610,6 +619,12 @@ or `hue.import.original_span_id`.
   as `hue.import.source_record`. An attribute the source recorded under its own name (a Raindrop
   span's `gen_ai.*`, for example) is kept as recorded, with none of the same name added beside it,
   unless it names a user or conversation that `--user-key` or `--session-key` replaces.
+- A chat transcript (`openai_chat`, `openai_responses`, `anthropic_messages`) is one trace: an
+  agent span for the conversation, a model span per assistant turn with the conversation before
+  it, and a tool span per call with the result that answers it. The agent's reply is the answer
+  logged with the request, else the last turn when the conversation ends with it; a conversation
+  that goes on past its last turn, as a request logged without its response does, is the agent's
+  input whole and has no reply, as is a Responses request logged with an empty `output`.
 - A vendor's own evaluation recorded inside a production trace is read as such, not as the
   agent's work: a Braintrust span with `purpose: "scorer"` or of type `score`, `automation`,
   `facet`, `classifier`, `preprocessor` or `review` (online scoring adds them to production
@@ -630,9 +645,12 @@ Rules shared by the row formats:
 - Copies: a record exported more than once keeps its latest copy, by the field the format records
   it in (Braintrust's `_xact_id`, Langfuse's `updatedAt`, Opik's `last_updated_at`, Helicone's
   `updated_at`, the ended copy of a LangSmith run, a Weave call, an OpenAI Agents span or a
-  Raindrop event). Copies of a span with no such field must agree, or the trace is refused. A
-  record identical to one read elsewhere (a repeated line of a chat JSONL file, an overlap of two
-  exports) is read once, and the value that added nothing new is named in `files.notes`.
+  Raindrop event). Copies of a span with no such field must agree, or the trace is refused; an
+  MLflow trace's `info`, which a later export may extend, is not compared, and one export's is
+  kept, the same whichever file is read first. A record identical to one read elsewhere (a
+  repeated line of a chat JSONL file, an overlap of two exports) is read once, and the value that
+  added nothing new is named in `files.notes`. When the later file's MLflow `info` is the one kept,
+  its note ends `read once from this copy`.
 - Token counts follow the GenAI conventions: input includes cached input and output includes
   reasoning, with the cached, cache-write and reasoning counts also kept on their own. Helicone
   stores `prompt_tokens` without `prompt_cache_read_tokens` and `prompt_cache_write_tokens`, and
@@ -675,35 +693,46 @@ Rules shared by the row formats:
   The same rules fill in the instants a Zipkin or Phoenix span was exported without.
 
 **History owner.** A trace's owner is read from its spans as Hue reads it: the trace's local roots
-(spans with no parent, or one outside the trace) first, then its other spans, never a tool span or
-anything beneath one, and every span that names one must agree. An explicit
-`hue.world.entity.namespace` and `hue.world.entity.id` wins over a user. A user is the first of
-`user.id`, `enduser.id` and the other attributes and metadata fields Hue reads (OpenTelemetry,
-Vercel AI SDK, OpenLLMetry, Langfuse, LangSmith, Braintrust, Mastra and OpenInference metadata),
-except that `user.id` beside `user.account_uuid` names a Claude Code installation and is passed
-over.
+(spans with no parent, or one outside the trace) first, then its other spans, never a tool span (a
+span any instrumentation convention Hue reads takes as a tool call) or anything beneath one, and
+every span that names one must agree. An explicit `hue.world.entity.namespace` and
+`hue.world.entity.id` wins over a user. A user is the first of `user.id`, `enduser.id` and the other
+attributes and metadata fields Hue reads (OpenTelemetry, Vercel AI SDK, OpenLLMetry, Langfuse,
+LangSmith, Braintrust, Mastra and OpenInference metadata), except that `user.id` beside
+`user.account_uuid` names a Claude Code installation and is passed over. The conversation the
+manifest declares is the one Hue's trace list shows: that of the trace's root span (the earliest
+span with no parent; without one, the only span whose parent is outside the trace, when that span
+runs an agent or a workflow), else that of the earliest span that names one, spans ordered by
+their start in milliseconds, then by span id. The manifest declares none when that span is a tool
+span or beneath one, or when Hue does not show the id as it is: one longer than 2,048 bytes of
+UTF-8, or holding a NUL or an unpaired surrogate.
 
 **`--user-key` and `--session-key`.** For an export whose user sits under a key of its own,
 `--user-key <key>` names it, and `--session-key <key>` names the conversation the same way. The key
 is one of:
 
 - a dotted key such as `app.customer_id`, looked up as an attribute of each span or its resource,
-  then in the record's metadata (the exact key, then as a dotted path), then in the record itself;
+  then in the record's metadata (the exact key, then as a dotted path), then in the record itself
+  (for MLflow: a span's own attributes, then the trace's metadata, then its tags; the record of an
+  MLflow trace's root span holds the trace's `info` beside the span);
 - a JSONPath of members and indexes into the source record: `$.metadata.customer.id`,
   `$.metadata["customer.id"]` or `$.tags[0]`;
 - a JSON Pointer into the source record: `/metadata/customer/id`.
 
 The key is read on the agent's spans as the owner is: the roots' value when they name one, else the
 other spans', never a tool span's, and spans that disagree name nobody. For a row format (the
-`langfuse` format among them) the key's value is written as the root's `user.id` (or
-`gen_ai.conversation.id`) in place of the user the record names, and no span keeps an attribute it
-recorded that Hue would read another user (or conversation) from, so the trace names the key's
-value, or nobody when its spans disagree. A trace kept as recorded or converted span for span (OTLP,
-Jaeger, Zipkin, Phoenix, the documented Langfuse list, ATIF) that names no owner gains one child
-span of the agent's earliest local root (never a tool span), `hue.import.user` with the single
-attribute `user.id` (or `hue.import.session` with `gen_ai.conversation.id`), so its recorded spans
-keep their bytes and a trace also sent live does not conflict. An owner the spans already name is
-kept, and a trace with no root but tool spans gains nothing.
+`langfuse` format among them) the key's value is written as the root's `user.id` (`enduser.id` on a
+root that records `user.account_uuid`) or `gen_ai.conversation.id` in place of the one the record
+names, and no span keeps an attribute it recorded, nor its resource a user attribute, that Hue
+would read another user (or conversation) from, so the trace names the key's value, or nobody when
+its spans disagree. A trace kept as recorded or converted span for span (OTLP, Jaeger, Zipkin,
+Phoenix, the documented Langfuse list, ATIF) that names no owner gains one child span of the
+agent's earliest local root (never a tool span), `hue.import.user` with the single attribute
+`user.id` (or `hue.import.session` with `gen_ai.conversation.id`), so its recorded spans keep their
+bytes and a trace also sent live does not conflict. `hue.import.session` starts before any tool
+span that names a conversation, so that Hue's trace list shows the key's. An owner or a
+conversation the agent's spans already name is kept, and a trace with no root but tool spans gains
+nothing.
 
 **Limits and refusals.** A malformed record refuses its trace, never the file: an OTLP trace with a
 malformed span (an attribute value of no OTLP shape, a protobuf span that does not decode) or whose
@@ -716,7 +745,12 @@ repeat more than 64 MiB of conversation (each turn's model span holds the conver
 An input of more than 25,000 traces, more than 256 MiB decompressed (every trace is held until all
 are read; prepare a larger export in parts, each to its own `--out`), or whose manifest would exceed
 32 MiB (4 MiB compressed), is refused whole. The messages of one length-prefixed protobuf file share
-the 64 MiB a file may decompress to.
+the 64 MiB a file may decompress to. Each zstd frame counts at least 128 bytes against these bounds,
+as does each member of a damaged gzip file, which is read member by member, and a zstd frame that
+does not decompress counts at least 1 MiB: 524,288 tiny frames fill one file's bound, and 256
+damaged zstd files the input's. A file over its bound counts more than that bound against the
+input's, so four such files refuse the input. Each refusal says whether content decompresses past
+the bound or its frames count past it; a file refused for its frames reads once decompressed.
 
 **Report.** `prepare` reports what it read and what it could not, down to the line; `--json` prints
 the report as one object:
@@ -741,7 +775,8 @@ the report as one object:
   other trace and can contribute to a World if Hue resolves their owner from the imported records;
 - `traces.by_origin`: the origin each source recorded (`production`, `evaluation`, `simulation` or
   `unknown`); evaluation and simulation traffic is imported and kept out of production history;
-- `traces.remapped`: the traces and spans whose vendor ids were mapped.
+- `traces.remapped`: the traces and spans whose ids were mapped, their text kept as
+  `hue.import.original_trace_id` and `hue.import.original_span_id`.
 
 An existing `--out` directory is accepted only while it holds nothing but an earlier preparation
 and no upload has started in it.
@@ -892,7 +927,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.23.1.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.23.2.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -903,7 +938,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.23.1.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.23.2.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -945,10 +980,10 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.23.1 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.23.1 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.23.1 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.23.1 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.23.2 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.23.2 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.23.2 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.23.2 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 One invocation creates one run holding every selected case; it prints the run URL
@@ -986,7 +1021,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.23.1 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.23.2 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.

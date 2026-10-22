@@ -18,13 +18,16 @@ import { nanosFrom, readRecords, type EventRow, type SpanKind, type SpanRow } fr
  *   `mlflow.llm.provider` the model.
  * - The user and conversation are the trace's `mlflow.trace.user` and `mlflow.trace.session`
  *   metadata, else a span's own `user.id` and `session.id`. `mlflow.user` and `mlflow.auth.*`
- *   name who logged the trace, never the end user.
+ *   name who logged the trace, never the end user. A dotted `--user-key` or `--session-key` reads
+ *   a span's own attributes, then the trace's metadata, then its tags.
  * - A trace tagged `mlflow.eval.requestId` (made by `mlflow.genai.evaluate`) or
  *   `mlflow.trace.sourceScorer` (a judge's own trace) is evaluation traffic.
  * - A span's `links`, which `Span.to_dict()` writes beside its parent, become span links, to a
  *   span of the same trace or of another, their ids read as the trace's own are.
- * - A trace is one record: a malformed span refuses its trace. The spans without a parent keep the
- *   trace's `info` beside the span in their source record.
+ * - A trace is one record: a malformed span refuses its trace. Its roots, the spans without a
+ *   parent in the export, keep the trace's `info` beside the span in their source record. Copies
+ *   of a span from two exports are compared without it, and one export's `info` is kept
+ *   (`SpanRow.context`).
  */
 
 const isTrace = (value: unknown): value is JsonObject =>
@@ -110,8 +113,11 @@ const instant = (value: JsonValue | undefined) =>
 interface Trace {
   traceKey: string;
   info: JsonObject;
-  /** `trace_metadata`, where a dotted `--user-key` looks after a span's attributes. */
+  /** The trace's `info` as every span's row holds it (`SpanRow.context`), one object per trace. */
+  context: { info: JsonObject };
+  /** `trace_metadata` and `tags`, where a dotted `--user-key` looks after a span's attributes. */
   metadata?: JsonObject;
+  tags?: JsonObject;
   user?: string;
   session?: string;
   evaluation: boolean;
@@ -174,8 +180,12 @@ function readSpan(span: JsonValue, trace: Trace): { row: SpanRow; events: EventR
     ...(end !== undefined ? { end } : {}),
     ...(input !== undefined && input !== null ? { input } : {}),
     ...(output !== undefined && output !== null ? { output } : {}),
-    record: parentKey === undefined ? { info: trace.info, span } : (span as JsonObject),
-    ...(trace.metadata ? { metadata: trace.metadata } : {}),
+    record: span as JsonObject,
+    context: trace.context,
+    // Where a dotted key looks after the attributes written: the span's own (most are kept in its
+    // record alone), then the trace's metadata, then its tags, each searched whole before the next.
+    metadata: attributes,
+    metadataFallbacks: [trace.metadata, trace.tags],
     attributes: own,
   };
   if (code && /ERROR$/.test(code))
@@ -251,7 +261,9 @@ function traceOf(value: JsonObject): Trace | undefined {
   return {
     traceKey,
     info,
+    context: { info },
     ...(metadata ? { metadata } : {}),
+    ...(tags ? { tags } : {}),
     ...(user !== undefined ? { user } : {}),
     ...(session !== undefined ? { session } : {}),
     evaluation:

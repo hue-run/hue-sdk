@@ -4,11 +4,13 @@ import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "nod
 import { basename, join, relative, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 import { sdkVersion } from "../version.js";
+import { MIN_DAMAGED_BYTES, MIN_FRAME_BYTES } from "./import-formats/containers.js";
 import type { IdentityKeys } from "./import-formats/identity.js";
 import { ImportReader, type ReadResult } from "./import-formats/reader.js";
 import { adapterById } from "./import-formats/registry.js";
 import {
   batchEntries,
+  BlobSink,
   ConversionError,
   manifestTotals,
   manifestTraceHasIdentity,
@@ -289,13 +291,20 @@ export async function prepareTraceBundle(
     unsupported,
     ...(options.keys ? { keys: options.keys } : {}),
   });
-  let totalBytes = 0;
-  const countBytes = (bytes: number) => {
-    totalBytes += bytes;
-    if (totalBytes > PREPARE_LIMITS.totalBytes)
-      throw new PrepareError(
-        `The input holds more than ${PREPARE_LIMITS.totalBytes} bytes decompressed; prepare it in parts of at most that size, each to its own --out`,
-      );
+  // What the input holds decompressed, and what that counts against the bound: a zstd frame or a
+  // gzip member read on its own counts at least MIN_FRAME_BYTES, a damaged zstd frame at least
+  // MIN_DAMAGED_BYTES, and a file over its own bound past it. The refusal names which is over.
+  let heldBytes = 0;
+  let countedBytes = 0;
+  const countBytes = (held: number, counted = held) => {
+    heldBytes += held;
+    countedBytes += counted;
+    if (countedBytes <= PREPARE_LIMITS.totalBytes) return;
+    throw new PrepareError(
+      heldBytes > PREPARE_LIMITS.totalBytes
+        ? `The input holds more than ${PREPARE_LIMITS.totalBytes} bytes decompressed; prepare it in parts of at most that size, each to its own --out`
+        : `The input counts for more than ${PREPARE_LIMITS.totalBytes} bytes, each zstd frame or gzip member read on its own at least ${MIN_FRAME_BYTES} and a damaged zstd frame at least ${MIN_DAMAGED_BYTES}; prepare it in parts, each to its own --out`,
+    );
   };
   for await (const source of sourceFiles(input, unsupported)) {
     countBytes(source.size);
@@ -310,7 +319,11 @@ export async function prepareTraceBundle(
       continue;
     }
     // Decompressed content counts toward the bound too.
-    countBytes(Math.max(0, reader.read(source.name, bytes) - bytes.byteLength));
+    const read = reader.read(source.name, bytes);
+    countBytes(
+      Math.max(0, read.held - bytes.byteLength),
+      Math.max(0, read.counted - bytes.byteLength),
+    );
   }
   const read = reader.finish();
   const refused = read.refused;
@@ -356,11 +369,21 @@ export async function prepareTraceBundle(
       continue;
     }
     let batches: ReturnType<typeof batchEntries>;
+    // A span no batch holds alone has its largest values stored apart as well.
+    const blobs = new BlobSink(trace.blobs);
     try {
-      batches = batchEntries(trace.entries);
+      batches = batchEntries(trace.entries, blobs);
     } catch (error) {
       if (!(error instanceof ConversionError)) throw error;
       refused.push({ trace_id: trace.traceId, reason: error.message });
+      continue;
+    }
+    trace.blobs = blobs.sorted();
+    if (trace.blobs.length > traceImportLimits.blobsPerTrace) {
+      refused.push({
+        trace_id: trace.traceId,
+        reason: `more than ${traceImportLimits.blobsPerTrace} large values`,
+      });
       continue;
     }
     if (batches.length > traceImportLimits.batchesPerTrace) {

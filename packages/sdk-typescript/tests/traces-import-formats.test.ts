@@ -250,12 +250,16 @@ describe("containers", () => {
 
     expect(decodeContainer(zlib.gzipSync("x".repeat(2048)), 1024)).toEqual({
       unsupported: "a gzip file that decompresses to more than 1024 bytes",
+      held: 1025,
+      counted: 1025,
     });
     expect(decodeContainer(Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x01]), 1024)).toEqual({
       unsupported: "a damaged gzip file",
     });
+    // What the outer layer decompressed to counts against the input's bound.
     expect(decodeContainer(zlib.gzipSync(zlib.gzipSync("{}")), 1024)).toEqual({
       unsupported: "a file compressed twice; decompress it first",
+      held: zlib.gzipSync("{}").byteLength,
     });
   });
 
@@ -439,6 +443,314 @@ describe("identity", () => {
     expect(owner(ids[6]!)).toEqual({ user: "user-resource" });
     expect(owner(ids[7]!)).toBeUndefined();
     expect(report.traces.without_identity).toBe(3);
+  });
+
+  test("declares the conversation Hue's trace list shows, never one a tool names", async () => {
+    const root = await scratch();
+    const ids = ["11", "12", "13", "14", "15", "16", "17"].map(traceIds);
+    const [a, b, c] = ["a1", "b2", "c3"].map(spanIds);
+    const outside = spanIds("ff");
+    const at = (span: ReturnType<typeof otlpSpan>, millis: number, nanos = 0) => ({
+      ...span,
+      startTimeUnixNano: String(
+        1_760_000_000_000_000_000n + BigInt(millis) * 1_000_000n + BigInt(nanos),
+      ),
+    });
+    const tool = { "gen_ai.operation.name": "execute_tool" };
+    const agentOperation = { "gen_ai.operation.name": "invoke_agent" };
+    const files = {
+      // A tool span, or a span beneath one, names a conversation the agent's spans do not.
+      "tool.json": otlp([
+        at(otlpSpan(ids[0]!, a, undefined, "agent", { "app.thread": "keyed" }), 0),
+        at(otlpSpan(ids[0]!, b, a, "execute_tool lookup", { ...tool, "session.id": "tool" }), 1),
+      ]),
+      "beneath.json": otlp([
+        at(otlpSpan(ids[1]!, a, undefined, "agent"), 0),
+        at(otlpSpan(ids[1]!, b, a, "execute_tool lookup", tool), 1),
+        at(otlpSpan(ids[1]!, c, b, "GET /orders", { "session.id": "tool" }), 2),
+      ]),
+      // The span with no parent is the execution root, though a span whose parent is outside
+      // the trace started earlier.
+      "parentless.json": otlp([
+        at(otlpSpan(ids[2]!, a, undefined, "agent", { "session.id": "root" }), 2),
+        at(otlpSpan(ids[2]!, b, outside, "agent", { "session.id": "orphan" }), 1),
+      ]),
+      // Two roots in one millisecond: the lower span id is the earlier.
+      "tie.json": otlp([
+        at(otlpSpan(ids[3]!, a, undefined, "a", { "session.id": "first" }), 0, 900),
+        at(otlpSpan(ids[3]!, b, undefined, "b", { "session.id": "second" }), 0, 100),
+      ]),
+      // A lone span whose parent is outside the trace is the root when it runs an agent;
+      // otherwise the earliest span that names a conversation names it.
+      "agent.json": otlp([
+        at(otlpSpan(ids[4]!, a, outside, "agent", { ...agentOperation, "session.id": "run" }), 2),
+        at(otlpSpan(ids[4]!, b, a, "step", { "session.id": "step" }), 1),
+      ]),
+      "request.json": otlp([
+        at(otlpSpan(ids[5]!, a, outside, "POST /chat", { "session.id": "request" }), 2),
+        at(otlpSpan(ids[5]!, b, a, "step", { "session.id": "step" }), 1),
+      ]),
+      // Hue keeps an id longer than the manifest holds: the manifest names none, not another.
+      "long.json": otlp([
+        at(
+          otlpSpan(ids[6]!, a, undefined, "agent", {
+            "session.id": "s".repeat(3_000),
+            "app.thread": "keyed",
+          }),
+          0,
+        ),
+        at(otlpSpan(ids[6]!, b, a, "step", { "session.id": "step" }), 1),
+      ]),
+    };
+    await writeFiles(
+      root,
+      Object.fromEntries(
+        Object.entries(files).map(([name, value]) => [name, JSON.stringify(value)]),
+      ),
+    );
+    const declared = async (...flags: string[]) => {
+      const { code, report } = await prepare(root, ...flags);
+      expect(code).toBe(0);
+      const { manifest } = await bundle(report.output_directory);
+      return ids.map((traceId) => manifest.traces.find((t) => t.trace_id === traceId)!);
+    };
+    expect((await declared()).map((trace) => trace.identity?.session)).toEqual([
+      undefined,
+      undefined,
+      "root",
+      "first",
+      "run",
+      "step",
+      undefined,
+    ]);
+    // --session-key names the conversation of a trace whose agent spans name none, and keeps
+    // the one they name, however long.
+    const keyed = await declared("--session-key", "app.thread");
+    expect(keyed[0]!.identity).toEqual({ session: "keyed" });
+    expect(keyed[0]!.span_count).toBe(3);
+    expect(keyed[6]!.identity).toBeUndefined();
+    expect(keyed[6]!.span_count).toBe(2);
+  });
+
+  test("reads agent roots and tool spans by every convention Hue reads, and ids by their bytes", async () => {
+    const root = await scratch();
+    const at = (span: ReturnType<typeof otlpSpan>, millis: number, nanos = 0) => ({
+      ...span,
+      startTimeUnixNano: String(
+        1_760_000_000_000_000_000n + BigInt(millis) * 1_000_000n + BigInt(nanos),
+      ),
+    });
+    const [agent, tool] = [spanIds("a1"), spanIds("b2")];
+    const files: Record<string, unknown> = {};
+    const expected: Record<string, string | undefined> = {};
+    // A span whose parent is outside the trace is the root when it runs an agent by any name Hue
+    // reads one by, though a child named a conversation in the same millisecond with a lower id.
+    // An agent step without its agent is no root, so the child's conversation is the one shown.
+    for (const [name, operation, shown] of [
+      ["agent-step", { "gen_ai.operation.name": "agent_step" }, "child"],
+      ["mlflow-agent", { "mlflow.spanType": JSON.stringify("AGENT") }, "orphan-root"],
+    ] as const) {
+      const traceId = traceIds(String(Object.keys(files).length + 10));
+      const orphan = spanIds("f0").replace(/0$/, "1");
+      files[`${name}.json`] = otlp([
+        at(
+          otlpSpan(traceId, orphan, spanIds("ee"), "agent", {
+            ...operation,
+            "session.id": "orphan-root",
+          }),
+          5,
+          900_000,
+        ),
+        at(
+          otlpSpan(traceId, spanIds("0").replace(/0$/, "2"), orphan, "step", {
+            "session.id": "child",
+          }),
+          5,
+          950_000,
+        ),
+      ]);
+      expected[traceId] = shown;
+    }
+    // A tool span of each convention Hue reads a call by never names the conversation: by the
+    // operation Hue takes from MLflow's, Braintrust's or Genkit's span type, or by the call a
+    // convention reads, whatever operation the span names.
+    const chat = { "gen_ai.operation.name": "chat" };
+    const conventions: Record<string, Attributes> = {
+      "mlflow-tool": { "mlflow.spanType": JSON.stringify("TOOL") },
+      braintrust: { "braintrust.span_attributes": JSON.stringify({ type: "tool" }) },
+      genkit: { "genkit:metadata:subtype": "tool" },
+      "mlflow-call": { ...chat, "mlflow.spanType": '"TOOL"', "mlflow.spanInputs": "{}" },
+      "braintrust-call": {
+        ...chat,
+        "braintrust.span_attributes.type": "tool",
+        "braintrust.input_json": "{}",
+      },
+      "genkit-call": { ...chat, "genkit:metadata:subtype": "tool", "genkit:name": "lookup" },
+      langsmith: { "langsmith.span.kind": "tool", "gen_ai.prompt": '{"id":12}' },
+      "spring-ai": { "spring.ai.tool.definition.name": "lookup" },
+      voltagent: { "tool.call.id": "call-1" },
+      // JSON nested 32 levels deep, within Hue's limits.
+      "braintrust-deep": {
+        "braintrust.span_attributes": `{"type":"tool","x":${"[".repeat(32)}${"]".repeat(32)}}`,
+      },
+    };
+    // Hue reads an operation or a tool key from a string value only, and JSON nested at most 32
+    // levels deep that holds no number past 2^53, so none of these spans is a tool's.
+    const notTools: Record<string, Attributes> = {
+      "int-call-id": { "gen_ai.tool.call.id": 5 },
+      "braintrust-unsafe": {
+        "braintrust.span_attributes": '{"type":"tool","x":12345678901234567890}',
+      },
+      "braintrust-deeper": {
+        "braintrust.span_attributes": `{"type":"tool","x":${"[".repeat(33)}${"]".repeat(33)}}`,
+      },
+      "bytes-kind": {},
+    };
+    for (const [name, attributes, shown] of [
+      ...Object.entries(conventions).map(([name, values]) => [name, values, undefined] as const),
+      ...Object.entries(notTools).map(([name, values]) => [name, values, "tool-session"] as const),
+    ]) {
+      const traceId = traceIds(String(Object.keys(files).length + 10));
+      const span = at(
+        otlpSpan(traceId, tool, agent, "lookup", { ...attributes, "session.id": "tool-session" }),
+        1,
+      );
+      // Bytes whose base64 reads as OpenInference's tool kind.
+      const kind = { key: "openinference.span.kind", value: { bytesValue: "TOOL" } };
+      files[`${name}.json`] = otlp([
+        at(
+          otlpSpan(traceId, agent, undefined, "agent", { "gen_ai.operation.name": "invoke_agent" }),
+          0,
+        ),
+        name === "bytes-kind" ? { ...span, attributes: [...span.attributes, kind] } : span,
+      ]);
+      expected[traceId] = shown;
+    }
+    // Claude Code's tool spans are known by their scope; VoltAgent's tool search step is no call.
+    const claude = traceIds("31");
+    files["claude-code.json"] = {
+      resourceSpans: [
+        {
+          resource: { attributes: [] },
+          scopeSpans: [
+            {
+              scope: { name: "com.anthropic.claude_code.tracing" },
+              spans: [
+                at(otlpSpan(claude, agent, undefined, "claude_code.interaction"), 0),
+                at(
+                  otlpSpan(claude, tool, agent, "claude_code.tool", {
+                    "span.type": "tool",
+                    tool_name: "Bash",
+                    "session.id": "tool-session",
+                  }),
+                  1,
+                ),
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    expected[claude] = undefined;
+    const search = traceIds("32");
+    files["voltagent-search.json"] = otlp([
+      at(otlpSpan(search, agent, undefined, "agent"), 0),
+      at(
+        otlpSpan(search, tool, agent, "tool.search", {
+          "tool.call.id": "call-1",
+          "tool.name": "search_tools",
+          "tool.search.name": "orders",
+          "session.id": "search-session",
+        }),
+        1,
+      ),
+    ]);
+    expected[search] = "search-session";
+    // Hue keeps an id over 2,048 bytes of UTF-8 under another key, whatever its length in
+    // characters: the manifest names none.
+    for (const [seed, id, shown] of [
+      ["41", "é".repeat(1_500), false],
+      ["42", "\u{1F600}".repeat(1_024), false],
+      ["43", "s".repeat(2_048), true],
+    ] as const) {
+      const traceId = traceIds(seed);
+      files[`long-${seed}.json`] = otlp([
+        otlpSpan(traceId, agent, undefined, "agent", { "session.id": id }),
+      ]);
+      expected[traceId] = shown ? id : undefined;
+    }
+    await writeFiles(
+      root,
+      Object.fromEntries(
+        Object.entries(files).map(([name, value]) => [name, JSON.stringify(value)]),
+      ),
+    );
+    const { code, report } = await prepare(root);
+    expect(code).toBe(0);
+    const { manifest } = await bundle(report.output_directory);
+    expect(
+      Object.fromEntries(
+        Object.keys(expected).map((traceId) => [
+          traceId,
+          manifest.traces.find((trace) => trace.trace_id === traceId)!.identity?.session,
+        ]),
+      ),
+    ).toEqual(expected);
+  });
+
+  test("--session-key names the conversation Hue's trace list shows, never past the agent's own", async () => {
+    const root = await scratch();
+    const at = (span: ReturnType<typeof otlpSpan>, micros: number) => ({
+      ...span,
+      startTimeUnixNano: String(1_760_000_000_000_000_000n + BigInt(micros) * 1_000n),
+    });
+    const [early, skewed, named] = ["51", "52", "53"].map(traceIds);
+    const agent = spanIds("a0").replace(/0$/, "1");
+    const tool = spanIds("0").replace(/0$/, "2");
+    const toolSpan = (traceId: string, micros: number) =>
+      at(
+        otlpSpan(traceId, tool, agent, "execute_tool lookup", {
+          "gen_ai.operation.name": "execute_tool",
+          "session.id": "tool",
+        }),
+        micros,
+      );
+    const agentSpan = (traceId: string) =>
+      at(
+        otlpSpan(traceId, agent, undefined, "agent", {
+          "gen_ai.operation.name": "invoke_agent",
+          "app.thread": "keyed",
+        }),
+        100,
+      );
+    await writeFiles(root, {
+      // A tool names a conversation in the root's millisecond with a lower span id, or before
+      // the root starts: the added span starts in the millisecond before it.
+      "early.json": JSON.stringify(otlp([agentSpan(early), toolSpan(early, 900)])),
+      "skewed.json": JSON.stringify(otlp([agentSpan(skewed), toolSpan(skewed, -3_000)])),
+      // An agent span names a conversation, though a tool's is the one shown: it is kept.
+      "named.json": JSON.stringify(
+        otlp([
+          agentSpan(named),
+          toolSpan(named, 1_100),
+          at(otlpSpan(named, spanIds("c3"), agent, "chat", { "session.id": "agent" }), 2_100),
+        ]),
+      ),
+    });
+    const { code, report } = await prepare(root, "--session-key", "app.thread");
+    expect(code).toBe(0);
+    const { manifest, spans } = await bundle(report.output_directory);
+    const trace = (traceId: string) => manifest.traces.find((item) => item.trace_id === traceId)!;
+    for (const traceId of [early, skewed]) {
+      expect(trace(traceId)).toMatchObject({ identity: { session: "keyed" }, span_count: 3 });
+      const all = await spans(traceId);
+      const added = all.find((span) => span.name === "hue.import.session")!;
+      const recorded = all.find((span) => span.spanId === tool)!;
+      const millisecond = (span: Span) => BigInt(span.startTimeUnixNano) / 1_000_000n;
+      expect(millisecond(added)).toBe(millisecond(recorded) - 1n);
+    }
+    expect(trace(named).identity).toBeUndefined();
+    expect(trace(named).span_count).toBe(3);
   });
 
   test("--user-key adds a hue.import.user span to an OTLP trace and leaves its spans unchanged", async () => {

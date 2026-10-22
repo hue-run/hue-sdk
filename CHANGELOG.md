@@ -8,6 +8,97 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.23.2] - 2026-10-22
+
+#### Fixed
+
+- `hue traces import prepare` reads an OpenAI Responses request logged without its response, such
+  as `{"model": "gpt-4.1-mini", "input": "Hello"}` or one with an empty `output`, and one whose
+  `input` holds only untyped `{role, content}` messages; these were skipped as no recognized
+  format, and a Helicone request body with such an `input` was kept as raw JSON.
+- **Wire** A chat transcript (OpenAI chat or Responses, Anthropic Messages) that goes on past its
+  last assistant turn, as a request logged without its response does, has the whole conversation
+  as its agent's input and no reply, and so does a Responses request logged with an empty
+  `output`, whatever its `input` ends with. Its last assistant turn was read as the reply, and the
+  messages after it, the request among them, were on no span. No model call stands for the
+  response the source lacks.
+- **Wire** A dotted `--user-key` or `--session-key` finds a key an MLflow trace records in a span's
+  own attributes or in the trace's tags, not only in its metadata: a span's attributes first, then
+  the trace's metadata, then its tags. A JSONPath or JSON Pointer reads the trace's `info` on each
+  of its root spans, a span whose parent is outside the export included. Such a root keeps the
+  `info` in its source record, so a trace whose `info` holds what a source record may not (text
+  with a NUL or an unpaired surrogate, an unsafe integer, nesting past 64 levels) is refused also
+  when the export lacks the trace's root, as it was with the root. Two exports of one MLflow trace
+  whose `info` differs, as when a tag was added between them, are read once, keeping one export's
+  `info`, the same whichever file is read first, and the note in `files.notes` ends `read once from
+  this copy` when the later file's copy is the one kept; when the trace's root had no parent, the
+  trace was refused with `span … appears with different content`.
+- A zstd file with a frame whose content fails its checksum, or is longer or shorter than the frame
+  declares, is not read, as a gzip file with a member that fails its trailer is not; the frames
+  before it were read and the damage only noted. A zstd file that breaks off, or whose frame does
+  not decompress, is still read up to the damage. Each zstd message of a length-prefixed protobuf
+  file is read frame by frame, where Node.js read only its first frame, bytes after its last frame
+  (zero padding) are named in `files.notes`, and a damaged one counts what its frames decompressed
+  to against the file's 64 MiB bound. A frame is read again without its checksum and declared size
+  only when they could be the damage.
+- Each zstd frame counts at least 128 bytes against the file's 64 MiB bound and the input's 256 MiB
+  bound, and so does each member of a damaged gzip file, which is read member by member. 524,288
+  tiny frames fill a file's bound and 2,097,152 the input's, which bounds how many frames are
+  decompressed, while frames of real content count what they hold. A zstd frame that does not
+  decompress counts at least 1 MiB against both bounds, so 256 damaged zstd files fill the input's.
+  A file of tiny frames, and a damaged gzip file of tiny members, is held in memory at its size,
+  not 16 KiB a frame or member. A file over its own bound counts more than that bound against the
+  input's, so four such files refuse the input; each was listed in `files.unsupported` and counted
+  only its size on disk. Each refusal says whether content decompresses past the bound (`a zstd
+  file that decompresses to more than 67108864 bytes`) or its frames count past it (`a zstd file
+  whose frames count for more than 67108864 bytes, each at least 128; decompress it first`), for a
+  file, for a length-prefixed file's messages and for the input.
+- **Wire** A span that no batch holds alone, though each of its values is within the 1 MiB inline
+  limit, has its largest text values stored as values of their own and listed in `hue.blobs` until
+  a batch holds it, its source record last. Such a trace was refused with `One span exceeds the
+  import batch bounds`: a transcript whose agent span holds a large image both as its input and in
+  its source record, as a request logged without its reply or an image before the first turn does,
+  or whose tool span holds a large result.
+- A gzip file that breaks off inside a member's 8-byte trailer is not read when the CRC-32 it holds
+  does not match the member's data; it was read up to the break.
+- **Wire** Once `--user-key` decides a converted trace's user, or that it has none, no span's
+  resource keeps a user attribute Hue would read another user from, such as the `user.id` of a
+  Langfuse `metadata.resourceAttributes`. A root that records `user.account_uuid` gets the key's
+  user as `enduser.id`, since Hue passes over `user.id` beside it.
+- A span that a binary OTLP file and an OTLP/JSON or Jaeger API v3 file both hold is read once
+  when the copies differ only in encoding: key order, an int64 or a uint32 as a number or decimal
+  text, an enum by name or number, a double as a number or text, bytes or an id as hex or as
+  standard or URL-safe base64, padded or not, or a field at its default written or left out. Its
+  trace was refused with `span … appears with different content`. The copy kept does not depend on
+  the order the files are read in, and the user and conversation are read alike from any of these
+  spellings, as Hue reads them: a double as decimal text (`"42"`), an int64 with leading zeros,
+  bytes in URL-safe or unpadded base64. A double user id written as text was read as none.
+- **Wire** A binary OTLP double that is NaN or infinite is written as OTLP/JSON names it (`"NaN"`,
+  `"Infinity"`, `"-Infinity"`), not as `null`. A trace or span id written as URL-safe base64, or as
+  base64 without its padding, is read as the id it encodes; it was mapped to an id derived from its
+  text. Without padding, an id is read so only as an encoder writes its bytes, and other text of
+  that length is mapped as before, so two ids that differ only in bits base64 leaves unused stay
+  two. An id read from base64 without its padding keeps its text as `hue.import.original_trace_id`
+  or `hue.import.original_span_id` and counts in `traces.remapped`, since a vendor's own id of that
+  length (a 22-character short UUID) can read as base64 too.
+- **Wire** Each `execute_tool` span of a chat transcript keeps the block that holds its result,
+  else its call, as `hue.import.source_record` rather than the whole message, so a message of many
+  parallel calls is not copied into every call's span. Each result answers one call, the first
+  unanswered one under its id in the latest turn that made one, however many items of the turn
+  hold its calls, and an Anthropic result's `is_error` fails only the call it answers. Calls that
+  shared an id all took its first result and its error.
+- **Wire** The manifest declares a trace's conversation as Hue's trace list shows it (the root
+  span's, else the earliest span's that names one), and none when a tool span or a span beneath one
+  names it, or when the id is longer than 2,048 bytes of UTF-8, which Hue does not show as it is.
+  It could name a tool's conversation, or another span's in place of a long id. A span whose
+  parent is outside the trace is its root when it runs an agent by any name Hue reads, MLflow's
+  `AGENT` among them, and a tool span is one any instrumentation convention Hue reads takes as a
+  call (MLflow, Braintrust, Genkit, LangSmith, Spring AI, Claude Code and VoltAgent tool spans
+  too), for the owner as for the conversation. As Hue does, it reads a span's operation and tool
+  keys from text values only, never a number or bytes, and the JSON of `braintrust.span_attributes`
+  and `mlflow.spanType` only while it nests at most 32 levels deep and holds only finite numbers
+  and safe integers. `--session-key` adds its conversation to a trace whose agent spans name none,
+  starting before any tool span that names one so that the trace list shows it.
 ### [0.23.1] - 2026-10-22
 
 #### Fixed

@@ -572,6 +572,126 @@ describe("MLflow traces", () => {
       session: "thread-7",
     });
   });
+
+  test("--user-key and --session-key read a span's own attributes, the trace's metadata and tags", async () => {
+    const trace = JSON.parse(await fixture("mlflow-trace.json")) as Record<string, any>;
+    delete trace.info.trace_metadata["mlflow.trace.user"];
+    delete trace.info.trace_metadata["mlflow.trace.session"];
+    trace.info.tags["app.customer"] = "tag-customer";
+    trace.info.tags["app.thread"] = "tag-thread";
+    const identity = async (...flags: string[]) =>
+      (
+        await bundle(
+          (await prepareFiles({ "trace.json": JSON.stringify(trace) }, ...flags)).output_directory,
+        )
+      ).trace(MLFLOW_TRACE).identity;
+    expect(await identity("--user-key", "app.customer", "--session-key", "app.thread")).toEqual({
+      user: "tag-customer",
+      session: "tag-thread",
+    });
+    // The trace's metadata comes before its tags, and a span's own attribute before both.
+    trace.info.trace_metadata["app.customer"] = "metadata-customer";
+    expect(await identity("--user-key", "app.customer")).toEqual({ user: "metadata-customer" });
+    trace.data.spans[0].attributes["app.customer"] = JSON.stringify("span-customer");
+    expect(await identity("--user-key", "app.customer")).toEqual({ user: "span-customer" });
+    // A JSONPath or JSON Pointer reads the trace's info.
+    expect(await identity("--user-key", "$.info.tags['app.customer']")).toEqual({
+      user: "tag-customer",
+    });
+    expect(await identity("--user-key", "/info/trace_metadata/app.customer")).toEqual({
+      user: "metadata-customer",
+    });
+    // Each source is searched whole before the next: a tag's flat key never answers for a key the
+    // metadata holds nested, nor the metadata's for the span's.
+    delete trace.data.spans[0].attributes["app.customer"];
+    delete trace.info.trace_metadata["app.customer"];
+    trace.info.trace_metadata.app = JSON.stringify({ customer: "metadata-customer" });
+    expect(await identity("--user-key", "app.customer")).toEqual({ user: "metadata-customer" });
+    trace.data.spans[0].attributes.app = JSON.stringify({ customer: "span-customer" });
+    trace.info.trace_metadata["app.customer"] = "flat-metadata-customer";
+    expect(await identity("--user-key", "app.customer")).toEqual({ user: "span-customer" });
+    delete trace.data.spans[0].attributes.app;
+    delete trace.info.trace_metadata.app;
+    delete trace.info.trace_metadata["app.customer"];
+    // So does a trace whose top span's parent is outside the export: that span is its root.
+    trace.data.spans[0].parent_span_id = Buffer.from("1122334455667788", "hex").toString("base64");
+    expect(await identity("--user-key", "/info/tags/app.customer")).toEqual({
+      user: "tag-customer",
+    });
+  });
+
+  test("reads once a trace two exports hold though the later one adds to its info", async () => {
+    const monday = JSON.parse(await fixture("mlflow-trace.json")) as Record<string, any>;
+    const tuesday = structuredClone(monday);
+    tuesday.info.tags.reviewed = "true";
+    for (const parent of [undefined, Buffer.from("1122334455667788", "hex").toString("base64")]) {
+      // A root without a parent, then one whose parent is outside the export.
+      for (const trace of [monday, tuesday]) trace.data.spans[0].parent_span_id = parent;
+      const prepared = [];
+      for (const [first, second] of [
+        [monday, tuesday],
+        [tuesday, monday],
+      ]) {
+        const report = await prepareFiles({
+          "a.json": JSON.stringify(first),
+          "b.json": JSON.stringify(second),
+        });
+        expect(report.traces.refused).toEqual([]);
+        // Tuesday's info sorts first, so its copy is the one read, and the note says so when it
+        // is the later file's.
+        const kept = second === tuesday ? " from this copy" : "";
+        expect(report.files.notes).toEqual([
+          { file: "b.json", reason: `the same records as a.json, read once${kept}` },
+        ]);
+        prepared.push(await bundle(report.output_directory));
+      }
+      // One export's info is kept, the same whichever is read first.
+      expect(prepared[1]!.batches()).toEqual(prepared[0]!.batches());
+      const agent = named(await prepared[0]!.spans(MLFLOW_TRACE), "support_agent");
+      expect((json(agent, "hue.import.source_record") as { info: unknown }).info).toEqual(
+        tuesday.info,
+      );
+      // A third copy names the file whose copy is kept.
+      const three = await prepareFiles({
+        "a.json": JSON.stringify(monday),
+        "b.json": JSON.stringify(tuesday),
+        "c.json": JSON.stringify(monday),
+      });
+      expect(three.files.notes).toEqual([
+        { file: "b.json", reason: "the same records as a.json, read once from this copy" },
+        { file: "c.json", reason: "the same records as b.json, read once" },
+      ]);
+    }
+  });
+});
+
+describe("MLflow trace info", () => {
+  test("refuses a trace whose info a source record cannot hold, with its root or without", async () => {
+    // The info is part of the record of each root, a span whose parent is outside the export
+    // included, so a NUL in its text refuses the trace either way.
+    const trace = JSON.parse(await fixture("mlflow-trace.json")) as Record<string, any>;
+    const broken = (hex: string, root: boolean) => {
+      const copy = structuredClone(trace);
+      copy.info.trace_id = `tr-${hex}`;
+      copy.info.tags["probe.tag"] = "a\u0000b";
+      for (const span of copy.data.spans)
+        span.trace_id = Buffer.from(hex, "hex").toString("base64");
+      if (!root) copy.data.spans = copy.data.spans.slice(1);
+      return copy;
+    };
+    const rooted = "0123456789abcdef0123456789abcdef";
+    const rootless = "fedcba9876543210fedcba9876543210";
+    const report = await prepareFiles({
+      "a.json": JSON.stringify(broken(rooted, true)),
+      "b.json": JSON.stringify(broken(rootless, false)),
+      "c.json": JSON.stringify(trace),
+    });
+    expect(report.totals.traces).toBe(1);
+    expect(report.traces.refused).toEqual([
+      { file: "a.json", trace_id: rooted, reason: "Source JSON contains invalid text" },
+      { file: "b.json", trace_id: rootless, reason: "Source JSON contains invalid text" },
+    ]);
+  });
 });
 
 describe("MLflow span links", () => {

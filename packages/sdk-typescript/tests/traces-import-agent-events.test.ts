@@ -479,6 +479,22 @@ describe("Raindrop span rows", () => {
     const unnamed = await bundle(two);
     expect(unnamed.trace(traceId).identity).toEqual({ session: "convo-2c7e91" });
     expect(userIds(await unnamed.spans(traceId))).toEqual([]);
+
+    // Hue passes over `user.id` beside Claude Code's `user.account_uuid`: the key's user is
+    // written where Hue reads it.
+    const installation = rows(["new-user"]);
+    installation[0]!.attributes["user.account_uuid"] = "account-1";
+    const claude = await bundle(
+      await prepare(
+        await scratch({ "traces.json": JSON.stringify({ data: installation }) }),
+        "--user-key",
+        "app.customer_id",
+      ),
+    );
+    expect(claude.trace(traceId).identity).toEqual({ user: "new-user", session: "convo-2c7e91" });
+    const reply = byName(await claude.spans(traceId), "support.reply");
+    expect(str(reply, "enduser.id")).toBe("new-user");
+    expect(str(reply, "user.account_uuid")).toBe("account-1");
   });
 });
 
@@ -741,6 +757,43 @@ describe("chat transcripts", () => {
     expect(attr(answer!, "gen_ai.response.model")).toBeUndefined();
   });
 
+  test("reads a Responses request logged alone, and one whose input is untyped messages", async () => {
+    const alone = { model: "gpt-4.1-mini", input: "Hello" };
+    const untyped = {
+      model: "gpt-4.1-mini",
+      input: [{ role: "user", content: "Where is order 12?" }],
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "It has shipped." }],
+        },
+      ],
+    };
+    expect(claims(alone)).toEqual(["openai_responses"]);
+    expect(claims(untyped)).toEqual(["openai_responses"]);
+    const report = await prepare(
+      await scratch({ "requests.jsonl": `${JSON.stringify(alone)}\n${JSON.stringify(untyped)}` }),
+    );
+    expect(report.formats).toEqual({ openai_responses: 2 });
+    const { spans } = await bundle(report);
+    // The request without its response: what it sent, and no model call.
+    const sent = await spans(derived("openai_responses", sha256(canonical(alone))));
+    expect(sent.map((span) => span.name)).toEqual(["invoke_agent"]);
+    expect(json(sent[0]!, "gen_ai.input.messages")).toEqual([
+      { role: "user", parts: [{ type: "text", content: "Hello" }] },
+    ]);
+    expect(attr(sent[0]!, "gen_ai.output.messages")).toBeUndefined();
+    const [, reply] = await spans(derived("openai_responses", sha256(canonical(untyped))));
+    expect(reply!.name).toBe("chat gpt-4.1-mini");
+    expect(json(reply!, "gen_ai.input.messages")).toEqual([
+      { role: "user", parts: [{ type: "text", content: "Where is order 12?" }] },
+    ]);
+    expect(json(reply!, "gen_ai.output.messages")).toEqual([
+      { role: "assistant", parts: [{ type: "text", content: "It has shipped." }] },
+    ]);
+  });
+
   test("refuses only a malformed transcript, reads one copy of a repeated one, and takes --user-key", async () => {
     const [line] = lines(await fixture("openai-chat.jsonl"));
     const anonymous = {
@@ -813,6 +866,323 @@ describe("chat transcripts", () => {
       },
     ]);
     expect(report.totals.traces).toBe(1);
+  });
+
+  test("keeps each tool call's own block and gives each result to one call", async () => {
+    const calls = 300;
+    // Parallel calls in one message, their results in the next.
+    const parallel: Record<string, any> = {
+      messages: [
+        { role: "user", content: "Look up every order." },
+        {
+          role: "assistant",
+          content: Array.from({ length: calls }, (_, call) => ({
+            type: "tool_use",
+            id: `toolu_${call}`,
+            name: "lookup_order",
+            input: { id: call },
+          })),
+        },
+        {
+          role: "user",
+          content: Array.from({ length: calls }, (_, call) => ({
+            type: "tool_result",
+            tool_use_id: `toolu_${call}`,
+            content: `order ${call} shipped`,
+          })),
+        },
+      ],
+    };
+    // Calls sharing an id: the first takes the one result, and the id used again takes the next.
+    const call = { id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } };
+    const sameId: Record<string, any> = {
+      messages: [
+        { role: "user", content: "Look it up." },
+        { role: "assistant", content: null, tool_calls: Array.from({ length: calls }, () => call) },
+        { role: "tool", tool_call_id: "call_1", content: "r".repeat(10_000) },
+        { role: "assistant", content: null, tool_calls: [call] },
+        { role: "tool", tool_call_id: "call_1", content: "again" },
+      ],
+    };
+    const report = await prepare(
+      await scratch({ "tools.jsonl": `${JSON.stringify(parallel)}\n${JSON.stringify(sameId)}` }),
+    );
+    expect(report.traces.refused).toEqual([]);
+    const { spans } = await bundle(report);
+    const toolSpans = async (format: string, transcript: unknown) =>
+      (await spans(derived(format, sha256(canonical(transcript))))).filter(
+        (span) => str(span, "gen_ai.operation.name") === "execute_tool",
+      );
+
+    const fanned = await toolSpans("anthropic_messages", parallel);
+    expect(fanned).toHaveLength(calls);
+    for (const [index, span] of fanned.entries()) {
+      expect(json(span, "hue.import.source_record")).toEqual(parallel.messages[2].content[index]);
+      expect(json(span, "gen_ai.tool.call.result")).toBe(`order ${index} shipped`);
+    }
+    const kept = fanned.reduce(
+      (sum, span) => sum + str(span, "hue.import.source_record")!.length,
+      0,
+    );
+    expect(kept).toBeLessThan(JSON.stringify(parallel).length);
+
+    const shared = await toolSpans("openai_chat", sameId);
+    expect(shared).toHaveLength(calls + 1);
+    expect(
+      shared.flatMap((span) =>
+        attr(span, "gen_ai.tool.call.result") ? [json(span, "gen_ai.tool.call.result")] : [],
+      ),
+    ).toEqual(["r".repeat(10_000), "again"]);
+    expect(json(shared[0]!, "hue.import.source_record")).toEqual(sameId.messages[2]);
+    expect(json(shared[1]!, "hue.import.source_record")).toEqual(call);
+    expect(json(shared[calls]!, "hue.import.source_record")).toEqual(sameId.messages[4]);
+  });
+
+  test("reads a request logged without its reply as all it sent, with no reply", async () => {
+    const asked = [
+      { role: "user", content: "Where is order 12?" },
+      { role: "assistant", content: "It has shipped." },
+      { role: "user", content: "When will it arrive?" },
+    ];
+    const responses = { model: "gpt-4.1-mini", input: asked };
+    const empty = { model: "gpt-4.1-mini", input: "Hello", output: [] };
+    // Logged with an empty output, whatever its input ends with: an assistant message there is a
+    // turn of the conversation sent, never the reply.
+    const unanswered = { model: "gpt-4.1-mini", input: asked.slice(0, 2), output: [] };
+    const chat = { model: "gpt-4.1-mini", messages: asked };
+    expect(claims(empty)).toEqual(["openai_responses"]);
+    const report = await prepare(
+      await scratch({
+        "requests.jsonl": [responses, empty, unanswered, chat]
+          .map((line) => JSON.stringify(line))
+          .join("\n"),
+      }),
+    );
+    expect(report.formats).toEqual({ openai_responses: 3, openai_chat: 1 });
+    const { spans } = await bundle(report);
+    const sent = asked.map(({ role, content }) => ({ role, parts: [{ type: "text", content }] }));
+    for (const [format, request] of [
+      ["openai_responses", responses],
+      ["openai_chat", chat],
+    ] as const) {
+      // The request is the latest message the agent took; the earlier turn is a model call of
+      // the conversation, never its reply.
+      const [agent, turn, ...rest] = await spans(derived(format, sha256(canonical(request))));
+      expect(json(agent!, "gen_ai.input.messages")).toEqual(sent);
+      expect(attr(agent!, "gen_ai.output.messages")).toBeUndefined();
+      expect(json(turn!, "gen_ai.output.messages")).toEqual([sent[1]]);
+      expect(rest).toEqual([]);
+    }
+    const alone = await spans(derived("openai_responses", sha256(canonical(empty))));
+    expect(alone.map((span) => span.name)).toEqual(["invoke_agent"]);
+    expect(attr(alone[0]!, "gen_ai.output.messages")).toBeUndefined();
+    const [agent, turn, ...rest] = await spans(
+      derived("openai_responses", sha256(canonical(unanswered))),
+    );
+    expect(json(agent!, "gen_ai.input.messages")).toEqual(sent.slice(0, 2));
+    expect(attr(agent!, "gen_ai.output.messages")).toBeUndefined();
+    expect(json(turn!, "gen_ai.output.messages")).toEqual([sent[1]]);
+    expect(rest).toEqual([]);
+  });
+
+  test("stores a span's largest values apart when no batch holds it, its source record last", async () => {
+    // A request logged without its reply whose last message holds an image: the agent's input and
+    // its source record each carry the 800,000-character data URL, each within the 1 MiB inline
+    // limit, together past the 900 KiB a batch takes on the wire.
+    // 600,000 bytes that do not compress, as an image's do not.
+    const pixels = Buffer.concat(
+      Array.from({ length: 9_375 }, (_, index) =>
+        createHash("sha512").update(`pixels ${index}`).digest(),
+      ),
+    ).toString("base64");
+    expect(pixels).toHaveLength(800_000);
+    const url = `data:image/png;base64,${pixels}`;
+    const chat = {
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "What is in this image?" },
+            { type: "image_url", image_url: { url } },
+          ],
+        },
+      ],
+    };
+    // A tool's large result likewise: the result of its span, and the block it keeps.
+    const fetched = {
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "user", content: "fetch it" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_1", type: "function", function: { name: "fetch", arguments: "{}" } },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_1", content: pixels },
+      ],
+    };
+    const report = await prepare(
+      await scratch({
+        "requests.jsonl": [chat, fetched].map((line) => JSON.stringify(line)).join("\n"),
+      }),
+    );
+    expect(report.traces.refused).toEqual([]);
+    expect(report.formats).toEqual({ openai_chat: 2 });
+    const { trace, spans } = await bundle(report);
+    /** The values a span stores apart, by key: each read back whole from the bundle. */
+    const stored = async (span: Span) => {
+      const listed = (attr(span, "hue.blobs")?.arrayValue?.values ?? []) as {
+        stringValue: string;
+      }[];
+      const values: Record<string, unknown> = {};
+      for (const { stringValue } of listed) {
+        const entry = JSON.parse(stringValue) as { key: string; sha256: string };
+        const bytes = await readFile(join(report.output_directory, `${entry.sha256}.blob`));
+        expect(sha256(bytes.toString("utf8"))).toBe(entry.sha256);
+        values[entry.key] = JSON.parse(bytes.toString("utf8"));
+      }
+      return values;
+    };
+    const chatId = derived("openai_chat", sha256(canonical(chat)));
+    const [agent] = await spans(chatId);
+    // The agent's input is stored apart and its first 16 KiB kept; its source record stays whole.
+    expect(attr(agent!, "hue.truncated")).toEqual({
+      arrayValue: { values: [{ stringValue: "gen_ai.input.messages" }] },
+    });
+    const { "gen_ai.input.messages": input } = await stored(agent!);
+    expect(input).toEqual([
+      { role: "user", parts: [{ type: "text", content: "hi" }] },
+      { role: "assistant", parts: [{ type: "text", content: "hello" }] },
+      expect.objectContaining({ role: "user" }),
+    ]);
+    expect(JSON.stringify(input)).toContain(pixels);
+    expect(str(agent!, "gen_ai.input.messages")).toHaveLength(16 * 1024);
+    expect(json(agent!, "hue.import.source_record")).toEqual(chat);
+    expect(trace(chatId).blobs).toHaveLength(1);
+    const tool = byName(
+      await spans(derived("openai_chat", sha256(canonical(fetched)))),
+      "execute_tool fetch",
+    );
+    expect(await stored(tool)).toEqual({ "gen_ai.tool.call.result": pixels });
+    expect(json(tool, "hue.import.source_record")).toEqual(fetched.messages[2]);
+  });
+
+  test("reads a Helicone request body whose Responses input is untyped messages", async () => {
+    const record = {
+      request_id: "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",
+      request_created_at: "2026-10-18T10:00:01.120Z",
+      response_created_at: "2026-10-18T10:00:02.044Z",
+      response_status: 200,
+      request_body: {
+        model: "gpt-4.1-mini",
+        input: [{ role: "user", content: "Where is order 12?" }],
+      },
+      response_body: {
+        object: "response",
+        model: "gpt-4.1-mini",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "It has shipped." }],
+          },
+        ],
+      },
+      provider: "OPENAI",
+    };
+    expect(claims(record)).toEqual(["helicone"]);
+    const report = await prepare(await scratch({ "helicone.json": JSON.stringify(record) }));
+    const { spans } = await bundle(report);
+    const [call] = await spans(derived("helicone", record.request_id));
+    expect(json(call!, "gen_ai.input.messages")).toEqual([
+      { role: "user", parts: [{ type: "text", content: "Where is order 12?" }] },
+    ]);
+    expect(attr(call!, "input.value")).toBeUndefined();
+  });
+
+  test("pairs results with the calls of their turn, each result failing only its own call", async () => {
+    // Parallel Responses calls are items of their own, one turn; both share an id.
+    const call = (id: number) => ({
+      type: "function_call",
+      call_id: "call_X",
+      name: "lookup_order",
+      arguments: JSON.stringify({ id }),
+    });
+    const result = (output: string) => ({
+      type: "function_call_output",
+      call_id: "call_X",
+      output,
+    });
+    const parallel = {
+      model: "gpt-4.1-mini",
+      input: [
+        { role: "user", content: "Look up orders 1 and 2." },
+        call(1),
+        call(2),
+        result("order 1 shipped"),
+        result("order 2 pending"),
+      ],
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "One shipped, one pending." }],
+        },
+      ],
+    };
+    // One tool use id in three turns: a failed result, a good one, and a call with none.
+    const use = { type: "tool_use", id: "toolu_1", name: "lookup_order", input: { id: 1 } };
+    const answer = (content: string, failed = false) => ({
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "toolu_1",
+          content,
+          ...(failed ? { is_error: true } : {}),
+        },
+      ],
+    });
+    const retried = {
+      model: "claude-sonnet-4-5",
+      system: "You help with orders.",
+      messages: [
+        { role: "user", content: "Where is order 1?" },
+        { role: "assistant", content: [use] },
+        answer("timeout", true),
+        { role: "assistant", content: [use] },
+        answer("order 1 shipped"),
+        { role: "assistant", content: [use] },
+      ],
+    };
+    const report = await prepare(
+      await scratch({
+        "calls.jsonl": `${JSON.stringify(parallel)}\n${JSON.stringify(retried)}`,
+      }),
+    );
+    const { spans } = await bundle(report);
+    const tools = async (format: string, transcript: unknown) =>
+      (await spans(derived(format, sha256(canonical(transcript))))).filter(
+        (span) => str(span, "gen_ai.operation.name") === "execute_tool",
+      );
+    const results = (found: Span[]) =>
+      found.map((span) =>
+        attr(span, "gen_ai.tool.call.result") ? json(span, "gen_ai.tool.call.result") : undefined,
+      );
+    const lookups = await tools("openai_responses", parallel);
+    expect(lookups.map((span) => json(span, "gen_ai.tool.call.arguments"))).toEqual([
+      { id: 1 },
+      { id: 2 },
+    ]);
+    expect(results(lookups)).toEqual(["order 1 shipped", "order 2 pending"]);
+    const attempts = await tools("anthropic_messages", retried);
+    expect(results(attempts)).toEqual(["timeout", "order 1 shipped", undefined]);
+    expect(attempts.map((span) => span.status.code)).toEqual([2, 0, 0]);
   });
 });
 

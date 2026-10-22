@@ -116,8 +116,17 @@ export interface SpanRow {
   resource?: Record<string, JsonValue>;
   /** The whole source record, kept as `hue.import.source_record`. */
   record: JsonValue;
+  /** The trace's own record the row was read with (an MLflow trace's `{info}`), which a root of the
+   * trace keeps beside its record, `{...context, span: record}`. A later export of the trace may
+   * extend it (a tag added), so copies of a span are compared without it, and of copies that
+   * differ only in it, the one whose context sorts first is kept, whatever order they are read
+   * in, so every span of the trace keeps the same export's. */
+  context?: Record<string, JsonValue>;
   /** Where a dotted `--user-key` or `--session-key` looks after the span's attributes. */
   metadata?: JsonValue;
+  /** Further places it looks after `metadata`, in order. Each is searched whole, a flat key and
+   * then the dotted path, before the next, so a later source never answers for an earlier one. */
+  metadataFallbacks?: readonly (JsonValue | undefined)[];
   /** A revision of a record exported more than once: the highest is kept. Decimal digits compare
    * as numbers. Without one, copies of a span must agree. */
   revision?: string;
@@ -257,11 +266,17 @@ export class RowTraceCollector implements TraceCollector {
   /**
    * Adds a row read at `at`. Returns where an identical copy of the record was read before, when
    * one was read somewhere else: the record is then read once, and the caller may say so.
+   * `replaced` tells that the copy read here is the one kept, its context sorting first.
    */
-  add(row: SpanRow, sourceDigest: string, at?: Location): Location | undefined {
+  add(
+    row: SpanRow,
+    sourceDigest: string,
+    at?: Location,
+  ): { earlier: Location; replaced: boolean } | undefined {
     key(row.traceKey, "trace id");
     key(row.spanKey, "span id");
     validateSource(row.record);
+    if (row.context) contextText(row.context);
     const draft = this.draft(row.traceKey);
     draft.sourceDigests.add(sourceDigest);
     const digest = sha256Hex(canonicalJson(row.record));
@@ -271,11 +286,22 @@ export class RowTraceCollector implements TraceCollector {
       return undefined;
     }
     if (held.digest === digest) {
+      const earlier = held.at;
       const elsewhere =
         at &&
-        held.at &&
-        (held.at.file !== at.file || held.at.line !== at.line || held.at.record !== at.record);
-      return elsewhere ? held.at : undefined;
+        earlier &&
+        (earlier.file !== at.file || earlier.line !== at.line || earlier.record !== at.record);
+      // The copy kept is where it was read, so a later copy names it.
+      const replaced =
+        row.context !== undefined &&
+        held.row.context !== undefined &&
+        contextText(row.context) < contextText(held.row.context);
+      if (replaced) {
+        held.row = row;
+        if (at) held.at = at;
+        else delete held.at;
+      }
+      return elsewhere ? { earlier, replaced } : undefined;
     }
     const order = compareRevisions(held.row.revision, row.revision);
     if (order === undefined || order === 0)
@@ -353,6 +379,10 @@ export class RowTraceCollector implements TraceCollector {
         ? row.parentKey
         : undefined;
     if (cyclic(rows, parentOf)) throw new ConversionError("The source hierarchy contains a cycle");
+    const sourceRecord = (row: SpanRow): JsonValue =>
+      row.context && parentOf(row) === undefined
+        ? { ...row.context, span: row.record }
+        : row.record;
     const { starts, ends, notes } = timesOf(rows, parentOf);
     const traceNotes = new Set([...notes.values()].flat());
     // The trace's user and conversation: from the identity keys when they name one across the
@@ -378,8 +408,9 @@ export class RowTraceCollector implements TraceCollector {
           attributes: new Map(Object.entries(span.row.attributes ?? {})),
           resource: new Map(Object.entries(span.row.resource ?? {})),
         },
-        span.row.record,
+        sourceRecord(span.row),
         span.row.metadata,
+        span.row.metadataFallbacks,
       );
     const decide = (path: IdentityKeys["user"], own: (row: SpanRow) => string | undefined) => {
       const fromKey = path ? decideKey(spans, tool, (span) => keyed(path, span)) : { found: false };
@@ -421,13 +452,7 @@ export class RowTraceCollector implements TraceCollector {
       else if (row.origin === "simulation" && origin !== "evaluation") origin = "simulation";
       else if (row.environment === "production" && origin === "unknown") origin = "production";
       const attributes = new AttributeList(blobs);
-      const own: [string, JsonValue][] = [];
-      for (const [name, value] of Object.entries(row.attributes ?? {})) {
-        let kept: JsonValue | undefined = value;
-        for (const kind of keyedKinds)
-          if (kept !== undefined) kept = withoutIdentity(kind, name, kept);
-        if (kept !== undefined) own.push([name, kept]);
-      }
+      const own = withoutKeyed(row.attributes, keyedKinds);
       // An attribute the source recorded under its own name is kept as recorded; the emitter
       // adds none of the same name beside it.
       const recorded = new Set(own.map(([name]) => name));
@@ -442,7 +467,10 @@ export class RowTraceCollector implements TraceCollector {
         if (row.provider) add("gen_ai.provider.name", row.provider);
         if (row.agentName) add("gen_ai.agent.name", row.agentName);
         if (root && row.kind !== "tool") {
-          if (user.value !== undefined) add("user.id", user.value);
+          // Hue passes over `user.id` beside `user.account_uuid` (Claude Code's installation id),
+          // so a key's user beside one is written where Hue reads it.
+          const installation = user.keyed && own.some(([name]) => name === "user.account_uuid");
+          if (user.value !== undefined) add(installation ? "enduser.id" : "user.id", user.value);
           if (session.value !== undefined) add("gen_ai.conversation.id", session.value);
         }
       }
@@ -475,7 +503,7 @@ export class RowTraceCollector implements TraceCollector {
       const spanNotes = [...(row.timing ? [row.timing] : []), ...(notes.get(spanKey) ?? [])];
       for (const rule of row.timing?.split("; ") ?? []) traceNotes.add(rule);
       if (spanNotes.length) attributes.add("hue.import.timing", spanNotes.join("; "));
-      attributes.add(SOURCE_RECORD, JSON.stringify(row.record));
+      attributes.add(SOURCE_RECORD, JSON.stringify(sourceRecord(row)));
       const start = starts.get(spanKey)!;
       const spanEvents = (events.get(spanKey) ?? [])
         .map((event) => {
@@ -547,10 +575,10 @@ export class RowTraceCollector implements TraceCollector {
         ...(spanEvents.length ? { events: spanEvents } : {}),
         ...(links.length ? { links } : {}),
       };
-      const resource: OtlpAttribute[] = Object.entries(row.resource ?? {}).map(([name, value]) => ({
-        key: name,
-        value: anyValue(value),
-      }));
+      // Hue reads a span's user from its resource too, never its conversation.
+      const resource: OtlpAttribute[] = withoutKeyed(row.resource, user.keyed ? ["user"] : []).map(
+        ([name, value]) => ({ key: name, value: anyValue(value) }),
+      );
       if (row.environment && !row.resource?.["deployment.environment.name"])
         resource.push({
           key: "deployment.environment.name",
@@ -576,6 +604,21 @@ export class RowTraceCollector implements TraceCollector {
       ...(inferredTiming.length ? { inferredTiming } : {}),
     };
   }
+}
+
+/** A row's recorded attributes (or resource) without what Hue would read an identifier of the
+ * `kinds` from: what a key decided, a user or none, is the trace's. */
+function withoutKeyed(
+  values: Record<string, JsonValue> | undefined,
+  kinds: readonly IdentityKind[],
+): [string, JsonValue][] {
+  const kept: [string, JsonValue][] = [];
+  for (const [name, value] of Object.entries(values ?? {})) {
+    let left: JsonValue | undefined = value;
+    for (const kind of kinds) if (left !== undefined) left = withoutIdentity(kind, name, left);
+    if (left !== undefined) kept.push([name, left]);
+  }
+  return kept;
 }
 
 /** A row's content under the GenAI conventions: a tool's arguments and result, or chat messages,
@@ -621,6 +664,19 @@ function addContent(
       add(`${field}.mime_type`, "application/json");
     }
   }
+}
+
+/** A row's context as canonical JSON, by which copies of a span are ordered; the context is
+ * checked and its text made once, however many rows share it. */
+const contextTexts = new WeakMap<object, string>();
+function contextText(context: Record<string, JsonValue>): string {
+  let text = contextTexts.get(context);
+  if (text === undefined) {
+    validateSource(context);
+    text = canonicalJson(context);
+    contextTexts.set(context, text);
+  }
+  return text;
 }
 
 /** The SHA-256 of an event's record, by which copies of it are told apart. */
