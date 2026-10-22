@@ -124,6 +124,9 @@ export interface SpanRow {
   context?: Record<string, JsonValue>;
   /** Where a dotted `--user-key` or `--session-key` looks after the span's attributes. */
   metadata?: JsonValue;
+  /** Further places it looks after `metadata`, in order. Each is searched whole, a flat key and
+   * then the dotted path, before the next, so a later source never answers for an earlier one. */
+  metadataFallbacks?: readonly (JsonValue | undefined)[];
   /** A revision of a record exported more than once: the highest is kept. Decimal digits compare
    * as numbers. Without one, copies of a span must agree. */
   revision?: string;
@@ -407,6 +410,7 @@ export class RowTraceCollector implements TraceCollector {
         },
         sourceRecord(span.row),
         span.row.metadata,
+        span.row.metadataFallbacks,
       );
     const decide = (path: IdentityKeys["user"], own: (row: SpanRow) => string | undefined) => {
       const fromKey = path ? decideKey(spans, tool, (span) => keyed(path, span)) : { found: false };

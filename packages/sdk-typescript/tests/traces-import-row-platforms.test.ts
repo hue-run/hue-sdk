@@ -601,6 +601,18 @@ describe("MLflow traces", () => {
     expect(await identity("--user-key", "/info/trace_metadata/app.customer")).toEqual({
       user: "metadata-customer",
     });
+    // Each source is searched whole before the next: a tag's flat key never answers for a key the
+    // metadata holds nested, nor the metadata's for the span's.
+    delete trace.data.spans[0].attributes["app.customer"];
+    delete trace.info.trace_metadata["app.customer"];
+    trace.info.trace_metadata.app = JSON.stringify({ customer: "metadata-customer" });
+    expect(await identity("--user-key", "app.customer")).toEqual({ user: "metadata-customer" });
+    trace.data.spans[0].attributes.app = JSON.stringify({ customer: "span-customer" });
+    trace.info.trace_metadata["app.customer"] = "flat-metadata-customer";
+    expect(await identity("--user-key", "app.customer")).toEqual({ user: "span-customer" });
+    delete trace.data.spans[0].attributes.app;
+    delete trace.info.trace_metadata.app;
+    delete trace.info.trace_metadata["app.customer"];
     // So does a trace whose top span's parent is outside the export: that span is its root.
     trace.data.spans[0].parent_span_id = Buffer.from("1122334455667788", "hex").toString("base64");
     expect(await identity("--user-key", "/info/tags/app.customer")).toEqual({

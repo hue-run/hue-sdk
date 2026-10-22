@@ -778,14 +778,17 @@ export function resolveKey(
   view: { attributes: ReadonlyMap<string, unknown>; resource?: ReadonlyMap<string, unknown> },
   record: unknown,
   metadata?: unknown,
+  fallbacks: readonly unknown[] = [],
 ): string | undefined {
   if (path.kind === "pointer") return metadataText(walk(record, path.segments));
   const dotted = path.key.split(".");
   for (const found of [
     () => view.attributes.get(path.key),
     () => view.resource?.get(path.key),
-    () => member(metadata, path.key),
-    () => walk(metadata, dotted),
+    ...[metadata, ...fallbacks].flatMap((source) => [
+      () => member(source, path.key),
+      () => walk(source, dotted),
+    ]),
     () => member(record, path.key),
     () => walk(record, dotted),
   ]) {

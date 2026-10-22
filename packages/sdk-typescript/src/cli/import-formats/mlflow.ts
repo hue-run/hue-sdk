@@ -183,8 +183,9 @@ function readSpan(span: JsonValue, trace: Trace): { row: SpanRow; events: EventR
     record: span as JsonObject,
     context: trace.context,
     // Where a dotted key looks after the attributes written: the span's own (most are kept in its
-    // record alone), then the trace's metadata, then its tags.
-    metadata: { ...trace.tags, ...trace.metadata, ...attributes },
+    // record alone), then the trace's metadata, then its tags, each searched whole before the next.
+    metadata: attributes,
+    metadataFallbacks: [trace.metadata, trace.tags],
     attributes: own,
   };
   if (code && /ERROR$/.test(code))
