@@ -5,8 +5,10 @@ it is not a promise about the Python interpreter's total resident memory.
 
 Live spans: the span processor remembers qualifying spans at start. While any are
 remembered, its worker wakes at least every 0.5 s, queues one advisory placeholder per span
-still open and forgets it. Placeholders use at most a quarter of the export queue and are
-never counted as dropped or failed; one whose span has ended by export time is discarded.
+still open and forgets it. Placeholders use at most a quarter of the export queue. Export
+hands off at most 64 of them, within 1 MiB encoded, to a separate single-flight transport;
+flush and shutdown never wait for their HTTP work. They never count as dropped or failed,
+and a span that ends before its announcement is sent loses only that announcement.
 """
 
 from __future__ import annotations
@@ -309,7 +311,8 @@ class _BoundedProcessor:
         within one deadline, and no longer once none of those pending can be stored before it
         (each waits out a Retry-After past it), so a provider's processors after this one keep
         the rest of a shared deadline. False on a timeout or a recorded drop or export failure;
-        an upload that fails is a warning."""
+        an upload that fails is a warning. Advisory placeholders are sent independently and
+        never waited for."""
         if self._pid != os.getpid():
             return False
         deadline = monotonic() + timeout_millis / 1000
@@ -557,7 +560,7 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         return [
             (item, size)
             for item, size in batch
-            if not isinstance(item, PendingSpan) or (live and item.source.end_time is None)
+            if not isinstance(item, PendingSpan) or (live and item.is_open)
         ]
 
 

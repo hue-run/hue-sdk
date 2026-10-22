@@ -217,7 +217,8 @@ describe("the input bound", () => {
     expect(stderr).toContain(
       "The input holds more than 268435456 bytes decompressed; prepare it in parts of at most that size",
     );
-  });
+    // Decompressing 300 MiB takes about 5 s, past bun test's default deadline.
+  }, 60_000);
 });
 
 describe("malformed records", () => {

@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Agent, ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { gzip } from "node:zlib";
+import { waitUntil } from "@vercel/functions";
 import type { Attributes, Span as ApiSpan } from "@opentelemetry/api";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import {
@@ -22,7 +23,6 @@ import {
 import {
   BatchSpanProcessor,
   type ReadableSpan,
-  type Span,
   type SpanProcessor,
 } from "@opentelemetry/sdk-trace";
 import {
@@ -100,9 +100,16 @@ type Response = {
 /** A finished span or emitted log record as the OpenTelemetry SDK hands it to a processor. */
 export type RecordValue = ReadableSpan | ReadableLogRecord;
 
+type DeliveryCohort = {
+  pending: number;
+  promise: Promise<void>;
+  resolve: () => void;
+};
+
 /** The transport surface the exporters report through; kept narrow so nothing else depends on it. */
 interface ExportSink {
   readonly options: ReturnType<typeof validateOptions>;
+  exporting(records: RecordValue[]): void;
   finish(signal: Signal, records: RecordValue[]): void;
   acceptedRecords(signal: Signal, count: number): void;
   issue(
@@ -115,6 +122,7 @@ interface ExportSink {
   ): void;
   placeholderMarkers(record: RecordValue): Attributes | undefined;
   placeholderSettled(record: RecordValue): boolean;
+  deferPlaceholders(records: RecordValue[]): boolean;
   sendsPlaceholders(): boolean;
   withDroppedRecords(span: ReadableSpan): ReadableSpan;
   consumeDroppedRecords(counts: ReadonlyMap<string, number>): void;
@@ -142,7 +150,7 @@ interface ExportSink {
     queued: RecordValue,
   ): Promise<ReadableLogRecord>;
   reportOffload(tally: OffloadTally, signal?: Signal, late?: boolean): void;
-  awaitUploads(report: Promise<void>): void;
+  reportUploads(late: LateUploads, signal: Signal): void;
 }
 
 /** A record's trace: a span's context, a log record's span identifiers; "" when unreadable. */
@@ -330,6 +338,13 @@ export class HueTransport {
   private failed = { traces: 0, logs: 0 };
   private spans = new Map<ReadableSpan, number>();
   private logs = new Map<ReadableLogRecord, number>();
+  // A cohort closes when export starts, so later requests cannot extend its lifetime.
+  private deliveryCohort?: DeliveryCohort;
+  private deliveries = new WeakMap<RecordValue, DeliveryCohort>();
+  private deliveryUploads = new WeakMap<
+    LateUploads,
+    Map<DeliveryCohort | undefined, LateUploads>
+  >();
   private pendingBytes = 0;
   private dropped = { traces: 0, logs: 0 };
   /** Records of each trace the SDK never sent (dropped from the queue, refused as invalid or
@@ -361,7 +376,9 @@ export class HueTransport {
   // Admitted placeholder snapshots and the marker attributes added after redaction.
   private placeholders = new WeakMap<RecordValue, Attributes>();
   // The running span each admitted placeholder announces, so one it has outlived is not sent.
-  private placeholderSources = new WeakMap<RecordValue, { readonly ended: boolean }>();
+  private placeholderSources = new WeakMap<RecordValue, ReadableSpan>();
+  private forcedSpanDrains = 0;
+  private completedSpanDrains = 0;
   private batchSpans?: BatchSpanProcessor;
   // What the receiver accepts, as it last advertised; the limits of this release until it does.
   private limits: ReceiverLimits = DEFAULT_RECEIVER_LIMITS;
@@ -505,6 +522,7 @@ export class HueTransport {
           this.protectMedia(admitted);
           this.countEnded(admitted);
           spans.onEnd(admitted);
+          this.protectDelivery(admitted);
         } catch {
           if (admitted) this.finish("traces", [admitted]);
           else this.releaseMedia(span);
@@ -521,10 +539,15 @@ export class HueTransport {
       // The spans are sent first, then the uploads queued so far are waited for, unless a
       // flush sends them: that flush waits for the uploads after its send.
       forceFlush: async () => {
+        const finish = this.beginSpanDrain();
         try {
           await spans.forceFlush();
         } finally {
-          if (!this.sendingRecords.getStore()) await this.drainUploads();
+          try {
+            if (!this.sendingRecords.getStore()) await this.drainUploads();
+          } finally {
+            finish();
+          }
         }
       },
       shutdown: async () => {
@@ -557,6 +580,7 @@ export class HueTransport {
           admitted = queued as ReadableLogRecord;
           this.admitLogParts(log, queued);
           logs.onEmit(queued as Parameters<LogRecordProcessor["onEmit"]>[0]);
+          this.protectDelivery(admitted);
         } catch {
           if (admitted) this.finish("logs", [admitted]);
           this.issue(
@@ -570,10 +594,15 @@ export class HueTransport {
         }
       },
       forceFlush: async () => {
+        const finish = this.beginSpanDrain();
         try {
           await logs.forceFlush();
         } finally {
-          if (!this.sendingRecords.getStore()) await this.drainUploads();
+          try {
+            if (!this.sendingRecords.getStore()) await this.drainUploads();
+          } finally {
+            finish();
+          }
         }
       },
       shutdown: async () => {
@@ -663,6 +692,14 @@ export class HueTransport {
           0,
           "Unresolved resource attributes omitted from the telemetry snapshot",
         );
+      if (!advisory) {
+        const cohort = (this.deliveryCohort ??= {
+          pending: 0,
+          ...Promise.withResolvers<void>(),
+        });
+        cohort.pending++;
+        this.deliveries.set(snapshot.record, cohort);
+      }
       return snapshot.record;
     } catch {
       if (advisory) return undefined;
@@ -678,11 +715,40 @@ export class HueTransport {
     }
   }
 
-  private track(span: Span): void {
+  /** Register in the caller's request before it can return; outside Vercel this is a no-op. */
+  private protectDelivery(record: RecordValue): void {
+    const cohort = this.deliveries.get(record);
+    if (!cohort) return;
+    try {
+      waitUntil(cohort.promise);
+    } catch {
+      // A host hook must never undo admission or change the application's result.
+    }
+  }
+
+  /** @internal Seal the batch's cohort before export can yield to another request. */
+  exporting(records: RecordValue[]): void {
+    if (records.some((record) => this.deliveries.get(record) === this.deliveryCohort))
+      this.deliveryCohort = undefined;
+  }
+
+  private holdDelivery(cohort: DeliveryCohort | undefined, work: Promise<void>): void {
+    if (!cohort) return;
+    cohort.pending++;
+    const finish = () => this.finishDelivery(cohort);
+    void work.then(finish, finish);
+  }
+
+  private finishDelivery(cohort: DeliveryCohort): void {
+    if (--cohort.pending !== 0) return;
+    if (this.deliveryCohort === cohort) this.deliveryCohort = undefined;
+    cohort.resolve();
+  }
+
+  private track(span: ReadableSpan): void {
     try {
       if (!this.liveSpans || this.live.size >= MAX_LIVE_SPANS) return;
-      if (!(span.spanContext().traceFlags & 1) || !span.isRecording() || !announcesLiveSpan(span))
-        return;
+      if (!(span.spanContext().traceFlags & 1) || span.ended || !announcesLiveSpan(span)) return;
       this.live.add(span);
       if (!this.liveTimer) {
         const timer = setInterval(() => this.announceLiveSpans(), LIVE_SPAN_INTERVAL_MILLIS);
@@ -696,6 +762,7 @@ export class HueTransport {
 
   /** Placeholders are built lazily, so input set right after a span starts is included. */
   private announceLiveSpans(): void {
+    if (this.forcedSpanDrains) return;
     for (const span of this.live) {
       this.live.delete(span);
       try {
@@ -743,6 +810,26 @@ export class HueTransport {
     return this.placeholderSources.get(record)?.ended === true;
   }
 
+  private beginSpanDrain(): () => void {
+    const completed = [...this.spans.keys()].some((span) => !this.placeholders.has(span));
+    this.forcedSpanDrains++;
+    if (completed) this.completedSpanDrains++;
+    return () => {
+      this.forcedSpanDrains--;
+      if (completed) this.completedSpanDrains--;
+    };
+  }
+
+  /** @internal A forced drain sends completed spans without another advisory round trip. */
+  deferPlaceholders(records: RecordValue[]): boolean {
+    if (!this.completedSpanDrains) return false;
+    for (const record of records) {
+      const source = this.placeholderSources.get(record);
+      if (!this.closed && source) this.track(source);
+    }
+    return true;
+  }
+
   /** @internal Exporter callback: false once the receiver refused placeholders; queued ones are then dropped. */
   sendsPlaceholders(): boolean {
     return !this.placeholdersRejected;
@@ -772,6 +859,11 @@ export class HueTransport {
   /** @internal Exporter callback: releases queued records after an export attempt settles. */
   finish(signal: Signal, records: RecordValue[]): void {
     for (const record of records) {
+      const cohort = this.deliveries.get(record);
+      if (cohort) {
+        this.deliveries.delete(record);
+        this.finishDelivery(cohort);
+      }
       this.releaseMedia(record);
       this.logMedia.delete(record);
       const pending = signal === "traces" ? this.spans : this.logs;
@@ -955,6 +1047,7 @@ export class HueTransport {
     released: Promise<void>,
   ): void {
     this.awaitUploads(settled);
+    this.holdDelivery(this.deliveries.get(record), settled);
     const identity = this.mediaIdentity(record);
     const staged = identity
       ? (this.media.get(identity) ?? []).reduce((total, file) => total + heldBytesOf(file.bytes), 0)
@@ -1071,8 +1164,8 @@ export class HueTransport {
   }
 
   /** @internal Exporter callback: a redacted span with the values its redaction left to the
-   * upload step placed: listed under `hue.blobs` with their uploads queued (each added to `late`
-   * once it settles, and charged in place of the `queued` record it came from), or cut as before.
+   * upload step placed: listed under `hue.blobs` with their uploads queued (reported once settled,
+   * and charged in place of the `queued` record they came from), or cut as before.
    * Never rejects. */
   async offloadSpan<T extends RecordValue>(
     span: T,
@@ -1102,8 +1195,7 @@ export class HueTransport {
         memo: this.mediaMemo,
         background: own,
       });
-      if (own.settled.length)
-        late.settled.push(mergeWhenSettled(late.tally, own.tally, own.settled));
+      this.collectDeliveryUploads(queued, own, late);
       return { ...span, attributes: attributes as Attributes };
     } catch {
       return {
@@ -1156,13 +1248,39 @@ export class HueTransport {
         memo: this.mediaMemo,
         background: own,
       });
-      if (own.settled.length)
-        late.settled.push(mergeWhenSettled(late.tally, own.tally, own.settled));
+      this.collectDeliveryUploads(queued, own, late);
       return placed(result);
     } catch {
       return placed(
         fallbackRecord(log.attributes, collector, valueBytes, tally, traceId, this.mediaMemo),
       );
+    }
+  }
+
+  /** Keep an export's warning aggregation within each cohort's upload ownership. */
+  private collectDeliveryUploads(
+    record: RecordValue,
+    uploads: LateUploads,
+    late: LateUploads,
+  ): void {
+    const { settled, tally } = uploads;
+    if (!settled.length) return;
+    let groups = this.deliveryUploads.get(late);
+    if (!groups) this.deliveryUploads.set(late, (groups = new Map()));
+    const cohort = this.deliveries.get(record);
+    let group = groups.get(cohort);
+    if (!group) groups.set(cohort, (group = { tally: newTally(), settled: [] }));
+    group.settled.push(mergeWhenSettled(group.tally, tally, settled));
+  }
+
+  /** @internal Report only the uploads each cohort owns, without retaining their records. */
+  reportUploads(late: LateUploads, signal: Signal): void {
+    const groups = this.deliveryUploads.get(late);
+    this.deliveryUploads.delete(late);
+    for (const [cohort, { settled, tally }] of groups ?? []) {
+      const report = Promise.all(settled).then(() => this.reportOffload(tally, signal, true));
+      this.awaitUploads(report);
+      this.holdDelivery(cohort, report);
     }
   }
 
@@ -1416,13 +1534,19 @@ export class HueTransport {
     report: Promise<ExportReport>;
   } {
     const from = this.observedSequence;
-    const join = () => this.sendRecords();
+    let finish: (() => void) | undefined;
+    const join = () => {
+      finish = this.beginSpanDrain();
+      return this.sendRecords();
+    };
     const sent = providers ? this.sendingRecords.run(true, providers).then(join, join) : join();
-    const report = sent.then(async (processors) => {
-      // Exports the processors did not start (a timer's, still in flight) queued uploads too.
-      await this.drainUploads();
-      return this.flushReport(from, processors);
-    });
+    const report = sent
+      .then(async (processors) => {
+        // Exports the processors did not start (a timer's, still in flight) queued uploads too.
+        await this.drainUploads();
+        return this.flushReport(from, processors);
+      })
+      .finally(() => finish?.());
     return { sent, report };
   }
 
@@ -1662,6 +1786,7 @@ class ReportingExporter<T extends RecordValue> {
   ) {}
 
   export(records: T[], callback: (result: ExportResult) => void): void {
+    this.transport.exporting(records);
     const work = this.exportRecords(records)
       .then(
         () => callback({ code: ExportResultCode.SUCCESS }),
@@ -1702,25 +1827,14 @@ class ReportingExporter<T extends RecordValue> {
     return real;
   }
 
-  /** Places and sends the records; the uploads their placement queued are reported once they
-   * settle, after the records were sent, never awaited here. */
+  /** Queue final upload reports before releasing the records that own their cohorts. */
   private async exportRecords(records: T[]): Promise<void> {
     const late: LateUploads = { tally: newTally(), settled: [] };
     try {
       await this.placeAndSend(records, late);
     } finally {
-      if (late.settled.length) this.reportWhenSettled(late);
+      this.transport.reportUploads(late, this.signal);
     }
-  }
-
-  /** Reports an export's uploads once they all settle. Built apart from the export, so a pending
-   * upload never keeps the export's records alive. */
-  private reportWhenSettled(late: LateUploads): void {
-    this.transport.awaitUploads(
-      Promise.all(late.settled).then(() =>
-        this.transport.reportOffload(late.tally, this.signal, true),
-      ),
-    );
   }
 
   private async placeAndSend(records: T[], late: LateUploads): Promise<void> {
@@ -2167,7 +2281,13 @@ class ReportingExporter<T extends RecordValue> {
     // records' acknowledgements may have just shown, nor after this export's completed records were
     // refused or unanswered: a receiver that just refused or timed out gets no second request with
     // its own retries. A record this side could not send keeps the placeholders going out.
-    if (pending.length && !refused && this.transport.sendsPlaceholders()) await pack(pending, true);
+    if (
+      pending.length &&
+      !refused &&
+      this.transport.sendsPlaceholders() &&
+      !this.transport.deferPlaceholders(records)
+    )
+      await pack(pending, true);
     if (failed) throw new Error("Hue telemetry export failed");
   }
 

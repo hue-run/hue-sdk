@@ -34,6 +34,16 @@ function run(command, args, cwd) {
   const result = spawnSync(command, args, { cwd, stdio: "inherit", env: process.env });
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed`);
 }
+function runAsync(command, args, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, stdio: "inherit", env: process.env });
+    child.once("error", reject);
+    child.once("close", (status) => {
+      if (status === 0) resolve();
+      else reject(new Error(`${command} ${args.join(" ")} failed`));
+    });
+  });
+}
 const pkg = JSON.parse(await readFile(join(source, "package.json"), "utf8"));
 const aliasSource = resolve(source, "../aliases/npm-hue-run");
 const aliasPkg = JSON.parse(await readFile(join(aliasSource, "package.json"), "utf8"));
@@ -82,6 +92,8 @@ if (!values.archive && !values["registry-version"]) {
   // stripInternal must keep the transport's @internal mutators out of the published declarations.
   const transportTypes = readFileSync(join(staging, "dist", "transport.d.ts"), "utf8");
   for (const member of [
+    "exporting",
+    "reportUploads",
     "finish",
     "acceptedRecords",
     "issue",
@@ -1020,6 +1032,7 @@ const installedPackageTests = [
   "sdk.test.ts",
   "tool-endpoint.test.ts",
   "live-spans.test.ts",
+  "lifetime.test.ts",
   "evals.test.ts",
   "scorer-publication.test.ts",
   "attempt.test.ts",
@@ -1057,7 +1070,7 @@ const installedPackageTests = [
   "media.test.ts",
   "case-files.test.ts",
 ];
-for (const patch of [99, 100, 137, 138, 139]) {
+async function verifyConsumer(patch) {
   const consumer = join(destination, `consumer-${patch}`);
   const chatbot = join(destination, `chatbot-${patch}`);
   await mkdir(consumer);
@@ -1189,7 +1202,7 @@ void [transition, event, options, backend];
     );
   }
   // npm enforces peer compatibility; no --force or legacy peer resolution.
-  run(
+  await runAsync(
     "npm",
     ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"],
     consumer,
@@ -1200,11 +1213,15 @@ void [transition, event, options, backend];
   if (installed.name !== pkg.name || installed.version !== pkg.version)
     throw new Error("Installed package does not match this checkout");
   for (const runtime of [process.execPath, "bun"]) {
-    run(runtime, [join(source, "scripts/verify-scorer-deferral.mjs"), consumer], destination);
-    run(runtime, [join(source, "scripts/verify-file-cases.mjs"), consumer], destination);
+    await runAsync(
+      runtime,
+      [join(source, "scripts/verify-scorer-deferral.mjs"), consumer],
+      destination,
+    );
+    await runAsync(runtime, [join(source, "scripts/verify-file-cases.mjs"), consumer], destination);
   }
   // Check consumers against the packed declarations, not only source types.
-  run("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], consumer);
+  await runAsync("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], consumer);
   // HUE_JUNIT_DIR (set by CI) collects a JUnit report per AI SDK pair for the workflow summary.
   const junit = process.env.HUE_JUNIT_DIR
     ? [
@@ -1213,7 +1230,7 @@ void [transition, event, options, backend];
       ]
     : [];
   if (process.env.HUE_JUNIT_DIR) await mkdir(process.env.HUE_JUNIT_DIR, { recursive: true });
-  run(
+  await runAsync(
     "bun",
     ["--no-env-file", "test", ...junit, ...installedPackageTests.map((name) => `./tests/${name}`)],
     consumer,
@@ -1230,17 +1247,21 @@ void [transition, event, options, backend];
   example.dependencies["@ai-sdk/otel"] = `1.0.${patch}`;
   await writeFile(join(chatbot, "package.json"), JSON.stringify(example, null, 2));
   // The chatbot pins the tested AI SDK pair exactly, so the install cooldown adds nothing here.
-  run("bun", ["--no-env-file", "install", "--minimum-release-age=0"], chatbot);
-  run("bun", ["--no-env-file", "run", "build"], chatbot);
-  run(process.execPath, [join(source, "scripts/verify-node.mjs"), consumer, chatbot], destination);
+  await runAsync("bun", ["--no-env-file", "install", "--minimum-release-age=0"], chatbot);
+  await runAsync("bun", ["--no-env-file", "run", "build"], chatbot);
+  await runAsync(
+    process.execPath,
+    [join(source, "scripts/verify-node.mjs"), consumer, chatbot],
+    destination,
+  );
   // The same acceptance under Bun: verify-node.mjs starts the chatbot with process.execPath,
   // so this exercises the installed package and the reference chatbot on the Bun runtime.
-  run(
+  await runAsync(
     "bun",
     ["--no-env-file", join(source, "scripts/verify-node.mjs"), consumer, chatbot],
     destination,
   );
-  run(
+  await runAsync(
     process.execPath,
     ["--unhandled-rejections=strict", join(source, "scripts/verify-safety.mjs"), consumer],
     destination,
@@ -1254,6 +1275,11 @@ void [transition, event, options, backend];
     }),
   );
 }
+const consumers = await Promise.allSettled([99, 100, 137, 138, 139].map(verifyConsumer));
+const failures = consumers
+  .filter((result) => result.status === "rejected")
+  .map((result) => result.reason);
+if (failures.length) throw new AggregateError(failures, "Installed consumer verification failed");
 // Copy only after all installed-package and Node chatbot checks pass. Publishers
 // consume these exact bytes; they must never rebuild a package after verification.
 if (values["artifacts-dir"]) {

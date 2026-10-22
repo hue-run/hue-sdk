@@ -13,6 +13,7 @@ from threading import Event, Lock, Thread
 from time import monotonic, time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+from weakref import ref
 
 import requests
 from google.protobuf.message import DecodeError, Message
@@ -118,14 +119,19 @@ def normalize_base_url(value: str) -> str:
 class PendingSpan(ReadableSpan):
     """An advisory placeholder announcing a still-open span; its end time is 0.
 
-    ``source`` is the live span it announces. It is never exported; the processor uses it
-    to drop the placeholder once that span has ended. Placeholders never count as dropped
-    or failed telemetry.
+    The source is weakly held so an advisory HTTP request cannot retain a finished span's
+    application content. A gone or ended source loses its announcement. Placeholders never
+    count as dropped or failed telemetry.
     """
 
     def __init__(self, source: ReadableSpan, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.source = source
+        self._source = ref(source)
+
+    @property
+    def is_open(self) -> bool:
+        source = self._source()
+        return source is not None and source.end_time is None
 
 
 @dataclass(frozen=True)
@@ -209,6 +215,8 @@ class SafeSession(requests.Session):
         self.rate_limited_for: float | None = None
         # The size of the next request after decompression, set by its exporter.
         self.decoded_bytes = 0
+        # Advisory work can stop between attempts without touching another signal's session.
+        self.cancelled: Callable[[], bool] | None = None
 
     @property
     def ready(self) -> bool:
@@ -225,6 +233,8 @@ class SafeSession(requests.Session):
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:  # type: ignore[override]
         kwargs["allow_redirects"] = False
+        if self.cancelled is not None and self.cancelled():
+            raise requests.RequestException("Hue telemetry request stopped.")
         if not self.signal:
             return self._request(method, url, **kwargs)
         # requests' read timeout is inactivity-based. Bound the exporter caller
@@ -258,6 +268,8 @@ class SafeSession(requests.Session):
             try:
                 token = attach(suppressed)
                 for attempt in range(6):
+                    if self.cancelled is not None and self.cancelled():
+                        raise requests.RequestException("Hue telemetry request stopped.")
                     remaining = deadline - monotonic()
                     if remaining <= 0:
                         raise requests.RequestException("Hue telemetry request timed out.")
@@ -840,10 +852,93 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
             session=self._session,
         )
         self._encode = encode_spans
+        # Placeholders never share the completed spans' HTTP worker. There is one single-flight
+        # advisory batch, with no waiting queue, bounded to 64 records and 1 MiB encoded.
+        self._advisory_options = (endpoint, headers, timeout)
+        self._advisory_exporter: BoundedSpanExporter | None = None
+        self._advisory_lock = Lock()
+        self._advisory_closed = False
+        self._advisory_status = (0, 0)
 
     @property
     def live_spans_rejected(self) -> bool:
-        return self._session.live_spans_rejected
+        advisory = self._advisory_exporter
+        return self._session.live_spans_rejected or (
+            advisory is not None and advisory._session.live_spans_rejected
+        )
+
+    def _announce(self, pending: Sequence[PendingSpan]) -> None:
+        """Best-effort, bounded handoff; no lifecycle operation waits for this HTTP work."""
+        if self._advisory_closed or self.live_spans_rejected:
+            return
+        if not self._advisory_lock.acquire(blocking=False):
+            return
+        try:
+            advisory = self._advisory_exporter
+            if advisory is None:
+                endpoint, headers, timeout = self._advisory_options
+                advisory = BoundedSpanExporter(
+                    endpoint, headers, timeout, self._ledger, limits=self._limits
+                )
+                self._advisory_exporter = advisory
+                advisory._session.cancelled = lambda: (
+                    self._advisory_closed or self.live_spans_rejected
+                )
+            if not advisory.ready:
+                self._advisory_lock.release()
+                return
+            batch: list[PendingSpan] = []
+            retained_bytes = 0
+            for span in pending:
+                if not span.is_open:
+                    continue
+                size = self._encode((span,)).ByteSize() + RECORD_FRAMING_BYTES
+                if len(batch) >= 64 or retained_bytes + size > MAX_BATCH_BYTES:
+                    break
+                batch.append(span)
+                retained_bytes += size
+            if not batch:
+                self._advisory_lock.release()
+                return
+            self._advisory_status = (len(batch), retained_bytes)
+
+            def send() -> None:
+                token = None
+                try:
+                    token = attach(export_context())
+                    # A span can end, or a real acknowledgement can reject live spans, after
+                    # handoff. Recheck before sending, including after splitting the batch.
+                    for entries in advisory._batches(
+                        [(span, self._encode((span,)).ByteSize()) for span in batch]
+                    ):
+                        if self._advisory_closed or self.live_spans_rejected:
+                            break
+                        live = [span for span in entries if span.is_open]
+                        if live:
+                            advisory._session.cancelled = lambda sources=tuple(live): (
+                                self._advisory_closed
+                                or self.live_spans_rejected
+                                or any(not span.is_open for span in sources)
+                            )
+                            advisory._deliver(live, advisory=True)
+                except Exception:
+                    pass  # An advisory failure never changes completed telemetry's status.
+                finally:
+                    if token is not None:
+                        try:
+                            detach(token)
+                        except Exception:
+                            pass
+                    self._advisory_status = (0, 0)
+                    # A timed-out HTTP worker may still be running. Refuse every later attempt
+                    # until a fresh batch takes the now-idle transport, without retaining this one.
+                    advisory._session.cancelled = lambda: True
+                    self._advisory_lock.release()
+
+            Thread(target=send, name="hue-live", daemon=True).start()
+        except Exception:
+            self._advisory_status = (0, 0)
+            self._advisory_lock.release()
 
     @property
     def uploads(self) -> tuple[int, int]:
@@ -1130,15 +1225,8 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         # once a receiver answered without placeholder support, which the finished spans'
         # acknowledgements may have just shown.
         # Nor after a request of this export's finished spans was refused or unanswered.
-        if pending and not refused and not self._session.live_spans_rejected:
-            try:
-                entries = [entry for entry in map(self._fit, pending) if entry is not None]
-                for batch in self._batches(entries):
-                    if self._session.live_spans_rejected:
-                        break
-                    self._deliver(batch, advisory=True)
-            except Exception:
-                pass
+        if pending and not refused:
+            self._announce(pending)
         if failed:
             with self._lock:
                 self._failures += 1
@@ -1149,6 +1237,9 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         return self._delegate.force_flush(timeout_millis)
 
     def shutdown(self) -> None:
+        self._advisory_closed = True
+        if self._advisory_exporter is not None:
+            self._advisory_exporter.shutdown()
         self._delegate.shutdown()
 
 

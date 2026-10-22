@@ -50,6 +50,37 @@ class ArchiveGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             release.inspect(self.archive(folder), "typescript", "1.2.3")
 
+    def test_allows_vercel_functions_without_other_runtime_dependencies(self):
+        dependencies = {
+            "@opentelemetry/core": "2.12.0",
+            "@vercel/functions": "3.9.7",
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            release.inspect(
+                self.archive(folder, metadata_changes={"dependencies": dependencies}),
+                "typescript",
+                "1.2.3",
+            )
+            for unexpected in (
+                "unknown-runtime",
+                "@vercel/other",
+                "@vercel/functions-extra",
+            ):
+                with (
+                    self.subTest(dependency=unexpected),
+                    self.assertRaisesRegex(AssertionError, "Core tracing dependencies"),
+                ):
+                    release.inspect(
+                        self.archive(
+                            folder,
+                            metadata_changes={
+                                "dependencies": {**dependencies, unexpected: "1.0.0"}
+                            },
+                        ),
+                        "typescript",
+                        "1.2.3",
+                    )
+
     def parser_archive(self, folder, changes=None, metadata_changes=None):
         metadata = {
             "dependencies": {

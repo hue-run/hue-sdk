@@ -4187,6 +4187,43 @@ describe("uploads after export", () => {
       },
     ]);
 
+  test("a live parent stays deferred until a flush's file upload finishes", async () => {
+    const gate = putGate();
+    const endpoint = hue({ beforePut: gate.beforePut });
+    const hueClient = client(endpoint, { liveSpans: true });
+    try {
+      await hueClient.withSpan("live parent", async () => {
+        await waitForMedia(() => hueClient.transport.getReport().pendingSpans === 1);
+        await hueClient.withSpan("file span", (span) => {
+          span.setInput({
+            file: new Attachment({
+              data: Buffer.from("synthetic file"),
+              contentType: "text/plain",
+            }),
+          });
+        });
+        const flushed = hueClient.flushSafe({ timeoutMillis: 5000 });
+        await waitForMedia(() => gate.entered === 1);
+        await Bun.sleep(1700);
+        expect(endpoint.decodedRequests.filter(({ signal }) => signal === "traces")).toHaveLength(
+          1,
+        );
+        expect(hueClient.transport.getReport().pendingSpans).toBe(0);
+        gate.release();
+        expect(await flushed).toMatchObject({
+          ok: true,
+          timedOut: false,
+          report: { acceptedSpans: 1, pendingSpans: 0, uploadedValues: 1 },
+        });
+      });
+      expect(await hueClient.flush()).toMatchObject({ acceptedSpans: 2, pendingSpans: 0 });
+    } finally {
+      gate.release();
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
   test("the span is exported while its file's PUT is blocked, and flush waits for it", async () => {
     const gate = putGate();
     const endpoint = hue({ beforePut: gate.beforePut });

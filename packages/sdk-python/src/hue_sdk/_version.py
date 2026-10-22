@@ -1,3 +1,3 @@
 """Package version shared by the instrumentation scope and the export User-Agent."""
 
-__version__ = "0.13.4"
+__version__ = "0.13.5"

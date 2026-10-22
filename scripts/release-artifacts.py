@@ -370,8 +370,11 @@ def inspect(path: Path, language: str, version: str) -> None:
         core = sorted(
             name for name in dependencies if name not in (SETUP_PARSER, EVAL_CONTRACTS)
         )
-        assert all(name.startswith("@opentelemetry/") for name in core), (
-            f"Core tracing dependencies must be OpenTelemetry packages: {core}"
+        assert all(
+            name.startswith("@opentelemetry/") or name == "@vercel/functions"
+            for name in core
+        ), (
+            f"Core tracing dependencies must be OpenTelemetry packages or @vercel/functions: {core}"
         )
         if SETUP_PARSER in dependencies or SETUP_PARSER_MODULE in files:
             inspect_setup_parser_boundary(files, metadata)

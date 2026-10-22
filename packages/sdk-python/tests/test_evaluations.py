@@ -437,7 +437,7 @@ def evaluation_receiver():
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     state.url = f"http://127.0.0.1:{server.server_port}"
-    thread = Thread(target=server.serve_forever, daemon=True)
+    thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     try:
         yield state
@@ -501,7 +501,7 @@ def test_transient_failures_are_sent_again_for_reads_updates_and_keyed_mutations
             return None, error, len(seen)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = Thread(target=server.serve_forever, daemon=True)
+    thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     try:
         client = EvaluationClient(f"http://127.0.0.1:{server.server_port}", "synthetic-key")
@@ -620,7 +620,7 @@ def test_requests_refused_with_a_short_retry_after_are_sent_again_and_others_are
             return None, error, list(seen), len(replies)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = Thread(target=server.serve_forever, daemon=True)
+    thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     try:
         client = EvaluationClient(f"http://127.0.0.1:{server.server_port}", "synthetic-key")
@@ -686,7 +686,7 @@ def test_a_write_whose_connection_drops_or_times_out_is_sent_once_and_fails():
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = Thread(target=server.serve_forever, daemon=True)
+    thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     try:
         client = EvaluationClient(
@@ -1807,7 +1807,7 @@ def test_tags_travel_by_name_on_creates_list_filters_updates_and_the_tag_list():
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = Thread(target=server.serve_forever, daemon=True)
+    thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     try:
         client = EvaluationClient(f"http://127.0.0.1:{server.server_port}", "synthetic-key")

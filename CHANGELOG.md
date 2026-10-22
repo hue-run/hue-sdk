@@ -8,7 +8,7 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### [0.22.1] - 2026-10-21
+### [0.23.2] - 2026-10-22
 
 #### Fixed
 
@@ -99,6 +99,31 @@ refuses to publish a version without a matching entry below.
   and `mlflow.spanType` only while it nests at most 32 levels deep and holds only finite numbers
   and safe integers. `--session-key` adds its conversation to a trace whose agent spans name none,
   starting before any tool span that names one so that the trace list shows it.
+### [0.23.1] - 2026-10-22
+
+#### Fixed
+
+- Safe initialization reports a fixed diagnostic without reading or exposing arbitrary
+  properties of a provider's exception.
+- Optional tool, subagent, model and usage metadata cannot prevent application callbacks
+  from running. Disabled and closed helpers skip that metadata; active failures are counted
+  without retrying application work.
+
+### [0.23.0] - 2026-10-21
+
+#### Added
+
+- Automatically register completed-span and log delivery with Vercel's request lifetime.
+  Background batches and their uploads can finish after a function returns, without a
+  per-request flush. Existing batching, capture and acknowledgement reporting are preserved.
+  Explicit `flush` and `flushSafe` still wait for delivery when called.
+
+#### Fixed
+
+- Explicit flushes that deliver completed spans defer queued in-progress span updates to the
+  next scheduled export, avoiding a second collector acknowledgement on the flush's critical
+  path. Completed-span delivery and rejection checks still finish before the flush returns.
+  Placeholder-only flushes and scheduled live updates keep working.
 
 ### [0.22.0] - 2026-10-21
 
@@ -1841,6 +1866,25 @@ No registry release is claimed until publication and registry acceptance complet
 - Documented runtime and integration matrix, including dependency-resolution and cross-language content and delivery boundaries; verified release archives and registry bytes.
 
 ## hue-run (Python)
+
+### [0.13.5] - 2026-10-22
+
+#### Fixed
+
+- Live-span announcements use a separate bounded background transport. A slow advisory
+  request cannot hold completed spans, explicit flushes or shutdown. Busy slots skip new
+  announcements, and ended spans stop advisory retries without retaining application content.
+- Optional custom-attribute and MCP metadata inspection stays inside the failure boundary.
+  Disabled clients skip it; oversized primitive arrays are omitted and counted. Classification
+  no longer traverses a concurrently mutating mapping before the application can run.
+- Reject oversized labels and workspace identifiers before allocating encoding buffers.
+
+#### Documentation
+
+- Lead the Python guide with a shared safe client for serving requests and explain async,
+  streaming and serverless lifecycle boundaries. Real async OpenAI streaming tests cover
+  completion, cancellation and early close with capture enabled, disabled and a rejected
+  collector request.
 
 ### [0.13.4] - 2026-10-20
 

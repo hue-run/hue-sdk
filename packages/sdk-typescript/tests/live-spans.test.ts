@@ -3,6 +3,7 @@ import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { context, SpanKind, trace, TraceFlags } from "@opentelemetry/api";
 import { TracerProvider, type SpanProcessor } from "@opentelemetry/sdk-trace";
+import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { createHue, createHueTransport, HueExportError, type HueTransport } from "../src/index.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 
@@ -51,7 +52,15 @@ const queued = (transport: HueTransport, count: number) =>
  */
 function receiver(
   reply: (spans: WireSpan[]) => Reply = () => ({}),
-  { legacy = false, hold }: { legacy?: boolean; hold?: Promise<void> } = {},
+  {
+    legacy = false,
+    hold,
+    holdLogs,
+  }: {
+    legacy?: boolean;
+    hold?: Promise<void> | ((spans: WireSpan[]) => Promise<void>);
+    holdLogs?: Promise<void>;
+  } = {},
 ) {
   const requests: WireSpan[][] = [];
   const server = Bun.serve({
@@ -61,7 +70,10 @@ function receiver(
       let bytes = Buffer.from(await request.arrayBuffer());
       if (request.headers.get("content-encoding") === "gzip") bytes = gunzipSync(bytes);
       // An empty message is a valid acknowledgement for logs and traces alike.
-      if (new URL(request.url).pathname.endsWith("/logs")) return new Response(new Uint8Array());
+      if (new URL(request.url).pathname.endsWith("/logs")) {
+        await holdLogs;
+        return new Response(new Uint8Array());
+      }
       const type = root.lookupType(`${traces}Request`);
       const data = type.toObject(type.decode(bytes), {
         longs: String,
@@ -81,7 +93,7 @@ function receiver(
           ),
       );
       requests.push(spans);
-      await hold;
+      await (typeof hold === "function" ? hold(spans) : hold);
       const { status, rejectedSpans, errorMessage } = reply(spans);
       if (status) return new Response("synthetic failure", { status });
       const response = root.lookupType(`${traces}Response`);
@@ -427,7 +439,226 @@ describe("Live spans", () => {
   );
 
   test(
-    "completed spans and placeholders travel in separate requests, completed spans first",
+    "flushSafe defers running placeholders without waiting for another acknowledgement",
+    async () => {
+      let release!: () => void;
+      const completed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let releasePlaceholder!: () => void;
+      const placeholder = new Promise<void>((resolve) => {
+        releasePlaceholder = resolve;
+      });
+      const endpoint = receiver(() => ({}), {
+        hold: (spans) => (spans.every(isPlaceholder) ? placeholder : completed),
+      });
+      const hue = createHue({
+        apiKey,
+        serviceName: "live-flush-latency",
+        captureContent: true,
+        baseUrl: endpoint.url,
+      });
+      try {
+        await hue.withSpan("chat.request", async () => {
+          await queued(hue.transport, 1);
+          await hue.withSpan("model", () => {});
+          const flushed = hue.flushSafe({ timeoutMillis: 5000 });
+          await until(() => endpoint.real().length === 1, "the completed span");
+          // A new announcement tick must not make the client's second drain send a placeholder.
+          await Bun.sleep(800);
+          expect(endpoint.requests).toHaveLength(1);
+          release();
+          const outcome = await Promise.race([
+            flushed,
+            Bun.sleep(1000).then(() => {
+              throw new Error("Flush waited for an advisory acknowledgement");
+            }),
+          ]);
+          expect(outcome).toMatchObject({
+            ok: true,
+            timedOut: false,
+            report: { acceptedSpans: 1, pendingSpans: 0, failedSpans: 0 },
+          });
+          expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([[false]]);
+          // A parent still running after the flush is announced by the normal scheduled export.
+          await until(() => endpoint.placeholders().length === 1, "the deferred live span");
+          expect(endpoint.placeholders()[0]!.name).toBe("chat.request");
+          releasePlaceholder();
+        });
+        const report = await hue.flush();
+        expect(report).toMatchObject({ acceptedSpans: 2, pendingSpans: 0, failedSpans: 0 });
+      } finally {
+        release();
+        releasePlaceholder();
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    timeout,
+  );
+
+  test(
+    "a flush joining an in-flight export defers its live placeholders",
+    async () => {
+      let release!: () => void;
+      const completed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const endpoint = receiver(() => ({}), { hold: completed });
+      const hue = createHue({
+        apiKey,
+        serviceName: "live-joined-flush",
+        captureContent: false,
+        baseUrl: endpoint.url,
+      });
+      try {
+        await hue.withSpan("chat.request", async () => {
+          await queued(hue.transport, 1);
+          await hue.withSpan("model", () => {});
+          await until(() => endpoint.real().length === 1, "the scheduled completed span");
+          const flushed = hue.flushSafe({ timeoutMillis: 5000 });
+          await Bun.sleep(800);
+          release();
+          expect(await flushed).toMatchObject({ ok: true, report: { acceptedSpans: 1 } });
+          expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([[false]]);
+        });
+        await hue.flush();
+        await Bun.sleep(pastTicks);
+        expect(endpoint.placeholders()).toEqual([]);
+        expect(hue.transport.getReport()).toMatchObject({ acceptedSpans: 2, pendingSpans: 0 });
+      } finally {
+        release();
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    timeout,
+  );
+
+  test(
+    "a hung borrowed provider does not block independent live announcements",
+    async () => {
+      const endpoint = receiver();
+      const transport = createHueTransport({
+        apiKey,
+        serviceName: "live-borrowed-provider",
+        captureContent: false,
+        baseUrl: endpoint.url,
+      });
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const tracer = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+      const logger = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+      const hue = createHue({
+        transport,
+        tracerProvider: {
+          getTracer: tracer.getTracer.bind(tracer),
+          forceFlush: () => blocked,
+        },
+        loggerProvider: logger,
+      });
+      try {
+        expect((await hue.flushSafe({ timeoutMillis: 25 })).timedOut).toBe(true);
+        await hue.withSpan("chat.request", async () => {
+          await queued(transport, 1);
+          await transport.flush();
+          expect(endpoint.placeholders().map((span) => span.name)).toEqual(["chat.request"]);
+        });
+      } finally {
+        release();
+        await hue.shutdownSafe({ timeoutMillis: 5000 });
+        await tracer.shutdown();
+        await logger.shutdown();
+        await transport.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    timeout,
+  );
+
+  test(
+    "a live parent stays deferred while the same flush waits for logs",
+    async () => {
+      let release!: () => void;
+      const logs = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const endpoint = receiver(() => ({}), { holdLogs: logs });
+      const hue = createHue({
+        apiKey,
+        serviceName: "live-log-flush",
+        captureContent: true,
+        baseUrl: endpoint.url,
+      });
+      try {
+        await hue.withSpan("chat.request", async () => {
+          await queued(hue.transport, 1);
+          await hue.withSpan("model", () => {});
+          hue.recordMessages({ input: [{ role: "user", content: "Synthetic prompt" }] });
+          const flushed = hue.flushSafe({ timeoutMillis: 5000 });
+          await until(() => endpoint.real().length === 1, "the completed span");
+          await Bun.sleep(1700);
+          expect(endpoint.placeholders()).toEqual([]);
+          expect(hue.transport.getReport().pendingSpans).toBe(0);
+          release();
+          expect(await flushed).toMatchObject({
+            ok: true,
+            report: { acceptedSpans: 1, acceptedLogs: 1, pendingSpans: 0, pendingLogs: 0 },
+          });
+        });
+        await hue.flush();
+      } finally {
+        release();
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    timeout,
+  );
+
+  test(
+    "a forced drain defers placeholders across the span batch boundary",
+    async () => {
+      let release!: () => void;
+      const completed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const endpoint = receiver(() => ({}), { hold: completed });
+      const hue = createHue({
+        apiKey,
+        serviceName: "live-flush-batches",
+        captureContent: false,
+        baseUrl: endpoint.url,
+      });
+      const open = Array.from({ length: 127 }, (_, index) => hue.tracer.startSpan(`open ${index}`));
+      try {
+        await queued(hue.transport, 127);
+        hue.tracer.startSpan("first completed").end();
+        hue.tracer.startSpan("second completed").end();
+        const flushed = hue.flushSafe({ timeoutMillis: 5000 });
+        await until(() => endpoint.real().length === 2, "both completed batches");
+        release();
+        expect(await flushed).toMatchObject({
+          ok: true,
+          report: { acceptedSpans: 2, pendingSpans: 0 },
+        });
+        expect(endpoint.placeholders()).toEqual([]);
+        for (const span of open) span.end();
+        expect(await hue.flush()).toMatchObject({ acceptedSpans: 129, pendingSpans: 0 });
+      } finally {
+        release();
+        for (const span of open) span.end();
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    timeout,
+  );
+
+  test(
+    "scheduled exports send completed spans and placeholders separately, completed spans first",
     async () => {
       const endpoint = receiver();
       const hue = createHue({
@@ -440,6 +671,7 @@ describe("Live spans", () => {
         await hue.withSpan("chat.request", async () => {
           await queued(hue.transport, 1);
           await hue.withSpan("quick", () => {});
+          await until(() => endpoint.requests.length === 2, "the scheduled export's requests");
           const mid = await hue.flush();
           expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([
             [false],
@@ -657,7 +889,7 @@ describe("Live spans", () => {
   );
 
   test(
-    "a current Hue rejecting only a request of placeholders beside completed spans is a warning",
+    "a current Hue rejecting a scheduled placeholder beside completed spans is a warning",
     async () => {
       const endpoint = receiver((spans) =>
         spans.every(isPlaceholder)
@@ -674,6 +906,7 @@ describe("Live spans", () => {
         await hue.withSpan("chat.request", async () => {
           await queued(hue.transport, 1);
           await hue.withSpan("quick", () => {});
+          await until(() => endpoint.requests.length === 2, "the scheduled export's requests");
           const mid = await hue.flush();
           expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([
             [false],
@@ -725,6 +958,7 @@ describe("Live spans", () => {
           hue.withSpan("step", async () => {
             await queued(hue.transport, 2);
             await hue.withSpan("bad timestamp", () => {});
+            await until(() => endpoint.requests.length === 2, "the scheduled export's requests");
             const error = await hue.flush().catch((reason: unknown) => reason);
             expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([
               [false],
@@ -896,6 +1130,7 @@ describe("Live spans", () => {
               ),
             })
             .end();
+          await until(() => endpoint.requests.length === 1, "the scheduled placeholder");
           const error = await hue.flush().catch((reason: unknown) => reason);
           expect(error).toBeInstanceOf(HueExportError);
           expect((error as HueExportError).issues.filter((issue) => issue.count > 0)).toEqual([

@@ -256,7 +256,7 @@ def test_deadline_includes_slow_response_body():
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    worker = Thread(target=server.serve_forever, daemon=True)
+    worker = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     worker.start()
     try:
         with Hue(f"http://127.0.0.1:{server.server_port}", KEY, capture_content=False) as hue:

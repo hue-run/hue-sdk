@@ -511,6 +511,7 @@ export class HueClient {
     execute: () => Promise<T> | T,
     options: ToolOptions = {},
   ): Promise<T> {
+    if (!this.enabled || this.closed) return this.withSpan("execute_tool", () => execute());
     const attributes: Attributes = {
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.name": name,
@@ -519,20 +520,23 @@ export class HueClient {
       if (value === undefined) return;
       // A blank or non-string label is omitted and counted; the tool call itself still runs.
       if (isLabel(value)) attributes[key] = value;
-      else if (this.enabled && !this.closed) this.instrumentationFailed();
+      else this.instrumentationFailed();
     };
-    stamp("gen_ai.tool.call.id", options.callId);
-    stamp("mcp.server.name", options.mcp?.name);
-    stamp("mcp.server.version", options.mcp?.version);
-    stamp("hue.mcp.provider", options.mcp?.provider);
-    stamp("hue.mcp.surface", options.mcp?.surface);
-    if (this.enabled && !this.closed && this.captureContent) {
-      try {
-        if (options.endpoint !== undefined)
-          Object.assign(attributes, toolEndpointAttributes(options.endpoint));
-      } catch {
-        this.instrumentationFailed();
-      }
+    let spanOptions: SpanOptions = { attributes };
+    try {
+      stamp("gen_ai.tool.call.id", options.callId);
+      stamp("mcp.server.name", options.mcp?.name);
+      stamp("mcp.server.version", options.mcp?.version);
+      stamp("hue.mcp.provider", options.mcp?.provider);
+      stamp("hue.mcp.surface", options.mcp?.surface);
+      if (this.captureContent && options.endpoint !== undefined)
+        Object.assign(attributes, toolEndpointAttributes(options.endpoint));
+      spanOptions = {
+        attributes,
+        ...(options.parentContext ? { parentContext: options.parentContext } : {}),
+      };
+    } catch {
+      this.instrumentationFailed();
     }
     return this.withSpan(
       `execute_tool ${name}`,
@@ -542,10 +546,7 @@ export class HueClient {
         if (result !== undefined) this.setContent(span, "gen_ai.tool.call.result", result);
         return result;
       },
-      {
-        attributes,
-        ...(options.parentContext ? { parentContext: options.parentContext } : {}),
-      },
+      spanOptions,
     );
   }
 
@@ -565,10 +566,25 @@ export class HueClient {
     callback: (span: HueSpan) => Promise<T> | T,
     options: SpanOptions = {},
   ): Promise<T> {
+    if (!this.enabled || this.closed) return this.withSpan("invoke_agent", callback);
     let agent = name;
     if (!isLabel(name)) {
       agent = "unknown";
-      if (this.enabled && !this.closed) this.instrumentationFailed();
+      this.instrumentationFailed();
+    }
+    let spanOptions: SpanOptions = {};
+    try {
+      spanOptions = {
+        ...options,
+        attributes: {
+          ...options.attributes,
+          "gen_ai.operation.name": "invoke_agent",
+          "gen_ai.agent.name": agent,
+          "hue.agent.role": "subagent",
+        },
+      };
+    } catch {
+      this.instrumentationFailed();
     }
     return this.withSpan(
       `invoke_agent ${agent}`,
@@ -584,15 +600,7 @@ export class HueClient {
         if (result !== undefined && !outputSet) span.setOutput(result);
         return result;
       },
-      {
-        ...options,
-        attributes: {
-          ...options.attributes,
-          "gen_ai.operation.name": "invoke_agent",
-          "gen_ai.agent.name": agent,
-          "hue.agent.role": "subagent",
-        },
-      },
+      spanOptions,
     );
   }
 
@@ -610,31 +618,43 @@ export class HueClient {
     callback: (span: HueSpan) => Promise<T> | T,
     options: ModelOptions,
   ): Promise<T> {
-    // A disabled or closed client creates no span, so invalid metadata is not an instrumentation
-    // failure either; only an active client records it (matching the other helpers).
-    const active = this.enabled && !this.closed;
+    if (!this.enabled || this.closed) return this.withSpan("model", callback);
+    let prepared: Partial<ModelOptions> = { provider: "unknown" };
+    try {
+      prepared = {
+        operation: options?.operation,
+        provider: options?.provider,
+        name: options?.name,
+        sessionId: options?.sessionId,
+        userId: options?.userId,
+        workspaceId: options?.workspaceId,
+        parentContext: options?.parentContext,
+        ...(this.captureContent
+          ? {
+              input: options?.input,
+              systemInstructions: options?.systemInstructions,
+              tools: options?.tools,
+            }
+          : {}),
+      };
+    } catch {
+      this.instrumentationFailed();
+    }
     const label = (value: unknown, fallback: string): string => {
       if (isLabel(value)) return value;
-      if (active) this.instrumentationFailed();
+      this.instrumentationFailed();
       return fallback;
     };
     const requestModel = label(model, "unknown");
-    const operation = label(options?.operation ?? "chat", "chat");
-    const provider = label(options?.provider, "unknown");
+    const operation = label(prepared.operation ?? "chat", "chat");
+    const provider = label(prepared.provider, "unknown");
     const name =
-      options?.name === undefined
+      prepared.name === undefined
         ? `${operation} ${requestModel}`
-        : label(options.name, `${operation} ${requestModel}`);
+        : label(prepared.name, `${operation} ${requestModel}`);
     const metadata = { operation, provider, requestModel };
-    const {
-      sessionId,
-      userId,
-      workspaceId,
-      parentContext,
-      input,
-      systemInstructions,
-      tools,
-    }: Partial<ModelOptions> = options ?? {};
+    const { sessionId, userId, workspaceId, parentContext, input, systemInstructions, tools } =
+      prepared;
     return this.withSpan(
       name,
       (span) => {
@@ -668,20 +688,20 @@ export class HueClient {
 
   private setUsage(span: Span, usage: TokenUsage): void {
     if (!this.enabled || this.closed) return;
-    for (const [key, value] of [
-      ["gen_ai.usage.input_tokens", usage?.inputTokens],
-      ["gen_ai.usage.output_tokens", usage?.outputTokens],
-    ] as const) {
-      if (value === undefined) continue;
-      if (!Number.isInteger(value) || value < 0) {
-        this.instrumentationFailed();
-        continue;
-      }
-      try {
+    try {
+      for (const [key, value] of [
+        ["gen_ai.usage.input_tokens", usage?.inputTokens],
+        ["gen_ai.usage.output_tokens", usage?.outputTokens],
+      ] as const) {
+        if (value === undefined) continue;
+        if (!Number.isInteger(value) || value < 0) {
+          this.instrumentationFailed();
+          continue;
+        }
         span.setAttribute(key, value);
-      } catch {
-        this.instrumentationFailed();
       }
+    } catch {
+      this.instrumentationFailed();
     }
   }
 
@@ -1483,11 +1503,10 @@ export function createHue(options: HueOptions | ExistingHueProviders): HueClient
 export function createHueSafe(options: HueOptions | ExistingHueProviders): HueClient {
   try {
     return new HueClient(options);
-  } catch (error) {
-    // The caller's diagnostics hook stays attached and hears why telemetry is off.
+  } catch {
+    // Provider errors can contain credentials or expose throwing message accessors.
     const disabled = new HueClient({ enabled: false, onExportIssue: issueCallback(options) });
-    const reason = error instanceof Error && error.message ? error.message : "unknown error";
-    disabled.transport.instrumentationFailure("traces", `Hue is disabled: ${reason.slice(0, 256)}`);
+    disabled.transport.instrumentationFailure("traces", "Hue is disabled: initialization failed");
     return disabled;
   }
 }

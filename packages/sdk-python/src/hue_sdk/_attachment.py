@@ -395,22 +395,3 @@ def placed_part(
     ):
         return part
     return None
-
-
-def holds_attachment(value: Any) -> bool:
-    """Whether a value holds an attachment anywhere, within the content snapshot's bounds."""
-    nodes = [0]
-
-    def visit(item: Any, depth: int) -> bool:
-        if isinstance(item, Attachment):
-            return True
-        nodes[0] += 1
-        if depth > 64 or nodes[0] > 65_536:
-            return False
-        if type(item) is dict:
-            return any(visit(child, depth + 1) for child in item.values())
-        if type(item) in (list, tuple):
-            return any(visit(child, depth + 1) for child in item)
-        return False
-
-    return visit(value, 0)

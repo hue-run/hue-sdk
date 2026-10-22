@@ -8,7 +8,7 @@
 
 For frozen datasets, local experiments, custom scorers, durable retries and historical rescoring, see [Local evaluations](https://docs.hue.run/evaluations/first-evaluation).
 
-Python helpers around the official OpenTelemetry trace and log SDKs and OTLP HTTP/protobuf exporters. `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` are accepted as **`>=1.40,<2`**; **1.44.0** is the certified lockfile combination and **1.40.0** is tested as the floor in CI. Provider requests run in your application. This package does not proxy model calls or configure global OTel providers.
+Python helpers around the official OpenTelemetry trace and log SDKs and OTLP HTTP/protobuf exporters. `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` are accepted as **`>=1.40,<2`**; **1.45.1** is the certified lockfile combination and **1.40.0** is tested as the floor in CI. Provider requests run in your application. This package does not proxy model calls or configure global OTel providers.
 
 The distribution is named `hue-run` on PyPI (`import hue_sdk`); install `hue-run`, not `hue-sdk`, which is not published there. Python 3.10+ is supported by the package contract; recorded validation below identifies the tested runtime.
 
@@ -22,7 +22,36 @@ pip install hue-run
 uv add hue-run
 ```
 
-## Send a trace
+## Trace serving requests
+
+Create one safe client per serving process, after fork. Completed records export in the background. Keep connection checks, receipt verification and explicit delivery waits outside request handling:
+
+```python
+import os
+from hue_sdk import create_hue_safe
+
+hue = create_hue_safe(
+    api_key=os.environ.get("HUE_API_KEY"),
+    service_name="customer-agent",
+    capture_content=True,
+    enabled=os.environ.get("HUE_TRACING_ENABLED") != "false",
+)
+
+def handle_request(inputs):
+    with hue.span("agent.request") as request:
+        request.set_input(inputs)
+        result = existing_agent(inputs)
+        request.set_output(result)
+        return result
+
+# Register with the process shutdown hook, after stopping new requests.
+def shutdown_tracing():
+    return hue.shutdown_safe(timeout_millis=1000)
+```
+
+`existing_agent` is the application's existing entry point. Observe lifecycle results and sanitized `export_status` counters through the application's monitoring. Set `HUE_TRACING_ENABLED=false` and restart to bypass Hue. For async servers, streaming and serverless completion, follow [Serving safely](#serving-safely).
+
+## Verify a trace in a standalone script
 
 In the consuming application, use only public imports:
 
@@ -34,7 +63,7 @@ with Hue(
     api_key=os.environ["HUE_API_KEY"],
     capture_content=True,  # Also works with older releases; False sends metadata only.
 ) as hue:
-    project = hue.validate_project()
+    hue.validate_project()
     with hue.context(session_id="conversation-42", user_id="observed-user-7"):
         with hue.span("agent.run") as run:
             run.set_input({"question": "What is 2 + 2?"})
@@ -92,7 +121,7 @@ Before redaction, helpers copy supported content into detached built-in containe
 
 To store a file your work reads or produces, see [Record a file](#record-a-file).
 
-Python `0.13.4` adds an `endpoint=` option to `tool()`, typed as `ToolEndpoint`:
+Since Python `0.13.4`, `tool()` accepts an `endpoint=` option, typed as `ToolEndpoint`:
 `{"url": actual_url, "source": "client_config", "method": actual_method, "capture_query_parameters": ["user_id"]}`.
 Use a URL from the actual `request`, `client_config` or `receipt`, and name that `source`. Omit
 unknown methods. With content capture enabled it emits `url.full`, `hue.tool.endpoint.source`
@@ -303,7 +332,7 @@ The `invoke_agent researcher` span then belongs to the caller's trace, with the 
 
 Pass an existing `opentelemetry.sdk.trace.TracerProvider` through `tracer_provider=provider` to add Hue's exporter, and an existing `opentelemetry.sdk._logs.LoggerProvider` through `logger_provider=` when the application already owns one. A provider Hue creates for the other signal reuses the borrowed provider's resource, so spans and correlated logs report the same `service.name`; `service_name` applies only when Hue creates both providers. Hue's processor then exports every span that ends on that provider, the same default as other OpenTelemetry exporters, plus [placeholders](#live-spans) for its running Hue and AI spans; wrap the processor if only part of the provider's spans should reach Hue, and forward `on_start` only for spans whose `on_end` the wrapper forwards unchanged. Session/user identifiers from `hue.context()` are stamped on Hue helper spans only. Hue does not call `set_tracer_provider`. It exposes `hue.tracer_provider`, `hue.tracer` and `hue.logger_provider` for explicit integration. `shutdown()` closes Hue's processors; borrowed providers and their other processors stay usable. Finish traced work before shutting Hue down: spans ending or external records emitted afterward increment Hue's dropped-record counters, including emissions through a borrowed provider. New Hue helpers after shutdown are no-ops. Do not repeatedly attach Hue clients to one long-lived provider: OTel has no public processor-removal API. Create one client per provider lifecycle.
 
-An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`; follow that instrumentor's own capture/redaction configuration. OpenInference and other OTel instrumentors are optional dependencies, not implicitly enabled. Hue's export path strips their recognized content attributes when `capture_content` is `False`, but configure their own capture controls as well: unrecognized custom keys pass through, and the instrumentor may still send content to other exporters. The optional compatibility group pins **OpenAI 3.14.0**, **OpenInference OpenAI 0.1.60** and its resolved **OpenInference instrumentation 0.1.63**. A synthetic HTTP streaming response verifies parentage, canonical model/usage attributes and enabled/disabled message capture with `TraceConfig(enable_genai_semconv=True, hide_inputs=..., hide_outputs=..., hide_input_messages=..., hide_output_messages=...)`. This is a tested adapter combination, not a claim about all OpenAI APIs or live-provider compatibility. See the [instrumentor's official source](https://github.com/Arize-ai/openinference/tree/main/python/instrumentation/openinference-instrumentation-openai). See the [Python integration guide](https://docs.hue.run/sdks/python) for application setup.
+An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`; follow that instrumentor's own capture/redaction configuration. OpenInference and other OTel instrumentors are optional dependencies, not implicitly enabled. Hue's export path strips their recognized content attributes when `capture_content` is `False`, but configure their own capture controls as well: unrecognized custom keys pass through, and the instrumentor may still send content to other exporters. The optional compatibility group pins **OpenAI 3.29.0**, **OpenInference OpenAI 0.1.65** and its resolved **OpenInference instrumentation 0.1.71**. A synthetic HTTP streaming response verifies parentage, canonical model/usage attributes and enabled/disabled message capture with `TraceConfig(enable_genai_semconv=True, hide_inputs=..., hide_outputs=..., hide_input_messages=..., hide_output_messages=...)`. This is a tested adapter combination, not a claim about all OpenAI APIs or live-provider compatibility. See the [instrumentor's official source](https://github.com/Arize-ai/openinference/tree/main/python/instrumentation/openinference-instrumentation-openai). See the [Python integration guide](https://docs.hue.run/sdks/python) for application setup.
 
 ## Local development without a Hue account
 
@@ -578,4 +607,8 @@ flush callbacks and recovery. Local/CI runners remain available.
 
 Use `create_hue_safe` for best-effort startup and `enabled=False` for a local kill switch. The safe constructor returns a disabled client and records an instrumentation failure if initialization fails. Disabled helpers execute application work without exporting. Initialize after fork, once per serving process. `force_flush_safe(timeout_millis=1000)` and `shutdown_safe(timeout_millis=1000)` return booleans without raising; monitor those results and `export_status`. Keep strict project validation and receipt/delivery checks out of customer request paths. Never rerun application work to recover telemetry.
 
-Queue bytes bound retained telemetry rather than total RSS. Network waits have a wall-clock caller bound and at most one retained HTTP worker per signal; a stuck OS call can outlive that wait. Arbitrary user hooks and third-party instrumentation retain their own behavior. See [production setup](https://docs.hue.run/sdks/python#production-setup) for lifecycle examples, failure tests and limitations.
+Lifecycle methods block the calling thread. In an asyncio shutdown hook, use `await asyncio.to_thread(hue.shutdown_safe, 1000)`. The same applies to an explicit flush: offloading protects the event loop, but awaiting it before returning a response still adds delivery latency to that response. Keep a shared client alive across requests and finish streams before their spans end. Python does not register serverless background work automatically; use the host's supported completion hook and remaining execution deadline. Starting an untracked task or thread does not keep an invocation alive.
+
+Queue bytes bound retained telemetry rather than total RSS. Snapshotting, redaction, JSON encoding and initial file hashing still run on the calling thread. Keep redactors fast and offline, measure expected payloads under concurrency, and use metadata-only capture when content recording is prohibited. Primitive custom-attribute lists and tuples must contain fewer than 65,536 items. Oversized primitive arrays and array subclasses are omitted and counted without changing the application result. A disabled client skips custom-attribute classification and MCP metadata lookups.
+
+Network waits have a wall-clock caller bound and one retained HTTP worker per completed signal; a stuck OS call can outlive that wait. Live announcements use a separate bounded delivery slot so they do not delay completed records or explicit flushes. Arbitrary user hooks and third-party instrumentation retain their own behavior. See [production setup](https://docs.hue.run/sdks/python#production-setup) for lifecycle examples, failure tests and limitations.

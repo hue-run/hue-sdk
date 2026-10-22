@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 
 def run(*args: str, cwd: Path, env: dict[str, str]) -> None:
@@ -47,9 +48,13 @@ def main() -> None:
         # content-prefix list at ../sdk-typescript relative to their directory; copy
         # them there so those checks run against the installed SDK instead of skipping.
         typescript = repository / "packages/sdk-typescript"
-        shutil.copytree(typescript / "tests/fixtures", root / "sdk-typescript/tests/fixtures")
+        shutil.copytree(
+            typescript / "tests/fixtures", root / "sdk-typescript/tests/fixtures"
+        )
         (root / "sdk-typescript/src").mkdir()
-        shutil.copy2(typescript / "src/privacy.ts", root / "sdk-typescript/src/privacy.ts")
+        shutil.copy2(
+            typescript / "src/privacy.ts", root / "sdk-typescript/src/privacy.ts"
+        )
         requirements = root / "requirements.txt"
         run(
             "uv",
@@ -62,7 +67,8 @@ def main() -> None:
             cwd=package,
             env=environment,
         )
-        for installer in ("pip", "uv"):
+
+        def verify_installer(installer: str) -> None:
             consumer = root / installer
             run(
                 "uv",
@@ -132,9 +138,17 @@ def main() -> None:
             print(
                 f"Verified {spec} with {installer} on Python {args.python}", flush=True
             )
-            # Keep peak disk use to one installed consumer; no test environment is
-            # reused across installers and pytest output remains in the run log.
+            # No test environment is reused across installers.
             shutil.rmtree(consumer)
+
+        # Wait for both consumers before temporary files are removed, including on failure.
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(verify_installer, installer)
+                for installer in ("pip", "uv")
+            ]
+            for future in futures:
+                future.result()
 
 
 if __name__ == "__main__":
