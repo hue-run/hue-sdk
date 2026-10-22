@@ -34,7 +34,7 @@ Preconditions:
 ## Gotchas
 
 - `uv build --out-dir` writes a `.gitignore` into the directory; `release-artifacts.py inspect` rejects it as unexpected inventory, so delete it first.
-- `scripts/verify-python-release.py` is the release-time version of the consumer check and needs both Python 3.10 and 3.14 available.
+- `scripts/verify-python-release.py` is the release-time version of the consumer check and needs both Python 3.10 and 3.14 available. Its fresh pip and uv consumers run concurrently in separate environments; a failure waits for the other consumer to finish before temporary files are removed.
 
 ## Media release contract
 
