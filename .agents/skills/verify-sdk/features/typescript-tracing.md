@@ -9,6 +9,16 @@ An application creates a client with `createHue`, records spans and tools, and r
 - `ts-capture` honors `captureContent` and redaction before export.
 - `ts-ack` reports accepted, rejected and failed records truthfully from the receiver's acknowledgement.
 - `ts-lifecycle` covers `flush`, `shutdown` and the fail-open `*Safe` variants.
+  A drain with completed spans defers advisory live placeholders until the drain and its uploads
+  finish, without waiting for a second acknowledgement. Verify with
+  `bun test tests/live-spans.test.ts -t "flushSafe defers|in-flight export|batch boundary"`
+  and `bun test tests/blobs.test.ts -t "live parent stays deferred"`.
+- `ts-vercel-lifetime` registers admitted completed spans and logs synchronously with Vercel's
+  public `waitUntil`, preserving scheduled batching and waiting for acknowledgement and queued
+  media upload reports. Export-start cohorts keep later requests from extending an earlier
+  request indefinitely. Background failures remain visible to explicit flushes, host hook
+  failures preserve accepted records, disabled clients register nothing, and other hosts retain
+  normal batching. Verify with `bun test tests/lifetime.test.ts`.
 - `ts-media` inspects bounded, nonempty media and exports exact digests and blob entries.
 - `ts-file-upload` covers opt-in `recordFile` uploads and name validation.
 - `ts-attachment` places `Attachment` in recorded values and uploads it under `<attribute>#<pointer>` or `body#<pointer>`.

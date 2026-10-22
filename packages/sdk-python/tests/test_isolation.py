@@ -519,7 +519,7 @@ def test_trickling_http_does_not_extend_deadline_or_spawn_unbounded_requests():
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    worker = Thread(target=server.serve_forever, daemon=True)
+    worker = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     worker.start()
     hue = Hue(
         f"http://127.0.0.1:{server.server_port}",

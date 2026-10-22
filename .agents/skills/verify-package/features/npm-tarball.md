@@ -6,7 +6,7 @@
 
 - `npm-inventory` ships exactly the intended `dist/` files, docs and license.
 - `npm-exports` resolves every `exports` entry under ESM, `require(esm)` and TypeScript.
-- `npm-consumer` installs the tarball into a fresh Node or Bun project and runs it.
+- `npm-consumer` installs the tarball into fresh Node and Bun projects for all five AI SDK 7/`@ai-sdk/otel` pairs. The pairs run concurrently, with each pair's checks kept in order. The verifier waits for every pair before returning failure and copies a release artifact only after every check passes.
 - `npm-bundle-safe` keeps every module reachable from `.` and `./ai-sdk` free of computed `import()` specifiers, so a bundling framework (Next.js) can resolve them; the verifier prints `bundle safety: N runtime modules`.
 
 ## How to get to it (user POV)
@@ -40,6 +40,6 @@ Preconditions:
 
 ## Media release contract
 
-For TypeScript 0.22.0, compare `package.json`, `src/version.ts`, the packed package metadata and `docs-contract.json`. Run `python3 scripts/check-doc-versions.py` and `python3 scripts/generate-docs-contract.py --check` from the repository root. Confirm the frozen lock retains every resolved dependency version.
+For TypeScript 0.23.0, compare `package.json`, `src/version.ts`, the packed package metadata and `docs-contract.json`. Run `python3 scripts/check-doc-versions.py` and `python3 scripts/generate-docs-contract.py --check` from the repository root. Confirm the frozen lock retains every resolved dependency version.
 
 From an installed tarball, send binary media and text over 64 KiB to a loopback blob receiver. Check decoded bytes, the binary part's digest and size, and the text prefix and content-field entry. Exercise `recordFile` with upload omitted and enabled, a Unicode name, an upload failure, content capture disabled and setup credentials. Supplied helper data is limited to 25 MiB; whole string attributes retain their separate 1,000,000,000-byte limit. Inspect the same-span `event:hue.file:<sha256>` entry and the unchanged `hue.file` event. Place an `Attachment` in a `withSpan` input and in a `recordMessages` body next to an inline image, and check that each file is reserved once, the span lists `input.value#<pointer>` and the log record lists `body#<pointer>` entries in its own `hue.blobs`, under the span's trace. The shared corpus must remain byte-identical to the Python copy; fixtures are development inputs and must not enter the npm tarball.

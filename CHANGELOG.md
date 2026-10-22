@@ -8,6 +8,22 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.23.0] - 2026-10-21
+
+#### Added
+
+- Automatically register completed-span and log delivery with Vercel's request lifetime.
+  Background batches and their uploads can finish after a function returns, without a
+  per-request flush. Existing batching, capture and acknowledgement reporting are preserved.
+  Explicit `flush` and `flushSafe` still wait for delivery when called.
+
+#### Fixed
+
+- Explicit flushes that deliver completed spans defer queued in-progress span updates to the
+  next scheduled export, avoiding a second collector acknowledgement on the flush's critical
+  path. Completed-span delivery and rejection checks still finish before the flush returns.
+  Placeholder-only flushes and scheduled live updates keep working.
+
 ### [0.22.0] - 2026-10-21
 
 #### Added

@@ -552,8 +552,8 @@ the Langfuse project's own keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, a
 `HUE_API_KEY`:
 
 ```sh
-npx -y @hue-run/sdk@0.22.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.22.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.23.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.23.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 - It reads Langfuse Cloud and self-hosted v4 through the Observations API v2, and self-hosted v3
@@ -1106,6 +1106,16 @@ own. Stop request production
 before shutdown so late spans cannot race it. A client does not own instrumented
 operations still running in the application.
 
+In Vercel Functions, the TypeScript SDK automatically registers admitted spans and logs with
+[`waitUntil`](https://vercel.com/docs/functions/functions-api-reference/vercel-functions-package#waituntil).
+The response or Workflow step can return while the existing batches and their media uploads finish
+in the background, within the function's lifetime limit. You can remove a per-step
+`await hue.flushSafe()` when its purpose is to prevent the function freezing before delivery.
+Keep an explicit flush when you need its acknowledgement report before continuing. Background
+delivery preserves capture, redaction, batching and failure reports; it never flushes or shuts down
+application-owned providers. In other hosts, keep the host's lifetime hook or await a flush before
+a short-lived process exits.
+
 ## Live spans
 
 OpenTelemetry exports a span only when it ends, so a long streamed turn would otherwise stay
@@ -1119,7 +1129,11 @@ arrives.
 The placeholder then waits for the next batch export like any queued span: up to 500 ms until the
 next tick, then the 1 s batch delay when nothing else is queued, so it usually reaches Hue within
 about 1.5 s of its span starting. It goes out sooner when a batch is already scheduled, for example
-because another span has just ended, and at once for a full batch or `flush()`. It goes out later
+because another span has just ended, and at once for a full batch or a flush with no completed
+spans. When a flush has completed spans to deliver, it defers queued placeholders to the next
+normal announcement after the drain and its uploads finish. This avoids an extra acknowledgement
+for a still-open parent while preserving delivery of its completed children. A parent that ends
+before that announcement sends only its completed span. A placeholder goes out later
 while an earlier export is still in flight, because the next batch is scheduled only after that
 export finishes. A placeholder whose span has ended by the time it is exported is not sent, so a
 short span may send none and appear in Hue only when it finishes.
