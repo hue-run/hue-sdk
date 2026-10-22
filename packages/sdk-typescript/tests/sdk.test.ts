@@ -4736,6 +4736,128 @@ describe("Application failure isolation", () => {
     }
   });
 
+  test.each(
+    ["active", "disabled", "closed"].flatMap((state) =>
+      ["tool", "subagent", "model", "usage"].map((helper) => ({ state, helper })),
+    ),
+  )("$helper metadata failures preserve work while $state", async ({ state, helper }) => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "metadata-failure",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      enabled: state !== "disabled",
+    });
+    if (state === "closed") await hue.shutdownSafe();
+    let reads = 0;
+    const fail = () => {
+      reads++;
+      throw new Error("synthetic-metadata-secret");
+    };
+    const invoke = (work: () => unknown) => {
+      switch (helper) {
+        case "tool":
+          return hue.tool("lookup", null, work, {
+            mcp: {
+              get name() {
+                return fail();
+              },
+            },
+          });
+        case "subagent":
+          return hue.subagent("research", work, {
+            attributes: {
+              get detail() {
+                return fail();
+              },
+            },
+          });
+        case "model":
+          return hue.model("synthetic-model", work, {
+            get provider() {
+              return fail();
+            },
+          });
+        case "usage":
+          return hue.withSpan("request", (span) => {
+            span.setUsage({
+              get inputTokens() {
+                return fail();
+              },
+            });
+            return work();
+          });
+        default:
+          throw new Error("Unknown test helper");
+      }
+    };
+    let executions = 0;
+    const result = {};
+    const original = new Error("original business failure");
+    try {
+      expect(
+        await invoke(() => {
+          executions++;
+          return result;
+        }),
+      ).toBe(result);
+      await expect(
+        invoke(() => {
+          executions++;
+          throw original;
+        }),
+      ).rejects.toBe(original);
+      expect(executions).toBe(2);
+      expect(reads).toBe(state === "active" ? 2 : 0);
+      expect(hue.transport.getReport().instrumentationFailures).toBe(state === "active" ? 2 : 0);
+      expect(JSON.stringify(hue.transport.getIssues())).not.toContain("synthetic-metadata-secret");
+    } finally {
+      await hue.shutdownSafe();
+      if (state !== "active") expect(endpoint.hits()).toBe(0);
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("metadata-only model calls do not read content properties", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "metadata-only-model",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    let reads = 0;
+    const content = () => {
+      reads++;
+      throw new Error("synthetic-content-secret");
+    };
+    try {
+      expect(
+        await hue.model("synthetic-model", () => "answer", {
+          provider: "synthetic",
+          get input() {
+            return content();
+          },
+          get systemInstructions() {
+            return content();
+          },
+          get tools() {
+            return content();
+          },
+        }),
+      ).toBe("answer");
+      const result = await hue.flushSafe();
+      expect(result.ok).toBe(true);
+      expect(result.report.instrumentationFailures).toBe(0);
+      expect(reads).toBe(0);
+      expect(JSON.stringify(endpoint.requests)).not.toContain("synthetic-content-secret");
+    } finally {
+      await hue.shutdownSafe();
+      endpoint.server.stop(true);
+    }
+  });
+
   test("safe initialization and the kill switch require no credentials and perform no HTTP", async () => {
     const endpoint = receiver();
     const clients = [
@@ -5527,7 +5649,7 @@ describe("Kill switch and safe initialization", () => {
     expect((await hue.shutdownSafe()).ok).toBe(true);
   });
 
-  test("safe initialization keeps the diagnostics hook and reports why telemetry is off", async () => {
+  test("safe initialization keeps the diagnostics hook without exposing setup errors", async () => {
     const issues: ExportIssue[] = [];
     const onExportIssue = (issue: ExportIssue) => {
       issues.push(issue);
@@ -5546,7 +5668,7 @@ describe("Kill switch and safe initialization", () => {
         signal: "traces",
         kind: "invalid",
         count: 0,
-        message: "Hue is disabled: A valid Hue project API key is required",
+        message: "Hue is disabled: initialization failed",
       }),
     ]);
     expect(hue.transport.getReport().instrumentationFailures).toBe(1);
@@ -5572,8 +5694,71 @@ describe("Kill switch and safe initialization", () => {
     expect(borrowed.enabled).toBe(false);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(issues).toHaveLength(2);
-    expect(issues[1]!.message).toBe("Hue is disabled: provider failure");
+    expect(issues[1]!.message).toBe("Hue is disabled: initialization failed");
     await borrowed.shutdownSafe();
     await transport.shutdown();
   });
+
+  test.each(["message", "accessor", "non-string"] as const)(
+    "safe initialization does not inspect a provider's %s error message",
+    async (kind) => {
+      const endpoint = receiver();
+      const issues: ExportIssue[] = [];
+      const secret = "synthetic-provider-credential";
+      const failure = new Error(secret);
+      let reads = 0;
+      if (kind === "accessor")
+        Object.defineProperty(failure, "message", {
+          get() {
+            reads++;
+            throw new Error(secret);
+          },
+        });
+      if (kind === "non-string") Object.defineProperty(failure, "message", { value: 42 });
+      const transport = createHueTransport({
+        apiKey,
+        serviceName: "safe-provider-failure",
+        baseUrl: endpoint.url,
+        onExportIssue: (issue) => {
+          issues.push(issue);
+        },
+      });
+      const loggerProvider = new LoggerProvider({ processors: [] });
+      try {
+        const hue = createHueSafe({
+          transport,
+          tracerProvider: {
+            getTracer() {
+              throw failure;
+            },
+            async forceFlush() {},
+          },
+          loggerProvider,
+        });
+        expect(hue.enabled).toBe(false);
+        let executions = 0;
+        const output = {};
+        expect(
+          await hue.tool("business", null, () => {
+            executions++;
+            return output;
+          }),
+        ).toBe(output);
+        expect(executions).toBe(1);
+        expect(reads).toBe(0);
+        expect((await hue.shutdownSafe()).ok).toBe(false);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(issues).toEqual([
+          expect.objectContaining({ message: "Hue is disabled: initialization failed" }),
+        ]);
+        expect(JSON.stringify(hue.transport.getIssues())).not.toContain(secret);
+        expect(JSON.stringify(issues)).not.toContain(secret);
+        expect(endpoint.hits()).toBe(0);
+      } finally {
+        await loggerProvider.shutdown();
+        await transport.shutdown();
+        endpoint.server.stop(true);
+      }
+    },
+  );
 });

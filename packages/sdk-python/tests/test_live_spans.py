@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+import gzip
 import json
 import os
 import signal
@@ -7,7 +9,10 @@ import sys
 import time
 import warnings
 from contextlib import ExitStack
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Lock, Thread
+from types import SimpleNamespace
+from weakref import ref
 
 import pytest
 from opentelemetry import trace
@@ -25,6 +30,283 @@ SETUP_KEY = "hue_setup_test_setup-0123456789abcdef01234567_" + "s" * 43
 CURRENT = {"Hue-Pending-Spans": "1"}
 
 
+@pytest.fixture
+def delayed_pending_receiver():
+    state = SimpleNamespace(
+        started=Event(), release=Event(), spans=[], pending_requests=0, pending_status=200
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            if self.headers.get("Content-Encoding") == "gzip":
+                body = gzip.decompress(body)
+            request = ExportTraceServiceRequest.FromString(body)
+            spans = [
+                span
+                for resource in request.resource_spans
+                for scope in resource.scope_spans
+                for span in scope.spans
+            ]
+            state.spans.extend(spans)
+            pending = any(span.end_time_unix_nano == 0 for span in spans)
+            if pending:
+                state.pending_requests += 1
+                state.started.set()
+                state.release.wait(5)
+            self.send_response(state.pending_status if pending else 200)
+            if pending and state.pending_status == 503:
+                self.send_header("Retry-After", "0")
+            self.send_header("Hue-Pending-Spans", "1")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    state.url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        yield state
+    finally:
+        state.release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_inflight_placeholder_never_holds_completed_spans_or_flush(delayed_pending_receiver):
+    receiver = delayed_pending_receiver
+    hue = Hue(receiver.url, KEY, capture_content=False)
+    try:
+        with hue.span("still-running"):
+            assert receiver.started.wait(3)
+            with hue.span("finished-after-placeholder-started"):
+                pass
+            assert hue.force_flush_safe(200)
+            assert any(
+                span.name == "finished-after-placeholder-started" and span.end_time_unix_nano
+                for span in receiver.spans
+            )
+            assert not receiver.release.is_set()
+        assert hue.force_flush_safe(200)
+        assert hue.shutdown_safe(200)
+        assert not receiver.release.is_set(), "shutdown waited for the advisory HTTP request"
+        assert hue.export_status.ok
+    finally:
+        receiver.release.set()
+        hue.shutdown_safe(1000)
+
+
+def test_flush_of_finished_spans_does_not_wait_for_its_advisories(delayed_pending_receiver):
+    receiver = delayed_pending_receiver
+    hue = Hue(receiver.url, KEY, capture_content=False)
+    try:
+        with hue.span("still-running"):
+            wait_for(queued(hue, 1))
+            with hue.span("finished-before-placeholder-started"):
+                pass
+            assert hue.force_flush_safe(200)
+            assert receiver.started.wait(1)
+            assert not receiver.release.is_set()
+            assert any(
+                span.name == "finished-before-placeholder-started" and span.end_time_unix_nano
+                for span in receiver.spans
+            )
+    finally:
+        receiver.release.set()
+        hue.shutdown_safe(1000)
+
+
+def test_advisory_outage_retains_only_one_bounded_batch(delayed_pending_receiver):
+    from hue_sdk.transport import MAX_BATCH_BYTES
+
+    receiver = delayed_pending_receiver
+    hue = Hue(receiver.url, KEY, capture_content=False, max_queue_bytes=64 * 1024 * 1024)
+    try:
+        with ExitStack() as stack:
+            for index in range(80):
+                stack.enter_context(
+                    hue.span(f"burst-{index}", attributes={"ai.model": "x" * 60_000})
+                )
+            assert receiver.started.wait(3)
+            count, retained_bytes = hue._span_exporter._advisory_status
+            assert 0 < count <= 64
+            assert 0 < retained_bytes <= MAX_BATCH_BYTES
+            for index in range(80):
+                stack.enter_context(hue.span(f"later-{index}"))
+            wait_for(lambda: len(hue._span_processor._live) == 0)
+            assert hue.force_flush_safe(200)
+            assert hue._span_exporter._advisory_status == (count, retained_bytes)
+            assert receiver.pending_requests == 1
+            assert hue.export_status.ok
+        assert hue.force_flush_safe(1000)
+        assert receiver.pending_requests == 1
+    finally:
+        receiver.release.set()
+        hue.shutdown_safe(1000)
+
+
+@pytest.mark.parametrize("stop", ["ended", "legacy", "shutdown"])
+def test_delayed_advisory_handoff_rechecks_span_and_receiver(receiver, monkeypatch, stop):
+    from hue_sdk import transport
+
+    started, release = Event(), Event()
+    original_thread = Thread
+
+    def delayed_thread(*args, **kwargs):
+        if kwargs.get("name") == "hue-live":
+            target = kwargs["target"]
+
+            def delayed():
+                started.set()
+                assert release.wait(5)
+                target()
+
+            kwargs["target"] = delayed
+        return original_thread(*args, **kwargs)
+
+    monkeypatch.setattr(transport, "Thread", delayed_thread)
+    hue = Hue(receiver.url, KEY, capture_content=False)
+    span = hue.tracer.start_span("pending")
+    try:
+        wait_for(queued(hue, 1))
+        assert hue.force_flush_safe(200)
+        assert started.wait(1)
+        if stop == "ended":
+            span.end()
+            assert hue.force_flush_safe(200)
+        elif stop == "legacy":
+            receiver.legacy = True
+            with hue.span("finished"):
+                pass
+            assert hue.force_flush_safe(200)
+            assert hue.export_status.live_spans_rejected
+        else:
+            assert hue.shutdown_safe(200)
+        release.set()
+        wait_for(lambda: not hue._span_exporter._advisory_lock.locked())
+        assert all(item.end_time_unix_nano for item in receiver.spans())
+    finally:
+        release.set()
+        span.end()
+        hue.shutdown_safe(1000)
+
+
+def test_borrowed_provider_shutdown_never_waits_for_advisory(delayed_pending_receiver):
+    receiver = delayed_pending_receiver
+    provider = TracerProvider(shutdown_on_exit=False)
+    hue = Hue(receiver.url, KEY, capture_content=False, tracer_provider=provider)
+    after_hue = Event()
+
+    class OtherProcessor(SpanProcessor):
+        def shutdown(self):
+            after_hue.set()
+
+    provider.add_span_processor(OtherProcessor())
+    span = hue.tracer.start_span("still-running")
+    try:
+        assert receiver.started.wait(3)
+        started = time.monotonic()
+        provider.shutdown()
+        assert time.monotonic() - started < 0.2
+        assert after_hue.is_set()
+        assert not receiver.release.is_set()
+        assert hue.shutdown_safe(200)
+    finally:
+        receiver.release.set()
+        span.end()
+        hue.shutdown_safe(1000)
+
+
+def test_inflight_advisory_never_retains_its_ended_source_span(delayed_pending_receiver):
+    receiver = delayed_pending_receiver
+    hue = Hue(receiver.url, KEY, capture_content=False)
+    try:
+        span = hue.tracer.start_span("source-with-large-attributes")
+        span.set_attribute("custom.large", "x" * (4 * 1024 * 1024))
+        source = ref(span)
+        assert receiver.started.wait(3)
+        span.end()
+        assert hue.force_flush_safe(500)
+        del span
+        gc.collect()
+        assert source() is None
+        assert not receiver.release.is_set()
+    finally:
+        receiver.release.set()
+        hue.shutdown_safe(1000)
+
+
+@pytest.mark.parametrize("keep_other_open", [False, True])
+def test_advisory_retry_never_replays_a_span_that_finished(
+    delayed_pending_receiver, keep_other_open
+):
+    receiver = delayed_pending_receiver
+    receiver.pending_status = 503
+    hue = Hue(receiver.url, KEY, capture_content=False)
+    first = hue.tracer.start_span("finishes-before-advisory-response")
+    other = hue.tracer.start_span("other")
+    try:
+        wait_for(queued(hue, 2))
+        assert hue.force_flush_safe(200)
+        assert receiver.started.wait(1)
+        first.end()
+        if not keep_other_open:
+            other.end()
+        assert hue.force_flush_safe(200)
+        receiver.release.set()
+        wait_for(lambda: not hue._span_exporter._advisory_lock.locked())
+        assert receiver.pending_requests == 1
+        assert hue.export_status.ok
+    finally:
+        receiver.release.set()
+        first.end()
+        other.end()
+        hue.shutdown_safe(1000)
+
+
+def test_busy_advisory_http_worker_never_spawns_more_requests(receiver, monkeypatch):
+    from hue_sdk._otel_compat import instrumentation_suppressed
+    from hue_sdk.transport import SafeSession
+
+    started, release = Event(), Event()
+    calls = []
+    original_request = SafeSession._request
+
+    def blocked_request(session, method, url, **kwargs):
+        if kwargs.get("placeholders"):
+            calls.append(instrumentation_suppressed())
+            started.set()
+            assert release.wait(5)
+        return original_request(session, method, url, **kwargs)
+
+    monkeypatch.setattr(SafeSession, "_request", blocked_request)
+    hue = Hue(receiver.url, KEY, capture_content=False, export_timeout_seconds=0.05)
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(hue.span("first"))
+            wait_for(queued(hue, 1))
+            assert hue.force_flush_safe(200)
+            assert started.wait(1)
+            wait_for(lambda: not hue._span_exporter._advisory_lock.locked())
+            assert not hue._span_exporter._advisory_exporter.ready
+            for index in range(3):
+                stack.enter_context(hue.span(f"later-{index}"))
+                wait_for(queued(hue, 1))
+                assert hue.force_flush_safe(200)
+                assert calls == [True]
+            with hue.span("completed-while-advisory-http-is-stuck"):
+                pass
+            assert hue.force_flush_safe(200)
+            assert hue.export_status.ok
+    finally:
+        release.set()
+        hue.shutdown_safe(1000)
+
+
 def attrs(span):
     return {attribute.key: attribute.value for attribute in span.attributes}
 
@@ -38,6 +320,13 @@ def wait_for(condition, timeout=5.0):
 
 def queued(hue, count):
     return lambda: hue.export_status.queued_trace_records == count
+
+
+def flush_advisories(hue):
+    """Tests inspecting advisory acknowledgements wait for them explicitly, outside flush."""
+    result = hue.force_flush()
+    wait_for(lambda: not hue._span_exporter._advisory_lock.locked())
+    return result
 
 
 def split_placeholders(receiver):
@@ -77,9 +366,9 @@ def test_live_placeholders_announce_open_spans_with_start_time_input(receiver):
                     model.set_attribute("custom.large", "x" * 70_000)
                     model.set_attribute("custom.small", "kept")
                     wait_for(queued(hue, 2))
-                    assert hue.force_flush()
+                    assert flush_advisories(hue)
                     assert all(span.end_time_unix_nano == 0 for span in receiver.spans())
-        assert hue.force_flush()
+        assert flush_advisories(hue)
     pending, real = split_placeholders(receiver)
     assert len(receiver.spans()) == 4
     for name in ("agent.run", "chat test-model"):
@@ -110,7 +399,7 @@ def test_placeholder_is_dropped_when_its_span_ends_before_export(receiver):
         with hue.span("agent.run"):
             wait_for(queued(hue, 1))
         # The placeholder and its now-finished span share a batch; only the span is sent.
-        assert hue.force_flush()
+        assert flush_advisories(hue)
         assert hue.export_status.ok
     assert [(span.name, span.end_time_unix_nano > 0) for span in receiver.spans()] == [
         ("agent.run", True)
@@ -130,8 +419,8 @@ def test_markers_are_written_after_redaction_and_reserved_on_real_spans(receiver
             with hue.tool("lookup") as tool:
                 tool.set_input({"query": "sensitive-input"})
                 wait_for(queued(hue, 2))
-                assert hue.force_flush()
-        assert hue.force_flush()
+                assert flush_advisories(hue)
+        assert flush_advisories(hue)
     pending, real = split_placeholders(receiver)
     root, tool = pending["agent.run"], pending["execute_tool lookup"]
     assert attrs(root)["hue.span_type"].string_value == "pending_span"
@@ -150,8 +439,8 @@ def test_placeholders_follow_the_helper_content_policy(receiver):
         with hue.model("test-model", provider="synthetic") as model:
             model.set_input([{"role": "user", "content": "sensitive-question"}])
             wait_for(queued(hue, 1))
-            assert hue.force_flush()
-        assert hue.force_flush()
+            assert flush_advisories(hue)
+        assert flush_advisories(hue)
     pending, _ = split_placeholders(receiver)
     assert attrs(pending["chat test-model"])["gen_ai.request.model"].string_value == "test-model"
     assert "gen_ai.input.messages" not in attrs(pending["chat test-model"])
@@ -182,11 +471,11 @@ def test_placeholders_apply_the_content_policy_to_third_party_attributes(receive
             # An instrumentor records the request on the open span, outside Hue's helpers.
             span.set_attributes(content)
             wait_for(queued(hue, 1))
-            assert hue.force_flush()
+            assert flush_advisories(hue)
             (placeholder,) = receiver.spans()
         finally:
             span.end()
-        assert hue.force_flush()
+        assert flush_advisories(hue)
     keys = attrs(placeholder)
     assert placeholder.end_time_unix_nano == 0
     assert keys["hue.span_type"].string_value == "pending_span"
@@ -206,8 +495,8 @@ def test_failed_placeholder_only_export_is_not_a_failure(receiver, reply):
     with Hue(receiver.url, KEY, capture_content=False) as hue:
         with hue.span("agent.run"):
             wait_for(queued(hue, 1))
-            assert hue.force_flush()
-        assert hue.force_flush()
+            assert flush_advisories(hue)
+        assert flush_advisories(hue)
         status = hue.export_status
         assert status.ok and status.failed_trace_batches == 0
         assert status.dropped_trace_records == 0
@@ -236,14 +525,14 @@ def test_receiver_without_the_header_turns_live_spans_off_before_any_placeholder
             wait_for(queued(hue, 1))
             with hue.span("finished-step"):
                 pass
-            assert hue.force_flush()
+            assert flush_advisories(hue)
             status = hue.export_status
             assert status.live_spans_rejected and status.ok
             assert status.failed_trace_batches == 0
             with hue.span("after-rejection"):
                 time.sleep(0.8)
                 assert hue.export_status.queued_trace_records == 0
-        assert hue.force_flush()
+        assert flush_advisories(hue)
     assert request_ends(receiver.requests[0][2]) == [False]
     pending, real = split_placeholders(receiver)
     assert pending == {}
@@ -285,13 +574,13 @@ def test_receiver_without_the_header_gets_one_request_of_placeholders_at_most(re
         with hue.span("agent.run"):
             wait_for(queued(hue, 1))
             # No finished span is queued yet, so the export carries only the placeholder.
-            assert hue.force_flush()
+            assert flush_advisories(hue)
             status = hue.export_status
             assert status.live_spans_rejected and status.ok
             with hue.span("after-downgrade"):
                 time.sleep(0.8)
                 assert hue.export_status.queued_trace_records == 0
-        assert hue.force_flush()
+        assert flush_advisories(hue)
     assert request_ends(receiver.requests[0][2]) == [True]
     pending, real = split_placeholders(receiver)
     assert list(pending) == ["agent.run"]
@@ -313,12 +602,12 @@ def test_no_request_of_placeholders_follows_the_acknowledgement_that_turned_live
                     hue.span(f"burst-{index}", attributes={"gen_ai.request.model": large})
                 )
             wait_for(queued(hue, 80))
-            assert hue.force_flush()
+            assert flush_advisories(hue)
             assert hue.export_status.live_spans_rejected
             assert len([r for r in receiver.requests if r[0].endswith("/traces")]) == 1
             pending, _ = split_placeholders(receiver)
             assert 0 < len(pending) < 80
-        assert hue.force_flush()
+        assert flush_advisories(hue)
         assert hue.export_status.ok
 
 
@@ -332,8 +621,8 @@ def test_client_that_announces_nothing_is_not_flagged_by_a_header_less_receiver(
             time.sleep(0.8)
             with hue.span("finished-step"):
                 pass
-            assert hue.force_flush()
-        assert hue.force_flush()
+            assert flush_advisories(hue)
+        assert flush_advisories(hue)
         status = hue.export_status
         assert status.ok and not status.live_spans_rejected
     assert all(span.end_time_unix_nano > 0 for span in receiver.spans())
@@ -348,14 +637,14 @@ def test_current_receiver_rejecting_only_a_request_of_placeholders_is_ok(receive
             wait_for(queued(hue, 1))
             with hue.span("finished-step"):
                 pass
-            assert hue.force_flush()
+            assert flush_advisories(hue)
             status = hue.export_status
             assert status.ok and not status.live_spans_rejected
             # The header keeps live spans on: the next span is announced.
             with hue.span("later"):
                 wait_for(queued(hue, 1))
-                assert hue.force_flush()
-        assert hue.force_flush()
+                assert flush_advisories(hue)
+        assert flush_advisories(hue)
     assert request_ends(receiver.requests[0][2]) == [False]
     assert request_ends(receiver.requests[1][2]) == [True]
     pending, _ = split_placeholders(receiver)
@@ -371,14 +660,14 @@ def test_current_receiver_timestamp_rejection_fails_and_keeps_live_spans(receive
                 wait_for(queued(hue, 2))
                 with hue.span("bad-timestamp"):
                     pass
-                assert not hue.force_flush()
+                assert not flush_advisories(hue)
                 status = hue.export_status
                 assert status.failed_trace_batches == 1
                 assert not status.live_spans_rejected
                 with hue.span("later"):
                     wait_for(queued(hue, 1))
-                    hue.force_flush()
-        hue.force_flush()
+                    flush_advisories(hue)
+        flush_advisories(hue)
     assert request_ends(receiver.requests[0][2]) == [False]
     assert request_ends(receiver.requests[1][2]) == [True, True]
     pending, _ = split_placeholders(receiver)
@@ -407,7 +696,7 @@ def test_live_spans_opt_out_and_setup_keys_send_no_placeholders(receiver, factor
         with hue.span("agent.run"):
             time.sleep(0.8)
             assert hue.export_status.queued_trace_records == 0
-        assert hue.force_flush()
+        assert flush_advisories(hue)
     assert [span.end_time_unix_nano > 0 for span in receiver.spans()] == [True]
 
 
@@ -418,7 +707,7 @@ def test_placeholders_use_at_most_a_quarter_of_the_queue_and_are_never_dropped(r
         with hue.span("agent.run"):
             time.sleep(0.8)
             assert hue.export_status.queued_trace_records == 0
-        assert hue.force_flush()
+        assert flush_advisories(hue)
         assert hue.export_status.dropped_trace_records == 0
     assert [span.end_time_unix_nano > 0 for span in receiver.spans()] == [True]
 
@@ -482,7 +771,7 @@ def test_span_filtered_before_on_end_is_forgotten(receiver):
         wait_for(queued(hue, 1))
         span.end()
         # Its queued placeholder would never resolve, so it is discarded, not sent.
-        assert hue.force_flush()
+        assert flush_advisories(hue)
         assert hue.export_status.queued_trace_records == 0
         assert hue.export_status.dropped_trace_records == 0
         assert receiver.spans() == []
@@ -513,7 +802,7 @@ def test_only_hue_and_ai_spans_are_announced(receiver):
                                     # Every span started together; a sixth would be
                                     # announced by this tick too.
                                     time.sleep(0.6)
-                                    assert hue.force_flush()
+                                    assert flush_advisories(hue)
                                     announced = sorted(span.name for span in receiver.spans())
         assert announced == ["agent.step", "ai.streamText", "chat model", "retrieve", "workflow"]
     finally:
@@ -539,7 +828,7 @@ def test_announced_spans_are_forgotten_so_unended_spans_hold_no_tracking_slot(
             later.end()
         finally:
             abandoned.end()
-        assert hue.force_flush()
+        assert flush_advisories(hue)
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork regression")
@@ -578,7 +867,7 @@ def test_span_hooks_in_a_forked_child_never_wait_for_the_processor_lock(receiver
         holder.join(5)
     try:
         span.end()
-        assert hue.force_flush()
+        assert flush_advisories(hue)
         _, real = split_placeholders(receiver)
         assert list(real) == ["agent.run"]
     finally:

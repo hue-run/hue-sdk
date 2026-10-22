@@ -26,6 +26,147 @@ KEY = "synthetic-isolation-key"
 
 
 @pytest.mark.parametrize("enabled", [False, True])
+def test_oversized_labels_are_rejected_before_proportional_allocation(receiver, enabled):
+    import tracemalloc
+
+    value = "x" * (10 * 1024 * 1024)
+    hue = Hue(receiver.url, KEY, capture_content=False, live_spans=False, enabled=enabled)
+    calls = []
+    result = object()
+
+    def business():
+        with hue.subagent(value):
+            calls.append("subagent")
+        with hue.tool("lookup", mcp={"name": value, "provider": value}):
+            calls.append("tool")
+        with hue.context(workspace_id=value), hue.span("request"):
+            calls.append("request")
+        return result
+
+    try:
+        # The caller owns the large string; rejecting it must not allocate a second large copy.
+        tracemalloc.start()
+        try:
+            assert business() is result
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak < 256 * 1024
+        assert calls == ["subagent", "tool", "request"]
+        assert hue.export_status.instrumentation_failures == (4 if enabled else 0)
+        assert hue.force_flush() is not enabled
+    finally:
+        hue.shutdown_safe()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("metadata", ["attribute", "mcp"])
+@pytest.mark.parametrize(
+    "business_error", [None, RuntimeError("original"), asyncio.CancelledError()]
+)
+def test_metadata_capture_failures_preserve_application_work(
+    receiver, enabled, metadata, business_error
+):
+    hooks = []
+
+    class UnsafeList(list):
+        def __iter__(self):
+            hooks.append("iterate")
+            raise RuntimeError("synthetic attribute iterator failure")
+
+    class UnsafeMapping(dict):
+        def get(self, key, default=None):
+            hooks.append("lookup")
+            raise RuntimeError("synthetic metadata lookup failure")
+
+    hue = Hue(receiver.url, KEY, capture_content=False, enabled=enabled)
+    calls = []
+    result = object()
+
+    def business():
+        with hue.tool("effect", mcp=UnsafeMapping() if metadata == "mcp" else None) as span:
+            if metadata == "attribute":
+                span.set_attribute("custom", UnsafeList([1]))
+            calls.append("once")
+            if business_error is not None:
+                raise business_error
+            return result
+
+    try:
+        if business_error is None:
+            assert business() is result
+        else:
+            with pytest.raises(type(business_error)) as caught:
+                business()
+            assert caught.value is business_error
+        assert calls == ["once"]
+        assert hooks == (["lookup"] if enabled and metadata == "mcp" else [])
+        assert hue.export_status.instrumentation_failures == int(enabled)
+        assert hue.force_flush() is not enabled
+        assert len(receiver.spans()) == int(enabled)
+    finally:
+        hue.shutdown_safe()
+
+
+@pytest.mark.parametrize("over_limit", [False, True])
+def test_attribute_classification_bounds_native_arrays_and_preserves_business(receiver, over_limit):
+    from hue_sdk.snapshots import MAX_CONTENT_SNAPSHOT_NODES
+
+    count = MAX_CONTENT_SNAPSHOT_NODES if over_limit else MAX_CONTENT_SNAPSHOT_NODES - 1
+    value = [0] * count
+    hue = Hue(receiver.url, KEY, capture_content=False)
+    calls = []
+    try:
+        with hue.span("business") as span:
+            span.set_attribute("custom", value)
+            calls.append("once")
+            span.set_attribute("retained", "yes")
+        assert calls == ["once"] and value == [0] * count
+        assert hue.export_status.instrumentation_failures == int(over_limit)
+        assert hue.force_flush() is not over_limit
+        (record,) = receiver.spans()
+        attributes = {item.key: item.value for item in record.attributes}
+        assert attributes["retained"].string_value == "yes"
+        if over_limit:
+            assert "custom" not in attributes
+        else:
+            assert len(attributes["custom"].array_value.values) == count
+            assert all(item.int_value == 0 for item in attributes["custom"].array_value.values)
+    finally:
+        hue.shutdown_safe()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_concurrently_changing_builtin_metadata_does_not_abort_business(receiver, enabled):
+    value = {str(index): 0 for index in range(100_000)}
+    stop = Event()
+
+    def mutate():
+        while not stop.is_set():
+            value["changing"] = 1
+            time.sleep(0.0001)
+            value.pop("changing", None)
+            time.sleep(0.0001)
+
+    worker = Thread(target=mutate)
+    hue = Hue(receiver.url, KEY, capture_content=False, enabled=enabled)
+    calls = []
+    worker.start()
+    try:
+        for _ in range(5):
+            with hue.span("business") as span:
+                span.set_attribute("custom", value)
+                calls.append("once")
+        assert calls == ["once"] * 5
+        assert hue.export_status.instrumentation_failures == (5 if enabled else 0)
+        assert hue.force_flush() is not enabled
+    finally:
+        stop.set()
+        worker.join()
+        hue.shutdown_safe()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("business_error", [None, RuntimeError("original")])
 def test_tool_and_model_metadata_never_calls_application_conversion_hooks(
     receiver, enabled, business_error
