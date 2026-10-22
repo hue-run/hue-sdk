@@ -12,6 +12,8 @@ refuses to publish a version without a matching entry below.
 
 #### Fixed
 
+- `hue traces import` reads a Mastra MCP tool span (`mcp_tool: '<tool>' on '<server>'` in Braintrust)
+  as a call of that tool; it took the trailing quoted server label as the tool's name.
 - `hue traces import prepare` reads an OpenAI Responses request logged without its response, such
   as `{"model": "gpt-4.1-mini", "input": "Hello"}` or one with an empty `output`, and one whose
   `input` holds only untyped `{role, content}` messages; these were skipped as no recognized
