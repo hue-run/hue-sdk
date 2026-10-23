@@ -8,6 +8,20 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.24.1] - 2026-10-23
+
+#### Fixed
+
+- `hue eval --case <case>` over an answer-graded trace-to-case publication (one whose case pins
+  no simulated world) ran as a simulation in auto mode and was refused with "pins no world"
+  unless `--mode direct` was passed. The run kind now follows the pins of the version's cases
+  alone, for `--case`, `--set` and `--dataset-version` alike: every case with a world runs as a
+  simulation, every case without one runs direct, and a version holding both runs mixed. A forced
+  `--mode direct` over a case that pins a world is refused before a run exists, as `--mode
+  simulation` over a case that pins none already was. `CaseConversionPublication.environmentId`
+  and `.environmentVersionId` are typed nullable, as Hue returns them for such a case, and
+  `grading: "answer"` is read.
+
 ### [0.24.0] - 2026-10-22
 
 #### Added

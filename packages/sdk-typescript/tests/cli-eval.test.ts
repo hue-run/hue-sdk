@@ -45,6 +45,8 @@ function hueStandIn(
     frozen?: boolean;
     /** Cases of the version that pin no world, listed after the world case. */
     answerOnlyCases?: number;
+    /** The Scenario and its one case pin no world (an answer-only trace-to-case publication). */
+    answerOnlyScenario?: boolean;
     /** Answer creates as a deployment whose simulation gateway serves the world. */
     gateway?: boolean;
     /** Refuse trace exports with 400, drop their connection without an answer, or answer the
@@ -59,7 +61,7 @@ function hueStandIn(
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
   const projectId = options.projectId ?? randomUUID();
   const environmentId = randomUUID();
-  const environmentVersionId = randomUUID();
+  const environmentVersionId = options.answerOnlyScenario ? null : randomUUID();
   const dataset = {
     id: randomUUID(),
     name: "Refund flow",
@@ -2421,6 +2423,59 @@ describe("hue eval", () => {
     },
     SPAWN_TIMEOUT * 2,
   );
+
+  test("an answer-only Scenario runs direct in auto mode instead of being refused as a simulation", async () => {
+    const f = hueStandIn({ answerOnlyScenario: true });
+    const cwd = await workspace();
+    try {
+      const checked = await hue(["--case", "refund FLOW", "./hue-agent.ts", "--check", "--json"], {
+        cwd,
+        env: { HUE_BASE_URL: f.baseUrl },
+      });
+      expect(checked.stderr).not.toContain("pins no world");
+      expect(checked.status).toBe(0);
+      expect(JSON.parse(checked.stdout).check).toMatchObject({ ok: true, mode: "direct" });
+      expect(f.calls.experiments).toHaveLength(0);
+    } finally {
+      f.stop();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("a forced --mode is refused when the selected case cannot run that way", async () => {
+    const answerOnly = hueStandIn({ answerOnlyScenario: true });
+    const world = hueStandIn();
+    const cwd = await workspace();
+    try {
+      const simulation = await hue(
+        ["--case", "refund FLOW", "./hue-agent.ts", "--mode", "simulation", "--check", "--json"],
+        { cwd, env: { HUE_BASE_URL: answerOnly.baseUrl } },
+      );
+      expect(simulation.status).toBe(1);
+      expect(simulation.stderr).toContain("1 of the 1 case pins no world");
+      expect(JSON.parse(simulation.stdout).check).toMatchObject({ ok: false, mode: "simulation" });
+      const direct = await hue(
+        ["--case", "refund FLOW", "./hue-agent.ts", "--mode", "direct", "--check", "--json"],
+        { cwd, env: { HUE_BASE_URL: world.baseUrl } },
+      );
+      expect(direct.status).toBe(1);
+      expect(direct.stderr).toContain("1 of the 1 case pins a world");
+      expect(direct.stderr).toContain("Drop --mode direct");
+      expect(JSON.parse(direct.stdout).check).toMatchObject({ ok: false, mode: "direct" });
+      const run = await hue(["--case", "refund FLOW", "./hue-agent.ts", "--mode", "direct"], {
+        cwd,
+        env: { HUE_BASE_URL: world.baseUrl },
+      });
+      expect(run.status).toBe(1);
+      expect(run.stderr).toContain("1 of the 1 case pins a world");
+      expect(world.calls.experiments).toHaveLength(0);
+      expect(answerOnly.calls.experiments).toHaveLength(0);
+    } finally {
+      answerOnly.stop();
+      world.stop();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
 
   test(
     "a set mixing world and answer-only cases runs as one mixed run, and --mode simulation over it is refused before a run exists",

@@ -4,7 +4,7 @@ The `hue` executable ships in `@hue-run/sdk` (`dist/setup/cli.js`): `setup`, `re
 
 ## Sub-features
 
-- `cli-eval` runs a local agent against a case or eval set; `--check` is a no-create preflight. A set mixing World and answer-only cases runs as one `mixed` run (each case through its own kind's path, one experiment, its own checkpoint identity); `--mode simulation` over it is refused.
+- `cli-eval` runs a local agent against a case or eval set; `--check` is a no-create preflight. The run kind follows the pins of the version's cases alone (`runKindOf` in `src/cli/eval.ts`): an answer-only `--case` runs direct, a world case as a simulation, and a set mixing both as one `mixed` run (each case through its own kind's path, one experiment, its own checkpoint identity). A forced `--mode` a case cannot run is refused (`--mode simulation` over an answer-only case, `--mode direct` over a world case).
 - `cli-eval` defaults to four cases in flight in one-shot and worker modes. Explicit concurrency values override the default. Case files, environments and checkpoints remain isolated; existing serial checkpoints resume under the same agent revision.
 - `cli-eval-judges` dispatches pinned hosted model judges by default after outputs upload. `--no-judges` skips them; `--judges` remains accepted. `--no-output` skips automatic dispatch. Preflight and runs without pinned model judges request no model jobs. Interrupted dispatch resumes the uploaded run with the same job keys. Opting out with a pending dispatch stops before another agent execution.
 - `cli-login` validates a key and stores it in `.env.hue` with mode 0600.

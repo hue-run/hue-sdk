@@ -1125,10 +1125,12 @@ export interface CaseConversionPublication {
   datasetId: string;
   /** Frozen dataset version holding the published case. */
   datasetVersionId: string;
-  /** Environment identity of the simulated world. */
-  environmentId: string;
-  /** Immutable environment version the case pins. */
-  environmentVersionId: string;
+  /** Environment identity of the simulated world; null for an answer-graded case, which has none. */
+  environmentId: string | null;
+  /** Immutable environment version the case pins; null for an answer-graded case, which runs direct. */
+  environmentVersionId: string | null;
+  /** `answer`: the case grades the answer alone; absent for a case that publishes a world. */
+  grading?: "answer";
   /** Scorer identity of the published outcome checks. */
   scorerId: string;
   /** Immutable scorer version pinned by the Scenario for its outcome checks. */
