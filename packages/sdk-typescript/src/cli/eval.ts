@@ -1170,7 +1170,8 @@ type RunKind = "direct" | "simulation" | "mixed";
 
 /** The selection's cases and how they run. When `--mode` leaves it open, a version mixing cases
  * that pin a world with cases that pin none runs as one mixed run; direct means nothing pins a
- * simulated world, not a Scenario and no case of the version; anything else is a simulation. A
+ * simulated world, neither the selected Scenario's publication nor any case of the version (an
+ * answer-only `--case` has only that path); anything else is a simulation. A
  * simulation run cannot execute a case that pins no world, so `--mode simulation` over such
  * cases is refused. */
 async function inspectSelection(
@@ -1193,7 +1194,7 @@ async function inspectSelection(
       ? mode
       : worldCases > 0 && answerOnly > 0
         ? "mixed"
-        : worldCases === 0 && !pins.scenarioId && !pins.environmentVersionId
+        : worldCases === 0 && !pins.environmentVersionId
           ? "direct"
           : "simulation";
   const refusal =
