@@ -1168,12 +1168,41 @@ function parseMode(value: string | undefined): RunMode {
  * a fresh world (`simulation`), or each case through its own kind's path (`mixed`). */
 type RunKind = "direct" | "simulation" | "mixed";
 
-/** The selection's cases and how they run. When `--mode` leaves it open, a version mixing cases
- * that pin a world with cases that pin none runs as one mixed run; direct means nothing pins a
- * simulated world, neither the selected Scenario's publication nor any case of the version (an
- * answer-only `--case` has only that path); anything else is a simulation. A
- * simulation run cannot execute a case that pins no world, so `--mode simulation` over such
- * cases is refused. */
+/** How the selection's cases run, read from the one fact Hue publishes about each case: whether
+ * it pins a simulated world (`environmentVersionId`). A trace-to-case publication with no world
+ * (an answer-graded case, `grading: "answer"`) lists its case with a null pin, so selecting it
+ * through its Scenario decides nothing. Left open, every world case runs in a fresh world, every
+ * answer-only case runs direct, and a version holding both runs mixed; a forced `--mode` is
+ * refused when a case cannot run that way. */
+export function runKindOf(selection: { mode: RunMode; cases: number; worldCases: number }): {
+  kind: RunKind;
+  refusal?: string;
+} {
+  const { mode, cases, worldCases } = selection;
+  const answerOnly = cases - worldCases;
+  const kind: RunKind =
+    mode !== "auto"
+      ? mode
+      : worldCases > 0 && answerOnly > 0
+        ? "mixed"
+        : worldCases > 0
+          ? "simulation"
+          : "direct";
+  const count = (n: number, what: string) =>
+    `${n} of the ${cases} ${cases === 1 ? "case pins" : "cases pin"} ${what}`;
+  if (kind === "simulation" && answerOnly > 0)
+    return {
+      kind,
+      refusal: `${count(answerOnly, "no world")}, so a simulation run would fail ${answerOnly === 1 ? "it" : "them"} before the agent starts. ${mode === "simulation" ? "Drop --mode simulation: --mode auto runs the world cases and the answer-only cases together as one run" : "Put the answer-only cases in their own eval set"}.`,
+    };
+  if (kind === "direct" && worldCases > 0)
+    return {
+      kind,
+      refusal: `${count(worldCases, "a world")}, which a direct run would answer without ${worldCases === 1 ? "it" : "them"}. Drop --mode direct: --mode auto gives each case the kind it pins.`,
+    };
+  return { kind };
+}
+
 async function inspectSelection(
   client: EvaluationClient,
   pins: ScenarioPins,
@@ -1188,20 +1217,7 @@ async function inspectSelection(
     worldCases += page.items.filter((item) => item.environmentVersionId).length;
     after = page.nextCursor ?? undefined;
   } while (after);
-  const answerOnly = cases - worldCases;
-  const kind: RunKind =
-    mode !== "auto"
-      ? mode
-      : worldCases > 0 && answerOnly > 0
-        ? "mixed"
-        : worldCases === 0 && !pins.environmentVersionId
-          ? "direct"
-          : "simulation";
-  const refusal =
-    kind === "simulation" && answerOnly > 0
-      ? `${answerOnly} of the ${cases} ${cases === 1 ? "case pins" : "cases pin"} no world, so a simulation run would fail ${answerOnly === 1 ? "it" : "them"} before the agent starts. ${mode === "simulation" ? "Drop --mode simulation: --mode auto runs the world cases and the answer-only cases together as one run" : "Put the answer-only cases in their own eval set"}.`
-      : undefined;
-  return { kind, cases, worldCases, ...(refusal ? { refusal } : {}) };
+  return { cases, worldCases, ...runKindOf({ mode, cases, worldCases }) };
 }
 
 function toJson(

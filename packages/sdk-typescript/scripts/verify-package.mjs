@@ -1052,6 +1052,8 @@ const installedPackageTests = [
   "cli-output-safety.test.ts",
   "cli-eval-direct.test.ts",
   "cli-eval-judges.test.ts",
+  // The run-kind resolver (answer-only, world, mixed, forced `--mode`) from the packed dist.
+  "cli-eval-mode.test.ts",
   // `hue listen` against a stand-in for the listen routes, through the installed binary and dist.
   "cli-listen.test.ts",
   // `hue import langfuse` against stand-ins for Langfuse's API and Hue's receiver and upload routes.
