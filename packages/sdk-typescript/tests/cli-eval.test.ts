@@ -2437,6 +2437,7 @@ describe("hue eval", () => {
       expect(JSON.parse(checked.stdout).check).toMatchObject({ ok: true, mode: "direct" });
       expect(f.calls.experiments).toHaveLength(0);
     } finally {
+      f.stop();
       await rm(cwd, { recursive: true, force: true });
     }
   });
