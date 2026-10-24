@@ -83,6 +83,9 @@ function hue(
             assumptions: [{ app: "linear", collection: "issues", field: "priority", count: 2 }],
             notSimulated: [{ app: "slack", account: "T01", kind: "webhooks", count: 1 }],
             excluded: [],
+            // Sections Hue adds later: an empty one prints nothing, one with entries prints them.
+            readings: [],
+            samples: [{ app: "linear", instanceKey: "linear", kind: "issue", count: 2 }],
             truncated: true,
           },
         }
@@ -389,6 +392,8 @@ describe("hue world create", () => {
         "Not simulated: 1",
         "  slack (T01) webhooks: 1",
         "Excluded: none",
+        "samples: 2",
+        "  linear issue: 2",
         "The report lists its first rows only.",
         `Run your agent in it: hue world run ${VERSION} -- <command>`,
         "",

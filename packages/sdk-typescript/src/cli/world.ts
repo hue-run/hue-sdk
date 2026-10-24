@@ -866,6 +866,9 @@ const REPORT_SECTIONS: Record<string, { label: string; names: string[] }> = {
   excluded: { label: "Excluded", names: ["code"] },
 };
 
+/** The fields that say whose a report row is, not what it counts. */
+const ROW_IDENTITY = new Set(["app", "account", "instanceKey"]);
+
 /** The World's report by app account: each section's total, then a line per row, such as
  * `linear issues: 1200`. A section Hue adds later prints as it comes. */
 function printReport(print: (line: string) => void, report: JsonObject) {
@@ -875,18 +878,25 @@ function printReport(print: (line: string) => void, report: JsonObject) {
       continue;
     }
     const section = Object.hasOwn(REPORT_SECTIONS, key) ? REPORT_SECTIONS[key] : undefined;
-    if (!section || !Array.isArray(value)) {
-      print(`${section?.label ?? key}: ${describe(value)}`);
+    if (!Array.isArray(value)) {
+      // A value Hue adds later prints as it comes, and only when it holds something.
+      const shown = value === null || value === undefined ? "" : describe(value);
+      if (shown) print(`${section?.label ?? key}: ${shown}`);
       continue;
     }
     const rows = value.filter(isObject);
+    // A section Hue adds later prints only when it has entries, its rows named by their fields.
+    if (!section && !rows.length) continue;
     const count = (row: JsonObject) => (typeof row.count === "number" ? row.count : 0);
     print(
-      `${section.label}: ${rows.length ? rows.reduce((sum, row) => sum + count(row), 0) : "none"}`,
+      `${section?.label ?? key}: ${rows.length ? rows.reduce((sum, row) => sum + count(row), 0) : "none"}`,
     );
     for (const row of rows.slice(0, LISTED)) {
       const account = typeof row.account === "string" && row.account ? ` (${row.account})` : "";
-      const name = section.names.map((field) => text(row[field], "?")).join(".");
+      const names =
+        section?.names ??
+        Object.keys(row).filter((field) => !ROW_IDENTITY.has(field) && field !== "count");
+      const name = names.map((field) => text(row[field], "?")).join(".");
       print(`  ${text(row.app, "?")}${account} ${name}: ${count(row)}`);
     }
     if (rows.length > LISTED) print(`  ... and ${rows.length - LISTED} more`);
