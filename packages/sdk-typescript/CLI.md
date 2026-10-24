@@ -328,8 +328,8 @@ A World is filled from your files, from a description, or both:
 - `--files <dir>` uploads every file under the directory, hidden files skipped, exactly as it is.
   With one app in `--apps` every file is that app's; with several, each app's files go in
   `<dir>/<app>/`, and a file outside them is refused before anything is sent. Each file's path
-  under its app's directory (`channels/general/2026-01-05.json`) is sent as its `name`. An empty
-  file is skipped with a note.
+  in the export is sent as its `name`: its path under `<dir>`, or with several apps under
+  `<dir>/<app>/` (`channels/general/2026-01-05.json`). An empty file is skipped with a note.
 - `--describe "<text>"` asks Hue to generate the apps' data from the description.
   `--dry-run` prints the outline and estimate Hue answers and creates nothing.
 

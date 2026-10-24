@@ -389,6 +389,24 @@ describe("hue world create", () => {
     ]);
   });
 
+  test("names one app's files by their paths under --files, so none share a name", async () => {
+    const stand = hue();
+    const dir = await scratch();
+    await mkdir(join(dir, "data", "linear"), { recursive: true });
+    await writeFile(join(dir, "data", "issues.json"), '[{"id":"a"}]');
+    await writeFile(join(dir, "data", "linear", "issues.json"), '[{"id":"b"}]');
+    const result = await world(
+      ["create", "--apps", "linear", "--files", "data", "--origin", stand.origin],
+      { cwd: dir },
+    );
+    expect(result.code).toBe(0);
+    const sources = stand.creations[0]!.sources as { files: Declared[] };
+    expect(sources.files[0]!.files.map((file) => file.name)).toEqual([
+      "issues.json",
+      "linear/issues.json",
+    ]);
+  });
+
   test("creates a World from a description alone, and previews one with --dry-run", async () => {
     const stand = hue({ statuses: ["generating", "ready"] });
     const preview = await world([
