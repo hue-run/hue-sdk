@@ -8,6 +8,28 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.25.0] - 2026-10-24
+
+#### Added
+
+- `hue world create --apps <list>` makes a World of Hue's simulated apps, several apps in one
+  World, through `POST /api/v1/world-creations`. `--files <dir>` uploads each file's exact bytes
+  to the signed URL Hue answers and names it by its path in the export (with several apps, each
+  app's files go in `<dir>/<app>/`),
+  `--describe "<text>"` asks Hue to generate the data, and both can be combined. The command
+  marks the uploads done, waits up to `--wait` seconds (default 900) for the World, and prints
+  its URL, its World version and Hue's report by app account of what it stored, normalized, stood
+  in for, assumed, does not simulate and excluded. `--dry-run` shows a description's outline and estimate and creates
+  nothing. Requires a Hue deployment that serves the World creation routes.
+- `hue world run <world version> -- <command>` starts an instance (`POST /api/v1/instances`),
+  runs the command with the instance's variables (`HUE_SIM_<SURFACE>_URL`, `HUE_WORLD_TOKEN`,
+  `HUE_WORLD_NOW`, and `HUE_MCP_CONFIG` naming an owner-only `mcpServers` file removed afterwards)
+  and without Hue project credentials, finishes the instance as completed or abandoned by the
+  command's exit code, and prints the calls the command made, what it changed and the coverage
+  gaps it met from the instance's evidence. Without a terminal the command runs in a process group
+  of its own, and whatever it leaves running is stopped before the instance is finished. It exits
+  with the command's code.
+
 ### [0.24.3] - 2026-10-24
 
 #### Fixed
@@ -2630,6 +2652,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.23 (2026-10-24): pin `@hue-run/sdk@0.25.0`.
 - 0.8.22 (2026-10-22): pin `@hue-run/sdk@0.24.0` and route Composio and Pipedream SDK calls through `instrumentComposio` / `instrumentPipedream`.
 - 0.8.18 (2026-10-20): the TypeScript installation command pins `@hue-run/sdk@0.21.1`.
 - 0.8.17 (2026-10-20): pin Python `0.13.4`, document released HTTP endpoint evidence, and include Node 26.

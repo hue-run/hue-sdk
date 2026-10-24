@@ -64,6 +64,7 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Run local evaluation targets and scorers against frozen datasets.
 - Resume result uploads and rescore stored outputs without rerunning the target.
 - Run an existing local agent callback against a fresh hosted simulated world.
+- Make a World of Hue's simulated apps from your files or a description, and run your agent in an instance of it with [`hue world`](./packages/sdk-typescript/CLI.md#create-a-world-and-run-your-agent-in-it).
 - Copy a Langfuse project's traces and media into Hue with [`hue import langfuse`](./packages/sdk-typescript/README.md#import-from-langfuse), from your machine with your own Langfuse keys.
 
 The TypeScript package is published on [npm](https://www.npmjs.com/package/@hue-run/sdk), with

@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.24.3`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.25.0`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -113,6 +113,8 @@ hue setup --format human  # explicit append-only terminal rendering
 hue setup --origin http://127.0.0.1:PORT # isolated loopback tests only
 hue login                 # validate keys created in Hue and store them in ./.env.hue
 hue mcp install --client claude-code # write the Hue MCP configuration for a coding agent
+hue world create --apps linear,slack --files ./data --describe "A 40-person support team" # make a World
+hue world run <world version id> -- node agent.js # run an agent in a fresh instance of it
 hue listen --subscription <id> --forward-to http://localhost:3000/slack/events # deliver events to a local bot
 hue import langfuse --from 2026-01-01 --dry-run # count a Langfuse project's traces, then import them
 hue traces import prepare ./exports --out ./exports.hue-import --json # convert exports into a bundle
@@ -308,6 +310,88 @@ authentication action. Both end with the prompt that verifies the connection:
 `Use the Hue MCP: call list_projects and confirm which project to inspect. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. For an organization connection, pass the project's id or slug as project_id on each call after list_projects.` A pinned installation instead verifies `connection.pinned: true` and omits `project_id`. `list_projects` returns a project key's one project too. Exit codes:
 `0` done or printed, `1` failed, `2` usage error.
 
+## Create a World and run your agent in it
+
+`hue world create` makes a World of Hue's simulated apps, several apps in one World, and
+`hue world run` starts an instance of it and runs your agent there. Both need a **Read and
+write** `HUE_API_KEY` (from the environment, `--env-path` or `./.env.hue`) and a Hue deployment
+that serves the World creation routes; `--origin` defaults to `HUE_BASE_URL`, then
+`https://app.hue.run`.
+
+```sh
+hue world create --apps linear,slack --name "Acme support" --files ./data --describe "A 40-person support team"
+hue world run <world version id> -- node agent.js
+```
+
+A World is filled from your files, from a description, or both:
+
+- `--files <dir>` uploads every file under the directory, hidden files skipped, exactly as it is.
+  With one app in `--apps` every file is that app's; with several, each app's files go in
+  `<dir>/<app>/`, and a file outside them is refused before anything is sent. Each file's path
+  in the export is sent as its `name`: its path under `<dir>`, or with several apps under
+  `<dir>/<app>/` (`channels/general/2026-01-05.json`). An empty file is skipped with a note.
+- `--describe "<text>"` asks Hue to generate the apps' data from the description.
+  `--dry-run` prints the outline and estimate Hue answers and creates nothing.
+
+Hue answers a signed upload URL per file. The command sends each file's exact bytes there (it
+checks a file on disk has not changed since it was hashed), retries a busy upload, then tells Hue
+the uploads are done. It prints each status as Hue reports it and waits up to `--wait` seconds
+(default 900; `0` returns once Hue has started). A ready World prints, on stdout:
+
+```text
+World: https://app.hue.run/...
+World version: <world version id>
+Stored: 1240
+  linear issues: 1200
+  linear users: 40
+Normalized: 3
+  linear date_format: 3
+Stand-ins: none
+...
+Run your agent in it: hue world run <world version id> -- <command>
+```
+
+The report is Hue's by app account: what it stored, normalized, stood in for, assumed, does not
+simulate and excluded. Each section prints its total, then a line per app (with its account
+when it has one) and collection, code, field or kind, with its count. A refused request or a failed World prints Hue's error code and its first
+faults (a code, a record kind, its id and a field, never a value). The signed URLs are never
+printed.
+
+`hue world run <world version id> -- <command> [args...]` starts an instance, then runs the
+command (no shell; everything after `--` is its arguments) with the instance's variables:
+one `HUE_SIM_<SURFACE ID>_URL` per simulated app, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW`,
+`HUE_WORLD_ID`, `HUE_MCP_CONFIG` naming an owner-only `mcpServers` file that is removed after the
+command, and `HUE_MCP_URL`, `HUE_MCP_TOKEN` and `HUE_MCP_EXPIRES_AT` for the first MCP mirror. The
+rest of your environment, including `--env-path` variables, is passed on except `HUE_API_KEY`,
+`HUE_MCP_KEY` and any other Hue project credential. When the command exits, the instance is
+finished as `completed` (exit code 0) or `abandoned`, and stderr lists the calls the command made,
+by app surface, operation and classification, what it changed, and the coverage gaps it met
+(calls the World does not simulate, and a gap reported to Hue):
+
+```text
+Calls: 4
+  2 × linear/graphql issues (ok)
+  1 × linear/graphql issueUpdate (ok)
+  1 × linear/graphql customerNeeds (unimplemented)
+Writes: 1
+  updated issues 5c3e... (/stateId, /updatedAt)
+Coverage gaps: 1
+  1 × linear/graphql customerNeeds (unimplemented)
+```
+
+The command's stdout and stderr are its own; Hue's lines go to stderr. Ctrl+C reaches the
+command; a second stop request a second or more after the first kills it, and the instance is
+still finished and reported. Without a terminal (in CI or a script) the command runs in a
+process group of its own: a stop request reaches everything it started, and whatever it leaves
+running when it exits is stopped (`SIGTERM`, then `SIGKILL` 5 seconds later) before the instance
+is finished. In a terminal the command keeps the terminal, so it can read from it, and Ctrl+C
+reaches everything it started. If the MCP configuration file cannot be written, the instance is
+abandoned. Exit codes: `create` exits `0` when the World is ready (or started
+with `--wait 0`, or previewed), `1` when it failed or is not ready in time, and `130` when stopped;
+`run` exits with the command's code (`128` plus the signal number when a signal ended it, `127`
+when it could not start), or `1` when the instance could not start or the command succeeded but
+Hue could not finish or report the instance. Both exit `2` for a usage error.
+
 ## Deliver simulated events to a local bot
 
 `hue listen` delivers a simulated world's events to a receiver on your machine, so an event-driven
@@ -381,8 +465,8 @@ and Hue never receives or stores them. The command is part of the `hue` executab
 #   LANGFUSE_PUBLIC_KEY=pk-lf-...
 #   LANGFUSE_SECRET_KEY=sk-lf-...
 #   LANGFUSE_BASE_URL=https://cloud.langfuse.com
-npx -y @hue-run/sdk@0.24.3 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.24.3 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.25.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.25.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` come from the environment or `--env-path`
@@ -927,7 +1011,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.24.3.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.25.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -938,7 +1022,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.24.3.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.25.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -980,10 +1064,10 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.24.3 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.24.3 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.24.3 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.24.3 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.25.0 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.25.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.25.0 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.25.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 One invocation creates one run holding every selected case; it prints the run URL
@@ -1021,7 +1105,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.24.3 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.25.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
