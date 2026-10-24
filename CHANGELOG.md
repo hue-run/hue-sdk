@@ -8,6 +8,19 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [Unreleased]
+
+#### Added
+
+- Local workers declare `world-model-reference:v1` beside `environment:v1` whenever they supply
+  `target`, so Hue offers them cases built from a trace and pinned to a user World (Hue refused
+  such runs with "Agent does not support World model references" before). `hue eval --worker`
+  declares it for command and adapter-file workers alike, and `localAgentCapabilities.modelReference`
+  exports the string; `registeredCapabilities` refuses it without a `target`. Hue keeps a registered
+  key and revision's capabilities fixed, so an existing worker registers under a new `--revision`
+  (or `agent.revision`) when it upgrades. The evaluation client sends `X-Hue-World-Reference: 1` on
+  every request, which Hue requires to read such a case.
+
 ### [0.24.1] - 2026-10-23
 
 #### Fixed
@@ -1901,6 +1914,14 @@ No registry release is claimed until publication and registry acceptance complet
 - Documented runtime and integration matrix, including dependency-resolution and cross-language content and delivery boundaries; verified release archives and registry bytes.
 
 ## hue-run (Python)
+
+### [Unreleased]
+
+#### Added
+
+- `EvaluationClient` sends `X-Hue-World-Reference: 1` on every request, which Hue requires to read
+  a case built from a trace and pinned to a user World. The Python package registers no local
+  worker, so it declares no capabilities.
 
 ### [0.13.5] - 2026-10-22
 

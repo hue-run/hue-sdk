@@ -290,7 +290,8 @@ class EvaluationClient:
             or not 1 <= max_attempts <= 10
         ):
             raise ValueError("max_attempts must be 1–10.")
-        self._headers = {"Authorization": f"Bearer {api_key}"}
+        # Runner-facing reads of a case pinned to a World model reference require the header.
+        self._headers = {"Authorization": f"Bearer {api_key}", "X-Hue-World-Reference": "1"}
         self._timeout = timeout_seconds
         self._max_attempts = max_attempts
         # Recorded media read back by digest: one file (``fetch``) or every digest part of a

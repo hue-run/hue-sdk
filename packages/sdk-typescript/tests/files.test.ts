@@ -1546,7 +1546,10 @@ describe("file-based cases", () => {
   test("registrations declare exactly the callbacks they can serve", () => {
     const agent = { key: "a", name: "A", revision: "1" };
     expect(() => registeredCapabilities({ agent })).toThrow("Supply target");
-    expect(registeredCapabilities({ agent, target: () => undefined })).toEqual(["environment:v1"]);
+    expect(registeredCapabilities({ agent, target: () => undefined })).toEqual([
+      "environment:v1",
+      "world-model-reference:v1",
+    ]);
     expect(registeredCapabilities({ agent, directTarget: () => undefined })).toEqual(["direct:v1"]);
     expect(
       registeredCapabilities({
@@ -1566,6 +1569,12 @@ describe("file-based cases", () => {
         directTarget: () => undefined,
       }),
     ).toThrow("environment:v1 requires a target callback");
+    expect(() =>
+      registeredCapabilities({
+        agent: { ...agent, capabilities: ["world-model-reference:v1"] },
+        directTarget: () => undefined,
+      }),
+    ).toThrow("world-model-reference:v1 requires a target callback");
   });
 });
 

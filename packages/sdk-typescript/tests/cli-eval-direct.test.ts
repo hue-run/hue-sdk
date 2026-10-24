@@ -1892,7 +1892,7 @@ describe("hue eval command workers", () => {
           expect(result.status).toBe(0);
           expect(result.stderr).toBe("");
           expect(standIn.calls.register[0]).toMatchObject({
-            capabilities: ["environment:v1", "direct:v1"],
+            capabilities: ["environment:v1", "world-model-reference:v1", "direct:v1"],
           });
           expect(standIn.calls.localRuns.at(-1)).toMatchObject({ state: "completed" });
           expect(standIn.calls.starts).toBe(kinds.length);
@@ -2026,7 +2026,9 @@ describe("hue eval command workers", () => {
           env: { HUE_BASE_URL: standIn.baseUrl },
         });
         expect(result.status).toBe(0);
-        expect(standIn.calls.register[0]).toMatchObject({ capabilities: ["environment:v1"] });
+        expect(standIn.calls.register[0]).toMatchObject({
+          capabilities: ["environment:v1", "world-model-reference:v1"],
+        });
         expect(standIn.calls.completions[0]).toMatchObject({
           state: "succeeded",
           output: { hasWorld: true, hasTools: true },
@@ -2061,7 +2063,7 @@ describe("hue eval command workers", () => {
         );
         expect(result.status).toBe(0);
         expect(standIn.calls.register[0]).toMatchObject({
-          capabilities: ["environment:v1", "direct:v1"],
+          capabilities: ["environment:v1", "world-model-reference:v1", "direct:v1"],
         });
         expect(standIn.calls.completions[0]).toMatchObject({
           state: "succeeded",

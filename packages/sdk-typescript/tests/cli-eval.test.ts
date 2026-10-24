@@ -2659,7 +2659,7 @@ describe("hue eval", () => {
           key: "refund-bot",
           name: "Refund bot",
           revision: "v7",
-          capabilities: ["environment:v1"],
+          capabilities: ["environment:v1", "world-model-reference:v1"],
           scorerDigests: [],
         });
         expect(f.calls.claims).toBeGreaterThanOrEqual(1);

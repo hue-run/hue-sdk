@@ -1651,6 +1651,7 @@ describe("installed evaluation API and runner contract", () => {
       port: 0,
       async fetch(request) {
         expect(request.headers.get("authorization")).toBe(`Bearer ${key}`);
+        expect(request.headers.get("x-hue-world-reference")).toBe("1");
         const path = new URL(request.url).pathname;
         const body = request.method === "POST" ? await request.json() : undefined;
         requests.push({ path, body });

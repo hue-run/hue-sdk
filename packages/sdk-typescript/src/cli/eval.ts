@@ -2107,7 +2107,7 @@ async function runWorker(
         key: agent.key,
         name: agent.name,
         revision: agent.revision,
-        capabilities: ["environment:v1", ...(values.capability ?? [])],
+        capabilities: ["environment:v1", "world-model-reference:v1", ...(values.capability ?? [])],
       },
       scorers: [],
       concurrency,

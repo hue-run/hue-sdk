@@ -372,7 +372,12 @@ registration with a new `--revision` when upgrading.
 
 On the outbound worker, supply `directTarget` beside or instead of `target`. Supplying
 `directTarget` registers the `direct:v1` capability and supplying `target` registers
-`environment:v1` (both strings are exported as `localAgentCapabilities`). Declare the file
+`environment:v1` and `world-model-reference:v1` (all three strings are exported as
+`localAgentCapabilities`). Hue offers a case built from a trace and pinned to a user World only to
+a registration that declares both; the evaluation client sends `X-Hue-World-Reference: 1` on every
+request, which Hue requires to read such a case. Hue keeps a registered key and revision's
+capabilities fixed, so a worker upgrading to an SDK that declares `world-model-reference:v1`
+registers under a new revision. Declare the file
 capabilities the agent accepts and returns — `input:docx`, `input:pdf`, `output:docx` and so on — so
 Hue matches them against each case's `hue.requiredCapabilities` metadata and offers only matching
 cases. A case pinned to a world whose manifest also holds agent-visible files is offered only to a

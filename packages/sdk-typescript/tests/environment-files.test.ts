@@ -766,6 +766,7 @@ describe("environment target files (environment-files:v1)", () => {
       "environment-files:v1",
       "input:pdf",
       "environment:v1",
+      "world-model-reference:v1",
     ]);
     // The letter is uploaded, verified and linked on completion as the primary document.
     expect(f.calls.completions).toHaveLength(1);
@@ -1090,9 +1091,12 @@ describe("environment target files (environment-files:v1)", () => {
         agent: { ...agent, capabilities: ["environment-files:v1", "input:pdf"] },
         target: () => undefined,
       }),
-    ).toEqual(["environment-files:v1", "input:pdf", "environment:v1"]);
+    ).toEqual(["environment-files:v1", "input:pdf", "environment:v1", "world-model-reference:v1"]);
     // An existing registration keeps its capabilities: the SDK never adds this one itself.
-    expect(registeredCapabilities({ agent, target: () => undefined })).toEqual(["environment:v1"]);
+    expect(registeredCapabilities({ agent, target: () => undefined })).toEqual([
+      "environment:v1",
+      "world-model-reference:v1",
+    ]);
   });
 });
 
@@ -1389,6 +1393,7 @@ describe("hue eval with a world case that carries files", () => {
       expect(run.status).toBe(0);
       expect(f.calls.registrations[0]!.capabilities).toEqual([
         "environment:v1",
+        "world-model-reference:v1",
         "environment-files:v1",
         "input:pdf",
       ]);

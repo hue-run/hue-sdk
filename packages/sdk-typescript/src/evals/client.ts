@@ -418,6 +418,8 @@ export class EvaluationClient {
         method,
         headers: {
           Authorization: `Bearer ${this.#apiKey}`,
+          // Runner-facing reads of a case pinned to a World model reference require it.
+          "X-Hue-World-Reference": "1",
           ...(payload ? { "Content-Type": "application/json" } : {}),
         },
         body: payload,
