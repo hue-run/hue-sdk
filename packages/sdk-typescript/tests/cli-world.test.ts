@@ -1131,7 +1131,7 @@ describe("hue world create --export-from", () => {
     );
   });
 
-  test("salesforce: describes each object and pages its live records with query", async () => {
+  test("salesforce: describes each object and pages queryAll, or query without IsDeleted", async () => {
     const stand = hue();
     const paths: string[] = [];
     // A custom object too wide for one query URL: 600 long field names.
@@ -1191,6 +1191,7 @@ describe("hue world create --export-from", () => {
         case "/query/01gN-200":
           return Response.json({ totalSize: 2, done: true, records: [{ Id: "a0N2" }] });
         case "/query":
+        case "/queryAll":
           if (url.searchParams.get("q")!.endsWith(" FROM User"))
             return Response.json({ totalSize: 1, done: true, records: [{ Id: "005A" }] });
           if (url.searchParams.get("q")!.endsWith(" FROM Note__c")) {
@@ -1253,19 +1254,19 @@ describe("hue world create --export-from", () => {
       "/sobjects/User/describe",
       "/query?q=SELECT+Id%2CUsername+FROM+User",
       "/sobjects/Account/describe",
-      "/query?q=SELECT+Id%2CName%2CIsDeleted+FROM+Account",
+      "/queryAll?q=SELECT+Id%2CName%2CIsDeleted+FROM+Account",
       "/query/01gA-2000",
       "/sobjects/Widget__c/describe",
       "/sobjects/Wide__c/describe",
     ]);
-    // The wide object is read in field groups: each within the URL budget, each with Id,
-    // together every field once.
+    // The wide object is read in field groups: each within the URL budget, each with Id and
+    // IsDeleted, together every field once.
     expect(wideQueries.length).toBeGreaterThan(1);
     for (const query of wideQueries) {
       expect(query.urlLength).toBeLessThanOrEqual(12_000);
-      expect(query.fields[0]).toBe("Id");
+      expect(query.fields.slice(0, 2)).toEqual(["Id", "IsDeleted"]);
     }
-    expect(wideQueries.flatMap((query) => query.fields.slice(1))).toEqual(["IsDeleted", ...wide]);
+    expect(wideQueries.flatMap((query) => query.fields.slice(2))).toEqual(wide);
     expect(result.stderr).toContain(`Salesforce: 1 Wide__c in ${wideQueries.length} field groups`);
     expect(result.stderr).toContain(
       `Salesforce: read 1 wide object in field groups to stay within the URL limit: Wide__c (${wideQueries.length}).`,
@@ -1294,7 +1295,7 @@ describe("hue world create --export-from", () => {
     const notes = exchanges.filter((item) => /Note__c|01gN/.test(item.request.url));
     expect(notes.map((item) => item.request.url.replace(/^.*v67\.0/, ""))).toEqual([
       "/sobjects/Note__c/describe",
-      "/query?q=SELECT+Id%2CIsDeleted%2CBody__c+FROM+Note__c",
+      "/queryAll?q=SELECT+Id%2CIsDeleted%2CBody__c+FROM+Note__c",
       "/query/01gN-200",
     ]);
   });
