@@ -104,11 +104,13 @@ export interface DatasetVersion {
   /** Digest of the frozen content, or `null` for a draft. */
   contentDigest: string | null;
 }
-/** A stored case: inputs, an optional reference output and metadata. */
 /** A case's frozen World model selection: Hue prepares its runtime World at execution. */
 export interface WorldModelReference {
+  /** The World model the case was built against. */
   modelId: string;
+  /** When the model's state was captured, as an RFC 3339 timestamp. */
   representedAt: string;
+  /** The model generation the case freezes. */
   generation: string;
 }
 
@@ -121,6 +123,7 @@ export function pinsWorld(item: {
   return Boolean(item.environmentVersionId || item.worldModelReference);
 }
 
+/** A stored case: inputs, an optional reference output and metadata. */
 export interface DatasetCase {
   /** Case ID. */
   id: string;
