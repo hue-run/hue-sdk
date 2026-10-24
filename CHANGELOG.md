@@ -8,7 +8,7 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### [Unreleased]
+### [0.24.2] - 2026-10-24
 
 #### Added
 
@@ -1915,7 +1915,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### [Unreleased]
+### [0.13.6] - 2026-10-24
 
 #### Added
 
