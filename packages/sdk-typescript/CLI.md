@@ -320,6 +320,7 @@ that serves the World creation routes; `--origin` defaults to `HUE_BASE_URL`, th
 
 ```sh
 hue world create --apps linear,slack --name "Acme support" --files ./data --describe "A 40-person support team"
+hue world create --apps linear --export-from linear
 hue world run <world version id> -- node agent.js
 ```
 
@@ -332,6 +333,25 @@ A World is filled from your files, from a description, or both:
   `<dir>/<app>/` (`channels/general/2026-01-05.json`). An empty file is skipped with a note.
 - `--describe "<text>"` asks Hue to generate the apps' data from the description.
   `--dry-run` prints the outline and estimate Hue answers and creates nothing.
+- `--export-from <list>` reads the named apps on your machine with your own access and uploads
+  what they answer as each app's files, at most 25 MiB each. The app must also be in `--apps`.
+
+| App | Credentials | What is read |
+| --- | --- | --- |
+| `linear` | `LINEAR_API_KEY`, or `COMPOSIO_API_KEY` with `--composio-user` and `--composio-account` | The queries of Hue's world-import guide, every page, with each nested list completed past 50 records. A field Linear refuses for the key is dropped from its query and named. Each object is kept as Linear returns it, `__typename` included. |
+| `slack` | `SLACK_TOKEN` (a user token reads the most) | `auth.test`, `team.info`, `users.list`, `conversations.list` and `users.conversations`; per conversation `conversations.info`, `conversations.members` (not for a DM), `conversations.history` and the `conversations.replies` of each thread; `pins.list` and `bookmarks.list` per channel; `files.list`; `reactions.list`, `users.profile.get` and `dnd.teamInfo` for the token's own user. |
+| `salesforce` | `SALESFORCE_ACCESS_TOKEN` and `SALESFORCE_INSTANCE_URL` (the org's `https://<name>.my.salesforce.com`) | REST API v67.0: the token's user, `sobjects`, and for each standard object Hue simulates (`Account`, `Contact`, `Lead`, `Opportunity`, `Case`, `Task` and the rest of its list) and each queryable custom object, its describe and every page of `queryAll` (or `query` when it has no `IsDeleted` field) over its fields except base64, address and location ones. |
+| `gmail` | `GMAIL_ACCESS_TOKEN`, an OAuth access token with `gmail.readonly` | `profile`, `labels`, every page of `messages` with spam and trash, each message in `full` format and again in `raw` format when it has an attachment and is at most 190,000 bytes, and every page of `drafts`. Messages are read four at a time. |
+
+Slack, Salesforce and Gmail calls are recorded as exchanges,
+`{"request": {"method", "url", "body"}, "response": {"status", "headers", "body"}}`, with the
+answer and its headers as the app gave them (cookies left out); a conversation the token cannot
+read is recorded with Slack's `ok: false` answer. Through Composio, Linear's queries run with the
+`LINEAR_RUN_QUERY_OR_MUTATION` tool on the connected account, and the World also answers the
+Composio calls your agent makes with the same user id and connected account. The credentials
+travel only in request headers, are never recorded and are replaced with `[redacted]` in output.
+Rate limits are waited out as the app's answer asks, and a 5xx or a dropped connection is tried
+again after 1, 2, 4 and 8 seconds.
 
 Hue answers a signed upload URL per file. The command sends each file's exact bytes there (it
 checks a file on disk has not changed since it was hashed), retries a busy upload, then tells Hue

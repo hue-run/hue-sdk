@@ -1,6 +1,6 @@
 /**
- * The one HTTP exchange `hue world` makes with Hue and the upload store: bounded answers,
- * rate-limit waits and retries of transient failures.
+ * The one HTTP exchange `hue world` makes with Hue, the upload store and the apps it exports
+ * from: bounded answers, rate-limit waits and retries of transient failures.
  */
 
 /** Each request's own deadline unless it names another. */
@@ -39,6 +39,12 @@ export interface Answer {
   status: number;
   headers: Headers;
   body: unknown;
+}
+
+/** External text on one bounded line, for a message. */
+export function quote(text: string): string {
+  const line = text.replace(/[^\P{Cc}]|\p{Cf}/gu, " ").trim();
+  return line.length > 300 ? `${line.slice(0, 297)}...` : line;
 }
 
 /** Whole seconds of `Retry-After`, or undefined. */
