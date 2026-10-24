@@ -32,8 +32,13 @@ refuses to publish a version without a matching entry below.
   `gmail.readonly` token can read, each call as an exchange with its request headers (credentials
   left out) and its answer and response headers exactly as the app gave them. A page too large for one file is asked for again in smaller
   pages (Slack at half its limit, down to 100; Salesforce at `batchSize=200`); a Gmail message
-  that large is left out and named. Credentials travel
-  only in request headers and are never recorded or printed.
+  that large is left out and named. Credentials travel only in request headers and are never
+  recorded or printed.
+- `--pipedream-user` and `--pipedream-account` read the one `--export-from` app through a
+  Pipedream Connect account instead of its credentials: each request goes through the project's
+  Connect proxy (`/v1/connect/<project id>/proxy/<base64url of the URL>`) with a client-credentials
+  token from `PIPEDREAM_CLIENT_ID` and `PIPEDREAM_CLIENT_SECRET`, `PIPEDREAM_PROJECT_ID`, and the
+  `x-pd-environment` header from `PIPEDREAM_PROJECT_ENVIRONMENT`.
 - `hue world run <world version> -- <command>` starts an instance (`POST /api/v1/instances`),
   runs the command with the instance's variables (`HUE_SIM_<SURFACE>_URL`, `HUE_WORLD_TOKEN`,
   `HUE_WORLD_NOW`, and `HUE_MCP_CONFIG` naming an owner-only `mcpServers` file removed afterwards)
