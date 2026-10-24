@@ -13,7 +13,7 @@ Your agent runs in your process while a disposable simulated world runs in Hue. 
 authoritative and records an ordered journal; Hue does not execute your agent code or provider
 credentials.
 
-To make a World of Hue's simulated apps from your files or a description, and
+To make a World of Hue's simulated apps from your files, a description or your own app data, and
 to run an agent command in a fresh instance of it, use
 [`hue world create` and `hue world run`](CLI.md#create-a-world-and-run-your-agent-in-it).
 
