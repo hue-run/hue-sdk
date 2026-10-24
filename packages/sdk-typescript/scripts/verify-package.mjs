@@ -842,6 +842,134 @@ if (typeof zlib.zstdCompressSync === "function") {
       `Installed hue listen did not treat npm's copy of SIGINT as the same stop under Node (status ${listen.status}, signal ${listen.signal}): ${listen.output}`,
     );
 }
+// The installed `hue world` under Node: create uploads a file's exact bytes to the signed URL Hue
+// answers and prints the ready World; run hands a command the instance's variables without the
+// project key, finishes the instance and prints its calls.
+{
+  const key = "hue_sk_test_package_world_key";
+  const token = `hue_world_${"w".repeat(43)}`;
+  const creation = "6f9c1e2a-4b3d-4c5e-8f70-1a2b3c4d5e6f";
+  const version = "0b7e3f5c-9d2a-4e1b-a6c8-7f9e0d1c2b3a";
+  const instance = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
+  const stored = [];
+  const finished = [];
+  let origin = "";
+  const standIn = createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      const raw = Buffer.concat(chunks);
+      const path = new URL(request.url, origin).pathname;
+      const reply = (status, body) => {
+        response.statusCode = status;
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify(body));
+      };
+      if (path === "/upload/1") return (stored.push(raw), reply(200, {}));
+      if (request.headers.authorization !== `Bearer ${key}`) return reply(401, {});
+      const world = (status) => ({
+        worldCreation: {
+          id: creation,
+          status,
+          worldVersionId: status === "ready" ? version : null,
+          url: `${origin}/worlds/${creation}`,
+        },
+      });
+      if (path === "/api/v1/world-creations")
+        return reply(201, {
+          ...world("uploading"),
+          uploads: [{ app: "linear", file: 1, urlKey: "uploadUrl1", method: "PUT" }],
+          uploadUrl1: `${origin}/upload/1`,
+        });
+      if (path === `/api/v1/world-creations/${creation}/uploaded`)
+        return reply(200, world("importing"));
+      if (path === `/api/v1/world-creations/${creation}`) return reply(200, world("ready"));
+      if (path === "/api/v1/instances")
+        return reply(201, {
+          id: instance,
+          environmentVersionId: version,
+          clockNs: "0",
+          stateDigest: "s",
+          maxSteps: 500,
+          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          actions: [],
+          worldId: instance,
+          token,
+          surfaces: [],
+          env: {
+            HUE_WORLD_TOKEN: token,
+            HUE_SIM_LINEAR_GRAPHQL_URL: `${origin}/sim/linear/graphql`,
+          },
+          mcpConfig: { mcpServers: {} },
+        });
+      if (path === `/api/v1/instances/${instance}/finish`) {
+        finished.push(JSON.parse(raw.toString()));
+        return reply(200, {
+          id: instance,
+          status: "completed",
+          sealedAt: new Date().toISOString(),
+        });
+      }
+      if (path === `/api/v1/instances/${instance}/evidence`)
+        return reply(200, {
+          coverage: {},
+          ledger: {
+            items: [{ surface: "linear/graphql", operation: "issues", classification: "ok" }],
+          },
+          diff: { items: [] },
+        });
+      reply(404, {});
+    });
+  });
+  await new Promise((listening) => standIn.listen(0, "127.0.0.1", listening));
+  origin = `http://127.0.0.1:${standIn.address().port}`;
+  const directory = await mkdtemp(join(destination, "world-"));
+  const records = '[{"__typename":"Issue","id":"issue-1"}]\n';
+  await mkdir(join(directory, "data"));
+  await writeFile(join(directory, "data", "issues.json"), records);
+  const hue = (args) =>
+    new Promise((done, failed) => {
+      const child = spawn(
+        process.execPath,
+        [join(minimal, "node_modules/@hue-run/sdk/dist/setup/cli.js"), "world", ...args],
+        {
+          cwd: directory,
+          env: { PATH: process.env.PATH, HUE_API_KEY: key, HUE_BASE_URL: origin },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let output = "";
+      child.stdout.on("data", (chunk) => (output += chunk));
+      child.stderr.on("data", (chunk) => (output += chunk));
+      child.on("error", failed);
+      child.on("close", (status) => done({ status, output }));
+    });
+  const created = await hue(["create", "--apps", "linear", "--files", "data"]);
+  const record =
+    "const e = process.env; require('node:fs').writeFileSync('seen.json', JSON.stringify(" +
+    "{ sim: e.HUE_SIM_LINEAR_GRAPHQL_URL, token: e.HUE_WORLD_TOKEN, key: e.HUE_API_KEY ?? null }))";
+  const ran = await hue(["run", version, "--", process.execPath, "-e", record]);
+  standIn.close();
+  const seen = JSON.parse(await readFile(join(directory, "seen.json"), "utf8").catch(() => "{}"));
+  if (
+    created.status !== 0 ||
+    !created.output.includes(`World version: ${version}`) ||
+    stored.length !== 1 ||
+    stored[0].toString() !== records ||
+    ran.status !== 0 ||
+    !ran.output.includes("1 × linear/graphql issues (ok)") ||
+    finished[0]?.status !== "completed" ||
+    seen.sim !== `${origin}/sim/linear/graphql` ||
+    seen.token !== token ||
+    seen.key !== null ||
+    (created.output + ran.output).includes(key) ||
+    ran.output.includes(token)
+  )
+    throw new Error(
+      `Installed hue world did not create and run under Node: ${created.output}\n${ran.output}`,
+    );
+  console.log("world: installed hue world create and run work under Node");
+}
 // Evaluation/simulation users install the optional validation peer. Ajv remains separately
 // optional: without it the JSON Schema scorer reports a typed error instead of crashing.
 const evaluation = join(destination, "evaluation-consumer");
