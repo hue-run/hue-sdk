@@ -346,7 +346,9 @@ A World is filled from your files, from a description, or both:
 Slack, Salesforce and Gmail calls are recorded as exchanges,
 `{"request": {"method", "url", "body"}, "response": {"status", "headers", "body"}}`, with the
 answer and its headers as the app gave them (cookies left out); a conversation the token cannot
-read is recorded with Slack's `ok: false` answer. Through Composio, Linear's queries run with the
+read is recorded with Slack's `ok: false` answer. Each read an app refuses (a Slack `ok: false`,
+a Salesforce describe or query error, a Gmail list or message error) is also named on stderr, so
+a partial export shows as one. Through Composio, Linear's queries run with the
 `LINEAR_RUN_QUERY_OR_MUTATION` tool on the connected account, and the World also answers the
 Composio calls your agent makes with the same user id and connected account. The credentials
 travel only in request headers, are never recorded and are replaced with `[redacted]` in output.

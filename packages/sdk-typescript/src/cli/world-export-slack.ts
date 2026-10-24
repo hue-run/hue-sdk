@@ -35,6 +35,8 @@ export async function exportSlack(
   progress: (line: string) => void,
 ): Promise<JsonObject[]> {
   const exchanges: JsonObject[] = [];
+  /** The calls Slack refused, by method and error: kept as Slack answered them, and named. */
+  const refused = new Map<string, number>();
   /** One call with only the arguments named, recorded as sent and answered. */
   const call = async (method: string, args: Record<string, string> = {}): Promise<JsonObject> => {
     const query = new URLSearchParams(args).toString();
@@ -52,6 +54,10 @@ export async function exportSlack(
       throw new ExportError(
         `Slack refused the token (${typeof body.error === "string" ? quote(body.error) : `HTTP ${answer.status}`})`,
       );
+    if (body.ok !== true) {
+      const reason = `${method} ${typeof body.error === "string" ? quote(body.error) : `HTTP ${answer.status}`}`;
+      refused.set(reason, (refused.get(reason) ?? 0) + 1);
+    }
     return body;
   };
   /** Every page of a cursor list, each with the same arguments: Hue serves a four-kind
@@ -126,5 +132,12 @@ export async function exportSlack(
   await pages("reactions.list");
   await call("users.profile.get", { user: auth.user_id });
   await call("dnd.teamInfo");
+  if (refused.size) {
+    const total = [...refused.values()].reduce((sum, count) => sum + count, 0);
+    const reasons = [...refused].map(([reason, count]) => `${reason} ×${count}`);
+    progress(
+      `Slack: ${total} ${total === 1 ? "call" : "calls"} answered ok: false, kept as Slack answered them (${reasons.slice(0, 5).join(", ")}${reasons.length > 5 ? ", ..." : ""}).`,
+    );
+  }
   return exchanges;
 }

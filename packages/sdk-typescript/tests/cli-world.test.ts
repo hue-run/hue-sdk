@@ -1099,6 +1099,9 @@ describe("hue world create --export-from", () => {
       error: "not_in_channel",
     });
     expect(JSON.stringify(exchanges)).not.toContain(SLACK_TOKEN);
+    expect(result.stderr).toContain(
+      "Slack: 1 call answered ok: false, kept as Slack answered them (conversations.history not_in_channel ×1).",
+    );
   });
 
   test("salesforce: describes each object and pages queryAll, or query without IsDeleted", async () => {
@@ -1179,6 +1182,9 @@ describe("hue world create --export-from", () => {
       "/sobjects/Widget__c/describe",
     ]);
     expect(result.stderr).toContain("Salesforce: 3 Account");
+    expect(result.stderr).toContain(
+      "Salesforce: describing Widget__c answered HTTP 404; Widget__c is not exported.",
+    );
     const exchanges = (await json(stand.stored.get("salesforce-1"))) as {
       request: { url: string };
     }[];
@@ -1224,7 +1230,10 @@ describe("hue world create --export-from", () => {
         case "/messages/m1?format=raw":
           return Response.json({ id: "m1", raw: "RnJvbTogb3duZXI" });
         case "/drafts?maxResults=500":
-          return Response.json({ drafts: [{ id: "d1", message: { id: "m3" } }] });
+          return Response.json(
+            { error: { code: 403, errors: [{ reason: "insufficientPermissions" }] } },
+            { status: 403 },
+          );
       }
       return Response.json({ error: { code: 404 } }, { status: 404 });
     };
@@ -1254,7 +1263,13 @@ describe("hue world create --export-from", () => {
       "/messages/m1?format=raw",
       "/drafts?maxResults=500",
     ]);
-    expect(exchanges.every((item) => item.response.status === 200)).toBe(true);
+    // A refused list is recorded as Gmail answered it, and named.
+    expect(exchanges.map((item) => item.response.status)).toEqual([
+      200, 200, 200, 200, 200, 200, 200, 200, 403,
+    ]);
+    expect(result.stderr).toContain(
+      "Gmail: listing /drafts?maxResults=500 answered HTTP 403; the list is incomplete.",
+    );
     expect(JSON.stringify(exchanges)).not.toContain(token);
   });
 
@@ -1265,6 +1280,7 @@ describe("hue world create --export-from", () => {
       ["salesforce", "SALESFORCE_INSTANCE_URL"],
       ["gmail", "GMAIL_ACCESS_TOKEN"],
       ["jira", "--export-from reads linear, slack, salesforce, gmail"],
+      ["constructor", "--export-from reads linear, slack, salesforce, gmail"],
     ];
     for (const [app, message] of cases) {
       const result = await world([
