@@ -341,13 +341,19 @@ the uploads are done. It prints each status as Hue reports it and waits up to `-
 ```text
 World: https://app.hue.run/...
 World version: <world version id>
-Stored: ...
-Normalized: ...
+Stored: 1240
+  linear issues: 1200
+  linear users: 40
+Normalized: 3
+  linear date_format: 3
+Stand-ins: none
+...
 Run your agent in it: hue world run <world version id> -- <command>
 ```
 
-The report lines list what Hue stored, normalized, stood in for, does not simulate and assumed,
-as Hue reports them. A refused request or a failed World prints Hue's error code and its first
+The report is Hue's by app account: what it stored, normalized, stood in for, assumed, does not
+simulate and excluded. Each section prints its total, then a line per app (with its account
+when it has one) and collection, code, field or kind, with its count. A refused request or a failed World prints Hue's error code and its first
 faults (a code, a record kind, its id and a field, never a value). The signed URLs are never
 printed.
 
