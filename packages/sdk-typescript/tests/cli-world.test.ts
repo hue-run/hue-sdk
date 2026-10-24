@@ -1098,7 +1098,7 @@ describe("hue world create --export-from", () => {
       "dnd.teamInfo ",
     ]);
     const exchanges = (await json(stand.stored.get("slack-1"))) as {
-      request: { method: string; url: string; body: null };
+      request: { method: string; url: string; headers: Record<string, string>; body: null };
       response: { status: number; headers: Record<string, string>; body: unknown };
     }[];
     // The rate-limited attempt and the oversized page are not recorded.
@@ -1107,7 +1107,8 @@ describe("hue world create --export-from", () => {
       "Slack: a conversations.history page is larger than one file; asking for 499 a page.",
     );
     expect(exchanges[0]).toEqual({
-      request: { method: "GET", url: "https://slack.com/api/auth.test", body: null },
+      // The request's headers are kept without the token.
+      request: { method: "GET", url: "https://slack.com/api/auth.test", headers: {}, body: null },
       response: {
         status: 200,
         headers: expect.objectContaining({ "x-oauth-scopes": "channels:history,users:read" }),
@@ -1270,8 +1271,12 @@ describe("hue world create --export-from", () => {
       "Salesforce: describing Widget__c answered HTTP 404; Widget__c is not exported.",
     );
     const exchanges = (await json(stand.stored.get("salesforce-1"))) as {
-      request: { url: string };
+      request: { url: string; headers: Record<string, string> };
     }[];
+    // A query page keeps its query options header and loses the access token.
+    expect(
+      exchanges.find((item) => item.request.url.endsWith("/query/01gA-2000"))!.request.headers,
+    ).toEqual({ "sforce-query-options": "batchSize=2000" });
     expect(exchanges.map((item) => item.request.url)).toContain(
       "https://acme.my.salesforce.com/services/data/v67.0/query/01gA-2000",
     );

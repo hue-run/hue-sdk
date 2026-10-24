@@ -11,9 +11,9 @@ import {
 /**
  * `hue world create --export-from gmail`: reads a mailbox through Gmail's REST API with an access
  * token that has `gmail.readonly`, and records each call as an exchange
- * (`{request: {method, url, body}, response: {status, headers, body}}`), the answer exactly as
- * Gmail gave it. Every message, spam and trash included, is read in `full` format, and again in
- * `raw` format when it has an attachment and is small enough for the World to serve the
+ * (`{request: {method, url, headers, body}, response: {status, headers, body}}`), the answer
+ * exactly as Gmail gave it. Every message, spam and trash included, is read in `full` format, and
+ * again in `raw` format when it has an attachment and is small enough for the World to serve the
  * attachment's bytes. The token travels only in the `Authorization` header and is never recorded.
  */
 
@@ -54,14 +54,10 @@ export async function exportGmail(
   /** One call, recorded by the caller in the order the calls were made. */
   const get = async (path: string) => {
     const url = `${GMAIL_API_URL}${path}`;
-    const answer = await send(
-      "Gmail",
-      { method: "GET", url, headers: { authorization: `Bearer ${token}` } },
-      transport,
-      gmailWait,
-    );
+    const headers = { authorization: `Bearer ${token}` };
+    const answer = await send("Gmail", { method: "GET", url, headers }, transport, gmailWait);
     if (answer.status === 401) throw new ExportError("Gmail refused the access token (HTTP 401)");
-    return { answer, recorded: exchange(url, answer) };
+    return { answer, recorded: exchange({ url, headers }, answer) };
   };
   const call = async (path: string) => {
     const { answer, recorded } = await get(path);
