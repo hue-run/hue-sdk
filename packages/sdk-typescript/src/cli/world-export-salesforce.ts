@@ -123,8 +123,14 @@ export async function exportSalesforce(
 
   for (const name of new Set(names)) {
     const describe = await get(`${API}/sobjects/${name}/describe`);
+    if (describe.status !== 200) {
+      progress(
+        `Salesforce: describing ${name} answered HTTP ${describe.status}; ${name} is not exported.`,
+      );
+      continue;
+    }
     const fields =
-      describe.status === 200 && isObject(describe.body) && Array.isArray(describe.body.fields)
+      isObject(describe.body) && Array.isArray(describe.body.fields)
         ? describe.body.fields.filter(isObject)
         : [];
     const selected = fields
@@ -146,7 +152,12 @@ export async function exportSalesforce(
         throw new ExportError(`Salesforce answered an unexpected next page for ${name}`);
       page = await get(next, true);
     }
-    progress(`Salesforce: ${records} ${name}`);
+    // A failed page is kept as Salesforce answered it; the records after it are missing.
+    progress(
+      page.status === 200
+        ? `Salesforce: ${records} ${name}`
+        : `Salesforce: reading ${name} answered HTTP ${page.status} after ${records} records; the rest of ${name} is missing.`,
+    );
   }
   return exchanges;
 }

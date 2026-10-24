@@ -76,8 +76,12 @@ export async function exportGmail(
         pageToken ? `${path}&pageToken=${encodeURIComponent(pageToken)}` : path,
       );
       answers.push(answer);
+      if (answer.status !== 200) {
+        progress(`Gmail: listing ${path} answered HTTP ${answer.status}; the list is incomplete.`);
+        return answers;
+      }
       const next = isObject(answer.body) ? answer.body.nextPageToken : undefined;
-      if (answer.status !== 200 || typeof next !== "string" || !next) return answers;
+      if (typeof next !== "string" || !next) return answers;
       if (next === pageToken) throw new ExportError("Gmail answered the same page token twice");
       pageToken = next;
     }
@@ -86,7 +90,8 @@ export async function exportGmail(
   const profile = await call("/profile");
   if (profile.status !== 200)
     throw new ExportError(`Gmail answered HTTP ${profile.status} for the mailbox's profile`);
-  await call("/labels");
+  const labels = await call("/labels");
+  if (labels.status !== 200) progress(`Gmail: listing labels answered HTTP ${labels.status}.`);
   const ids = (await pages("/messages?includeSpamTrash=true&maxResults=500")).flatMap((page) =>
     isObject(page.body) && Array.isArray(page.body.messages)
       ? page.body.messages.flatMap((message) =>
@@ -97,12 +102,16 @@ export async function exportGmail(
   progress(`Gmail: ${ids.length} messages`);
   let raw = 0;
   let batches = 0;
+  let failed = 0;
   for (let index = 0; index < ids.length; index += CONCURRENCY) {
     const batch = ids.slice(index, index + CONCURRENCY);
     const full = await Promise.all(
       batch.map((id) => get(`/messages/${encodeURIComponent(id)}?format=full`)),
     );
-    for (const { recorded } of full) exchanges.push(recorded);
+    for (const { answer, recorded } of full) {
+      exchanges.push(recorded);
+      if (answer.status !== 200) failed++;
+    }
     const withAttachments = batch.filter((_, at) => {
       const message = full[at]!.answer.body;
       return (
@@ -115,12 +124,17 @@ export async function exportGmail(
     const raws = await Promise.all(
       withAttachments.map((id) => get(`/messages/${encodeURIComponent(id)}?format=raw`)),
     );
-    for (const { recorded } of raws) exchanges.push(recorded);
+    for (const { answer, recorded } of raws) {
+      exchanges.push(recorded);
+      if (answer.status !== 200) failed++;
+    }
     raw += raws.length;
     if (++batches % 250 === 0)
       progress(`Gmail: read ${index + batch.length} of ${ids.length} messages`);
   }
   if (raw) progress(`Gmail: ${raw} messages read again for their attachments`);
+  // A failed read is kept as Gmail answered it; that message is missing from the World.
+  if (failed) progress(`Gmail: ${failed} message reads failed; those messages are incomplete.`);
   await pages("/drafts?maxResults=500");
   return exchanges;
 }

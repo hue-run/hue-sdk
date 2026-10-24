@@ -336,7 +336,7 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
     throw new UsageError("--describe needs the text that describes the data");
   const exportFrom = list(values["export-from"]);
   for (const app of exportFrom) {
-    if (!(app in EXPORTERS))
+    if (!Object.hasOwn(EXPORTERS, app))
       throw new UsageError(
         `--export-from reads ${Object.keys(EXPORTERS).join(", ")}; for another app, export its data yourself and pass --files`,
       );
@@ -536,7 +536,7 @@ function exportersFor(
           "--export-from gmail reads GMAIL_ACCESS_TOKEN, an OAuth access token with gmail.readonly",
         );
       exporters.set(app, (transport) => exportGmail(token, transport, ctx.note));
-    } else {
+    } else if (app === "salesforce") {
       const accessToken = secret("SALESFORCE_ACCESS_TOKEN");
       const origin = salesforceOrigin(env.SALESFORCE_INSTANCE_URL?.trim() ?? "");
       if (!accessToken || !origin)
