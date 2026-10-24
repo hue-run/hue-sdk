@@ -988,6 +988,7 @@ describe("hue world create --export-from", () => {
 
   test("slack: records every call of the list as an exchange, answers and headers as Slack gave them", async () => {
     const stand = hue();
+    const members = Array.from({ length: 51 }, (_, index) => `U${index + 1}`);
     const calls: string[] = [];
     let limited = false;
     const slack: Handler = (request) => {
@@ -1006,8 +1007,9 @@ describe("hue world create --export-from", () => {
         case "auth.test":
           return ok({ user_id: "U1", team_id: "T1" });
         case "users.list":
+          // 51 members over two pages, so dnd.teamInfo takes two calls.
           return args.cursor
-            ? ok({ members: [{ id: "U2" }], ...done })
+            ? ok({ members: members.slice(1).map((id) => ({ id })), ...done })
             : ok({ members: [{ id: "U1" }], response_metadata: { next_cursor: "users-2" } });
         case "conversations.list":
           return ok({
@@ -1095,7 +1097,8 @@ describe("hue world create --export-from", () => {
       "reactions.list ",
       "reactions.list page=2",
       "users.profile.get user=U1",
-      "dnd.teamInfo ",
+      `dnd.teamInfo ${new URLSearchParams({ users: members.slice(0, 50).join(",") })}`,
+      `dnd.teamInfo ${new URLSearchParams({ users: members.slice(50).join(",") })}`,
     ]);
     const exchanges = (await json(stand.stored.get("slack-1"))) as {
       request: { method: string; url: string; headers: Record<string, string>; body: null };
