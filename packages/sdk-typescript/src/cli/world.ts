@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -8,7 +8,12 @@ import { parseArgs, parseEnv } from "node:util";
 import { isLoopbackHost } from "../config.js";
 import { sdkVersion } from "../version.js";
 import { createWorldClient, HueWorldError, type WorldClient } from "../world/client.js";
-import { agentEnvironment, worldHandoff, writeMcpConfig } from "../world/world.js";
+import {
+  agentEnvironment,
+  worldHandoff,
+  writeMcpConfig,
+  type McpConfigFile,
+} from "../world/world.js";
 import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
 import {
   isObject,
@@ -53,6 +58,8 @@ const UPLOAD_TIMEOUT_MS = 300_000;
 /** A stop request this soon after the first is the same one: `npx` forwards the terminal's
  * SIGINT to a process group that already received it. */
 const REPEATED_STOP_MS = 1_000;
+/** How long what a command left running gets to exit after SIGTERM before SIGKILL. */
+const COMMAND_KILL_GRACE_MS = 5_000;
 /** How long a finished instance's evidence is waited for while Hue seals it. */
 const SEAL_WAIT_MS = 30_000;
 /** Lines listed per section of a run's summary. */
@@ -324,11 +331,13 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
     };
     const hue = { origin, apiKey };
     const answer = await hueJson(ctx, hue, "POST", "/api/v1/world-creations", {
-      idempotencyKey: randomUUID(),
-      name,
-      apps: apps.map((app) => ({ app })),
-      ...(Object.keys(sources).length ? { sources } : {}),
-      ...(values["dry-run"] ? { dryRun: true } : {}),
+      body: {
+        idempotencyKey: randomUUID(),
+        name,
+        apps: apps.map((app) => ({ app })),
+        ...(Object.keys(sources).length ? { sources } : {}),
+        ...(values["dry-run"] ? { dryRun: true } : {}),
+      },
     });
     if (values["dry-run"]) {
       ctx.out("Dry run: Hue created nothing.");
@@ -360,7 +369,7 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
       }
       await ctx.sleep(POLL_MS);
       creation = creationOf(
-        await hueJson(ctx, hue, "GET", `/api/v1/world-creations/${creation.id}`),
+        await hueJson(ctx, hue, "GET", `/api/v1/world-creations/${creation.id}`, { deadline }),
       );
     }
     const where = creation.url ?? url;
@@ -542,13 +551,14 @@ async function upload(ctx: Context, answer: JsonObject, groups: Map<string, Uplo
 }
 
 /** One request to a Hue JSON route with retries of transient failures; the same body and
- * idempotency key are sent each time. Resolves to the answer's JSON object. */
+ * idempotency key are sent each time. A request with a `deadline` (a `performance.now()` time)
+ * waits for Hue to slow down only until then. Resolves to the answer's JSON object. */
 async function hueJson(
   ctx: Context,
   hue: { origin: string; apiKey: string },
   method: "GET" | "POST",
   path: string,
-  body?: JsonObject,
+  { body, deadline }: { body?: JsonObject; deadline?: number } = {},
 ): Promise<JsonObject> {
   const answer = await send(
     "Hue",
@@ -563,7 +573,11 @@ async function hueJson(
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     },
     ctx.transport,
-    slowDown,
+    (answer) => {
+      const wait = slowDown(answer);
+      const left = deadline === undefined ? Infinity : deadline - performance.now();
+      return wait === undefined || left <= 0 ? undefined : Math.min(wait, left);
+    },
   );
   if (answer.status < 200 || answer.status >= 300)
     throw new WorldCommandError(refusal(answer.status, answer.body));
@@ -684,25 +698,28 @@ async function runInWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pro
   // Ctrl+C reached it too, and a second SIGINT is harmless to a command that exits on it) and
   // another a second later kills it. Before it starts or after it ends, a stop ends the wait for
   // Hue.
-  let running: ChildProcess | undefined;
+  let running: Running | undefined;
   let stoppedAt: number | undefined;
   const removeInterrupt = (io.onInterrupt ?? defaultOnInterrupt)((signal) => {
     const now = performance.now();
     if (!running) ctx.stopping.abort();
     else if (stoppedAt === undefined) {
       stoppedAt = now;
-      running.kill(signal);
-    } else if (now - stoppedAt >= REPEATED_STOP_MS) running.kill("SIGKILL");
+      running.signal(signal);
+    } else if (now - stoppedAt >= REPEATED_STOP_MS) running.signal("SIGKILL");
   });
   try {
     let instance;
     try {
-      instance = await client.createInstance({
-        idempotencyKey: randomUUID(),
-        worldVersionId: version,
-      });
+      instance = await client.createInstance(
+        { idempotencyKey: randomUUID(), worldVersionId: version },
+        { signal: ctx.stopping.signal },
+      );
     } catch (error) {
-      throw new WorldCommandError(instanceRefusal(error, version));
+      if (!ctx.stopping.signal.aborted)
+        throw new WorldCommandError(instanceRefusal(error, version));
+      ctx.note("Stopped before the instance started.");
+      return 130;
     }
     const finish = (status: "completed" | "abandoned") =>
       client.finishInstance(instance.id, { idempotencyKey: randomUUID(), status });
@@ -719,34 +736,38 @@ async function runInWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pro
     ctx.secrets.push(handoff.token);
     for (const server of Object.values(handoff.mcpConfig.mcpServers))
       for (const value of Object.values(server.headers ?? {})) ctx.secrets.push(value);
-    const mcp = await writeMcpConfig(handoff);
     let code: number;
+    // From here on the instance is finished whatever fails, so it never stays live until it
+    // expires.
     try {
-      ctx.note(
-        `World instance ${instance.id} of version ${version} is live until ${handoff.expiresAt}.`,
-      );
-      // The parent's variables minus Hue's project credentials and any other World's variables.
-      const childEnv = { ...agentEnvironment(handoff, { parent: env }), HUE_MCP_CONFIG: mcp.path };
-      code = await new Promise<number>((settle) => {
-        let settled = false;
-        const done = (value: number) => {
-          if (!settled) settle(value);
-          settled = true;
+      let mcp: McpConfigFile;
+      try {
+        mcp = await writeMcpConfig(handoff);
+      } catch (error) {
+        throw new WorldCommandError(
+          `Unable to write the MCP configuration file: ${(error as NodeJS.ErrnoException).code ?? "unwritable"}`,
+        );
+      }
+      try {
+        ctx.note(
+          `World instance ${instance.id} of version ${version} is live until ${handoff.expiresAt}.`,
+        );
+        // The parent's variables minus Hue's project credentials and any other World's variables.
+        const childEnv = {
+          ...agentEnvironment(handoff, { parent: env }),
+          HUE_MCP_CONFIG: mcp.path,
         };
-        const child = spawn(command[0]!, command.slice(1), { env: childEnv, stdio: "inherit" });
-        running = child;
-        child.on("error", (error: NodeJS.ErrnoException) => {
-          running = undefined;
-          ctx.note(`Unable to start ${command[0]}: ${error.code ?? error.message}`);
-          done(127);
-        });
-        child.on("exit", (exitCode, signal) => {
-          running = undefined;
-          done(exitCode ?? 128 + (signal ? (constants.signals[signal] ?? 0) : 0));
-        });
-      });
-    } finally {
-      await mcp.dispose();
+        code = await runCommand(ctx, command, childEnv, (handle) => (running = handle));
+      } finally {
+        await mcp
+          .dispose()
+          .catch(() =>
+            ctx.note(`Warning: could not remove ${mcp.path}; it held the instance's token.`),
+          );
+      }
+    } catch (error) {
+      await finish("abandoned").catch(() => undefined);
+      throw error;
     }
     const status = code === 0 ? "completed" : "abandoned";
     try {
@@ -774,6 +795,62 @@ async function runInWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pro
     throw error;
   } finally {
     removeInterrupt();
+  }
+}
+
+/** A running command; a stop signal reaches its whole process group where it has one. */
+interface Running {
+  signal: (signal: NodeJS.Signals) => void;
+}
+
+/**
+ * Runs the command without a shell and resolves to its exit code: 128 plus the signal number when
+ * a signal ended it, 127 when it could not start. Without a terminal the command gets a process
+ * group of its own, so a stop request reaches whatever it started, and what it leaves running
+ * when it exits is stopped (SIGTERM, then SIGKILL after 5 seconds), since it would still hold the
+ * World's token. With a terminal it stays in the terminal's foreground group, where Ctrl+C
+ * already reaches everything it started and it can still read the terminal.
+ */
+async function runCommand(
+  ctx: Context,
+  command: string[],
+  env: Record<string, string>,
+  track: (running: Running | undefined) => void,
+): Promise<number> {
+  const grouped = process.platform !== "win32" && process.stdin.isTTY !== true;
+  const child = spawn(command[0]!, command.slice(1), { env, stdio: "inherit", detached: grouped });
+  /** Signals the command's group; false once nothing in it is left. */
+  const group = (signal: NodeJS.Signals | 0) => {
+    if (!grouped || child.pid === undefined) return false;
+    try {
+      process.kill(-child.pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  track({ signal: (signal) => void (group(signal) || child.kill(signal)) });
+  try {
+    const code = await new Promise<number>((settle) => {
+      child.once("error", (error: NodeJS.ErrnoException) => {
+        ctx.note(`Unable to start ${command[0]}: ${error.code ?? error.message}`);
+        settle(127);
+      });
+      child.once("exit", (exitCode, signal) =>
+        settle(exitCode ?? 128 + (signal ? (constants.signals[signal] ?? 0) : 0)),
+      );
+    });
+    if (group(0)) {
+      group("SIGTERM");
+      const killAt = performance.now() + COMMAND_KILL_GRACE_MS;
+      while (group(0) && performance.now() < killAt)
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      // A group found empty is never signalled again: its ID may be reused.
+      if (group(0)) group("SIGKILL");
+    }
+    return code;
+  } finally {
+    track(undefined);
   }
 }
 

@@ -375,7 +375,12 @@ Coverage gaps: 1
 
 The command's stdout and stderr are its own; Hue's lines go to stderr. Ctrl+C reaches the
 command; a second stop request a second or more after the first kills it, and the instance is
-still finished and reported. Exit codes: `create` exits `0` when the World is ready (or started
+still finished and reported. Without a terminal (in CI or a script) the command runs in a
+process group of its own: a stop request reaches everything it started, and whatever it leaves
+running when it exits is stopped (`SIGTERM`, then `SIGKILL` 5 seconds later) before the instance
+is finished. In a terminal the command keeps the terminal, so it can read from it, and Ctrl+C
+reaches everything it started. If the MCP configuration file cannot be written, the instance is
+abandoned. Exit codes: `create` exits `0` when the World is ready (or started
 with `--wait 0`, or previewed), `1` when it failed or is not ready in time, and `130` when stopped;
 `run` exits with the command's code (`128` plus the signal number when a signal ended it, `127`
 when it could not start), or `1` when the instance could not start or the command succeeded but
