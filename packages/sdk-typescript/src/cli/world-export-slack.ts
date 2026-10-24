@@ -129,7 +129,13 @@ export async function exportSlack(
   }
   progress(`Slack: ${files} files`);
 
-  await pages("reactions.list");
+  // reactions.list hands out a cursor or, without one, numbered pages (`paging`): follow either.
+  const reactions = await pages("reactions.list");
+  const paging =
+    reactions.length === 1 && isObject(reactions[0]!.paging) ? reactions[0]!.paging : {};
+  if (reactions.length === 1 && reactions[0]!.ok === true && typeof paging.pages === "number")
+    for (let page = 2; page <= paging.pages; page++)
+      if ((await call("reactions.list", { page: String(page) })).ok !== true) break;
   await call("users.profile.get", { user: auth.user_id });
   await call("dnd.teamInfo");
   if (refused.size) {

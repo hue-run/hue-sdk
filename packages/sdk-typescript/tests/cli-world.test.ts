@@ -1036,6 +1036,12 @@ describe("hue world create --export-from", () => {
               args.channel === "C1" ? [{ ts: "1.000", reply_count: 2 }, { ts: "2.000" }] : [],
             has_more: false,
           });
+        case "reactions.list":
+          // Numbered pages, without a cursor.
+          return ok({
+            items: [{ type: "message" }],
+            paging: { page: Number(args.page ?? 1), pages: 2 },
+          });
         case "files.list":
           return ok({
             files: [{ id: `F${args.page}` }],
@@ -1075,6 +1081,7 @@ describe("hue world create --export-from", () => {
       "files.list count=100&page=1",
       "files.list count=100&page=2",
       "reactions.list ",
+      "reactions.list page=2",
       "users.profile.get user=U1",
       "dnd.teamInfo ",
     ]);
