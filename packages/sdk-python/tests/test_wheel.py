@@ -9,15 +9,15 @@ from importlib.metadata import version
 from pathlib import Path
 
 
-def test_installed_wheel_preparation_retries_and_cancellation(tmp_path):
+def test_installed_wheel_preparation_retries_and_cancellation(tmp_path, wheel):
     package = Path(__file__).resolve().parents[1]
-    dist = tmp_path / "dist"
     consumer = tmp_path / "consumer"
-    for command in (
-        [sys.executable, "-m", "build", "--no-isolation", str(package), "--outdir", str(dist)],
+    subprocess.run(
         ["uv", "venv", str(consumer), "--python", sys.executable],
-    ):
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     python = consumer / "bin" / "python"
     subprocess.run(
         [
@@ -26,7 +26,7 @@ def test_installed_wheel_preparation_retries_and_cancellation(tmp_path):
             "install",
             "--python",
             str(python),
-            str(next(dist.glob("*.whl"))),
+            str(wheel),
             f"pytest=={version('pytest')}",
         ],
         check=True,
@@ -58,16 +58,16 @@ def test_installed_wheel_preparation_retries_and_cancellation(tmp_path):
     assert "12 passed" in result.stdout
 
 
-def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):
+def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path, wheel):
     package = Path(__file__).resolve().parents[1]
     repository = package.parents[1]
-    dist = tmp_path / "dist"
     consumer = tmp_path / "consumer"
-    for command in (
-        [sys.executable, "-m", "build", "--no-isolation", str(package), "--outdir", str(dist)],
+    subprocess.run(
         ["uv", "venv", str(consumer), "--python", sys.executable],
-    ):
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     python = consumer / "bin" / "python"
     # Install the wheel against the OpenTelemetry release under test so the installed-package
     # check certifies the same combination as the in-process suite (including the CI job that
@@ -87,7 +87,7 @@ def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):
             "install",
             "--python",
             str(python),
-            f"{next(dist.glob('*.whl'))}[evals]",
+            f"{wheel}[evals]",
             *opentelemetry,
         ],
         check=True,
@@ -258,15 +258,15 @@ with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=
     )
 
 
-def test_installed_wheel_managed_target_boundaries(tmp_path):
+def test_installed_wheel_managed_target_boundaries(tmp_path, wheel):
     package = Path(__file__).resolve().parents[1]
-    dist = tmp_path / "dist"
     consumer = tmp_path / "consumer"
-    for command in (
-        [sys.executable, "-m", "build", "--no-isolation", str(package), "--outdir", str(dist)],
+    subprocess.run(
         ["uv", "venv", str(consumer), "--python", sys.executable],
-    ):
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     python = consumer / "bin" / "python"
     subprocess.run(
         [
@@ -275,7 +275,7 @@ def test_installed_wheel_managed_target_boundaries(tmp_path):
             "install",
             "--python",
             str(python),
-            f"{next(dist.glob('*.whl'))}[evals]",
+            f"{wheel}[evals]",
             "pytest>=8.3,<10",
         ],
         check=True,

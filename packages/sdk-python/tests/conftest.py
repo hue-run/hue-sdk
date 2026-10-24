@@ -2,16 +2,47 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
+import subprocess
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from threading import Lock, Thread
 
 import pytest
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from requests.structures import CaseInsensitiveDict
+
+
+@pytest.fixture(scope="session")
+def wheel(tmp_path_factory):
+    """All installed consumers use one candidate archive, including dependency-floor runs."""
+    supplied = os.environ.get("HUE_TEST_WHEEL")
+    if supplied:
+        path = Path(supplied).resolve()
+        assert path.is_file() and path.suffix == ".whl", "HUE_TEST_WHEEL must name a wheel"
+        return path
+    dist = tmp_path_factory.mktemp("wheel")
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--no-isolation",
+            str(Path(__file__).resolve().parents[1]),
+            "--outdir",
+            str(dist),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (path,) = dist.glob("*.whl")
+    return path
 
 
 @dataclass

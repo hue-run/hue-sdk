@@ -17,7 +17,6 @@ import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from threading import Event, Lock, Thread, current_thread
 from time import sleep
 from types import SimpleNamespace
@@ -1611,17 +1610,18 @@ def test_json_and_checkpoint_boundaries(tmp_path):
         store.release()
 
 
-def test_installed_wheel_runs_evaluations_and_schema_subprocess(evaluation_receiver, tmp_path):
-    package = Path(__file__).resolve().parents[1]
-    dist, consumer = tmp_path / "dist", tmp_path / "consumer"
-    for command in (
-        [sys.executable, "-m", "build", "--no-isolation", str(package), "--outdir", str(dist)],
+def test_installed_wheel_runs_evaluations_and_schema_subprocess(
+    evaluation_receiver, tmp_path, wheel
+):
+    consumer = tmp_path / "consumer"
+    subprocess.run(
         ["uv", "venv", str(consumer), "--python", sys.executable],
-    ):
-        subprocess.run(command, check=True, capture_output=True)
+        check=True,
+        capture_output=True,
+    )
     python = consumer / "bin" / "python"
     subprocess.run(
-        ["uv", "pip", "install", "--python", str(python), f"{next(dist.glob('*.whl'))}[evals]"],
+        ["uv", "pip", "install", "--python", str(python), f"{wheel}[evals]"],
         check=True,
         capture_output=True,
     )
