@@ -347,7 +347,9 @@ Run your agent in it: hue world run <world version id> -- <command>
 ```
 
 The report lines list what Hue stored, normalized, stood in for, does not simulate and assumed,
-as Hue reports them. The signed URLs are never printed.
+as Hue reports them. A refused request or a failed World prints Hue's error code and its first
+faults (a code, a record kind, its id and a field, never a value). The signed URLs are never
+printed.
 
 `hue world run <world version id> -- <command> [args...]` starts an instance, then runs the
 command (no shell; everything after `--` is its arguments) with the instance's variables:
