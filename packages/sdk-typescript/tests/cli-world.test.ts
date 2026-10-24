@@ -74,7 +74,12 @@ function hue(
           },
         }
       : {}),
-    ...(status === "failed" ? { errorCode: options.failCode ?? "records_invalid" } : {}),
+    ...(status === "failed"
+      ? {
+          errorCode: options.failCode ?? "records_invalid",
+          faults: [{ code: "missing_field", kind: "Issue", id: "issue-9", field: "title" }],
+        }
+      : {}),
   });
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -418,6 +423,7 @@ describe("hue world create", () => {
     expect(stand.stored.get("linear-1")?.toString()).toBe("[]");
     expect(result.sleeps).toContain(1000);
     expect(result.stderr).toContain("World creation failed: records_invalid.");
+    expect(result.stderr).toContain("  code missing_field, kind Issue, id issue-9, field title");
   });
 
   test("stops waiting at --wait and names where to follow the World", async () => {
@@ -452,6 +458,30 @@ describe("hue world create", () => {
     expect(result.stderr).toContain(
       "Error: Hue refused the request (HTTP 400, Invalid request).\n  apps.0.app: Unknown app: lineer",
     );
+  });
+
+  test("prints a refusal's code and faults", async () => {
+    const stand = hue({
+      createStatus: 422,
+      createBody: {
+        error: "not_yet_supported",
+        faults: [{ code: "several_apps_with_files", field: "sources.files" }],
+      },
+    });
+    const dir = await scratch();
+    await mkdir(join(dir, "data", "linear"), { recursive: true });
+    await mkdir(join(dir, "data", "slack"), { recursive: true });
+    await writeFile(join(dir, "data", "linear", "a.json"), "[]");
+    await writeFile(join(dir, "data", "slack", "b.json"), "[]");
+    const result = await world(
+      ["create", "--apps", "linear,slack", "--files", "data", "--origin", stand.origin],
+      { cwd: dir },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      "Error: Hue refused the request (HTTP 422, not_yet_supported).\n  code several_apps_with_files, field sources.files",
+    );
+    expect(stand.stored.size).toBe(0);
   });
 
   test("refuses usage errors before calling Hue", async () => {

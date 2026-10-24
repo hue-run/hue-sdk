@@ -368,6 +368,7 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
       ctx.note(
         `World creation failed${creation.errorCode ? `: ${creation.errorCode}` : ""}.${where ? ` See ${where}` : ""}`,
       );
+      for (const fault of creation.faults) ctx.note(`  ${describe(fault, 1)}`);
       if (creation.report) printReport(ctx.note, creation.report);
       return 1;
     }
@@ -404,9 +405,9 @@ function list(value: string | undefined): string[] {
   ];
 }
 
-/** A World creation as Hue answers it, from `worldCreation` or the answer itself. */
+/** The World creation every route answers in `worldCreation`. */
 function creationOf(answer: JsonObject) {
-  const creation = isObject(answer.worldCreation) ? answer.worldCreation : answer;
+  const creation = isObject(answer.worldCreation) ? answer.worldCreation : {};
   const text = (value: unknown) => (typeof value === "string" && value ? value : undefined);
   const id = text(creation.id);
   const status = text(creation.status);
@@ -416,13 +417,10 @@ function creationOf(answer: JsonObject) {
     id,
     status,
     url: text(creation.url),
-    worldVersionId: text(creation.worldVersionId) ?? text(answer.worldVersionId),
-    errorCode: text(creation.errorCode) ?? text(answer.errorCode),
-    report: isObject(creation.report)
-      ? creation.report
-      : isObject(answer.report)
-        ? answer.report
-        : undefined,
+    worldVersionId: text(creation.worldVersionId),
+    errorCode: text(creation.errorCode),
+    faults: Array.isArray(creation.faults) ? creation.faults.slice(0, 10) : [],
+    report: isObject(creation.report) ? creation.report : undefined,
   };
 }
 
@@ -506,12 +504,8 @@ async function upload(ctx: Context, answer: JsonObject, groups: Map<string, Uplo
       throw new WorldCommandError(
         `Hue asked for ${entry.app} file ${entry.file}, which the command did not send`,
       );
-    const location =
-      typeof entry.url === "string"
-        ? entry.url
-        : typeof entry.urlKey === "string"
-          ? answer[entry.urlKey]
-          : undefined;
+    // Each signed URL is answered beside the uploads, under the name `urlKey` gives.
+    const location = typeof entry.urlKey === "string" ? answer[entry.urlKey] : undefined;
     let target: URL;
     try {
       target = new URL(String(location));
@@ -577,7 +571,7 @@ async function hueJson(
   return answer.body;
 }
 
-/** What Hue's refusal says: its status, `error` and, for an invalid request, each issue. */
+/** What Hue's refusal says: its status, its `error` code and each fault or invalid field. */
 function refusal(status: number, json: unknown): string {
   const hint =
     status === 401
@@ -597,8 +591,11 @@ function refusal(status: number, json: unknown): string {
             `${Array.isArray(issue.path) ? issue.path.join(".") : ""}: ${typeof issue.message === "string" ? issue.message : ""}`,
         )
     : [];
+  const faults = Array.isArray(json.faults)
+    ? json.faults.slice(0, 10).map((fault) => describe(fault, 1))
+    : [];
   const error = typeof json.error === "string" ? json.error : undefined;
-  return `Hue refused the request (HTTP ${status}${error ? `, ${error}` : ""}).${hint}${issues.map((issue) => `\n  ${issue}`).join("")}`;
+  return `Hue refused the request (HTTP ${status}${error ? `, ${error}` : ""}).${hint}${[...faults, ...issues].map((line) => `\n  ${line}`).join("")}`;
 }
 
 /** A value of Hue's answer on one line: text as is, a number, a list's items or an object's
