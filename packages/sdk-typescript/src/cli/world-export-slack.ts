@@ -11,9 +11,9 @@ import {
 /**
  * `hue world create --export-from slack`: reads a Slack workspace through the Web API with the
  * user's own token (a user token reads the most) and records each call as an exchange
- * (`{request: {method, url, body}, response: {status, headers, body}}`), the answer exactly as
- * Slack gave it. Each list is paged until `response_metadata.next_cursor` is empty or `has_more`
- * is false. The token travels only in the `Authorization` header and is never recorded.
+ * (`{request: {method, url, headers, body}, response: {status, headers, body}}`), the answer
+ * exactly as Slack gave it. Each list is paged until `response_metadata.next_cursor` is empty or
+ * `has_more` is false. The token travels only in the `Authorization` header and is never recorded.
  */
 
 export const SLACK_API_URL = "https://slack.com/api/";
@@ -45,9 +45,10 @@ export async function exportSlack(
   const request = async (method: string, args: Record<string, string> = {}) => {
     const query = new URLSearchParams(args).toString();
     const url = `${SLACK_API_URL}${method}${query ? `?${query}` : ""}`;
+    const headers = { authorization: `Bearer ${token}` };
     const answer = await send(
       "Slack",
-      { method: "GET", url, headers: { authorization: `Bearer ${token}` } },
+      { method: "GET", url, headers },
       transport,
       ({ status, headers }) =>
         status === 429 ? (retryAfterMs(headers) ?? RATE_LIMIT_WAIT_MS) : undefined,
@@ -61,7 +62,12 @@ export async function exportSlack(
       body.ok === true
         ? undefined
         : `${method} ${typeof body.error === "string" ? quote(body.error) : `HTTP ${answer.status}`}`;
-    return { body, recorded: exchange(url, answer), label: `${method} ${query}`.trim(), reason };
+    return {
+      body,
+      recorded: exchange({ url, headers }, answer),
+      label: `${method} ${query}`.trim(),
+      reason,
+    };
   };
   /** Keeps a call's exchange, unless it is too large for one file: that one is named. */
   const record = ({ body, recorded, label, reason }: Awaited<ReturnType<typeof request>>) => {

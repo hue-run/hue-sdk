@@ -4,9 +4,9 @@ import { isObject, send, type Transport, type JsonObject } from "./world-http.js
 /**
  * `hue world create --export-from salesforce`: reads the org as the exporting user sees it
  * through the REST API with that user's access token, and records each call as an exchange
- * (`{request: {method, url, body}, response: {status, headers, body}}`), one per page, the
- * answer exactly as Salesforce gave it. The token travels only in the `Authorization` header and
- * is never recorded.
+ * (`{request: {method, url, headers, body}, response: {status, headers, body}}`), one per page,
+ * the answer exactly as Salesforce gave it. The token travels only in the `Authorization` header
+ * and is never recorded.
  */
 
 const API = "/services/data/v67.0";
@@ -80,16 +80,13 @@ export async function exportSalesforce(
   /** One call, as sent and answered; a query page asks for `batchSize` records. */
   const request = async (path: string, batchSize?: number) => {
     const url = `${org.origin}${path}`;
+    const headers = {
+      authorization: `Bearer ${org.accessToken}`,
+      ...(batchSize ? { "sforce-query-options": `batchSize=${batchSize}` } : {}),
+    };
     const answer = await send(
       "Salesforce",
-      {
-        method: "GET",
-        url,
-        headers: {
-          authorization: `Bearer ${org.accessToken}`,
-          ...(batchSize ? { "sforce-query-options": `batchSize=${batchSize}` } : {}),
-        },
-      },
+      { method: "GET", url, headers },
       transport,
       () => undefined,
     );
@@ -101,7 +98,7 @@ export async function exportSalesforce(
       throw new ExportError(
         "The org has used its Salesforce API requests for today (REQUEST_LIMIT_EXCEEDED)",
       );
-    return { answer, recorded: exchange(url, answer) };
+    return { answer, recorded: exchange({ url, headers }, answer) };
   };
   const get = async (path: string) => {
     const { answer, recorded } = await request(path);

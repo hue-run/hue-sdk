@@ -17,15 +17,25 @@ export class ExportError extends Error {
   }
 }
 
-/** One recorded call: the request as sent, without its credential, and the answer as given, with
- * its headers (Slack names a token's scopes only in `x-oauth-scopes`). Cookies are left out. */
-export function exchange(url: string, answer: Answer): JsonObject {
+/** Request headers that carry a credential: never recorded. */
+const CREDENTIAL_HEADERS = new Set(["authorization", "proxy-authorization", "cookie", "x-api-key"]);
+
+/** One recorded call: the request as sent, with its headers but without its credential, and the
+ * answer as given, with its headers (Slack names a token's scopes only in `x-oauth-scopes`).
+ * Cookies are left out. */
+export function exchange(
+  request: { url: string; headers: Record<string, string> },
+  answer: Answer,
+): JsonObject {
+  const sent = Object.fromEntries(
+    Object.entries(request.headers).filter(([name]) => !CREDENTIAL_HEADERS.has(name.toLowerCase())),
+  );
   const headers: Record<string, string> = {};
   answer.headers.forEach((value, name) => {
     if (name !== "set-cookie") headers[name] = value;
   });
   return {
-    request: { method: "GET", url, body: null },
+    request: { method: "GET", url: request.url, headers: sent, body: null },
     response: { status: answer.status, headers, body: answer.body },
   };
 }

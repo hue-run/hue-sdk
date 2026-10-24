@@ -344,7 +344,8 @@ A World is filled from your files, from a description, or both:
 | `gmail` | `GMAIL_ACCESS_TOKEN`, an OAuth access token with `gmail.readonly` | `profile`, `labels`, every page of `messages` with spam and trash, each message in `full` format and again in `raw` format when it has an attachment and is at most 190,000 bytes, and every page of `drafts`. Messages are read four at a time. |
 
 Slack, Salesforce and Gmail calls are recorded as exchanges,
-`{"request": {"method", "url", "body"}, "response": {"status", "headers", "body"}}`, with the
+`{"request": {"method", "url", "headers", "body"}, "response": {"status", "headers", "body"}}`:
+the request's headers without its credential (`Authorization`, `X-Api-Key`, cookies), and the
 answer and its headers as the app gave them (cookies left out); a conversation the token cannot
 read is recorded with Slack's `ok: false` answer. Each read an app refuses (a Slack `ok: false`,
 a Salesforce describe or query error, a Gmail list or message error) is also named on stderr, so
