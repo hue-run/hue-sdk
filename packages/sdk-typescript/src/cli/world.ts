@@ -112,6 +112,8 @@ usage error and 130 when stopped before the command ran.`;
 class UsageError extends Error {}
 /** A failure that ends the command with exit code 1; its message names no credential. */
 class WorldCommandError extends Error {}
+/** A stop that came after the instance started and before the command did. */
+class StoppedBeforeCommand extends Error {}
 
 /** One file to upload: its app, its path in the app's export, a name for messages, its size and
  * digest, and its exact bytes. */
@@ -471,8 +473,9 @@ async function filesFrom(ctx: Context, directory: string, apps: string[]): Promi
     }
     uploads.push({
       app,
-      // The path under the app's directory, as the export laid it out.
-      name: (inApp ? parts.slice(1) : parts).join("/"),
+      // The path in the export: under the directory, or under the app's own with several apps,
+      // so two files never share a name.
+      name: (apps.length > 1 ? parts.slice(1) : parts).join("/"),
       label,
       byteSize,
       sha256,
@@ -757,6 +760,9 @@ async function runInWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pro
           ...agentEnvironment(handoff, { parent: env }),
           HUE_MCP_CONFIG: mcp.path,
         };
+        // A stop that came while the file was written ends here: the command never starts. The
+        // spawn follows synchronously, so no later stop can slip in before it.
+        if (ctx.stopping.signal.aborted) throw new StoppedBeforeCommand();
         code = await runCommand(ctx, command, childEnv, (handle) => (running = handle));
       } finally {
         await mcp
@@ -767,7 +773,9 @@ async function runInWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pro
       }
     } catch (error) {
       await finish("abandoned").catch(() => undefined);
-      throw error;
+      if (!(error instanceof StoppedBeforeCommand)) throw error;
+      ctx.note(`Stopped. Instance ${instance.id} was abandoned.`);
+      return 130;
     }
     const status = code === 0 ? "completed" : "abandoned";
     try {
