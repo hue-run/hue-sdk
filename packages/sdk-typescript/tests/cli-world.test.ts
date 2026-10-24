@@ -1220,7 +1220,13 @@ describe("hue world create --export-from", () => {
               totalSize: 1,
               done: true,
               records: [
-                Object.fromEntries(fields.map((field) => [field, field === "Id" ? "a0W1" : 1])),
+                // A record in the recycle bin, in every field group.
+                Object.fromEntries(
+                  fields.map((field) => [
+                    field,
+                    field === "Id" ? "a0W1" : field === "IsDeleted" ? true : 1,
+                  ]),
+                ),
               ],
             });
           }
@@ -1228,7 +1234,10 @@ describe("hue world create --export-from", () => {
             totalSize: 3,
             done: false,
             nextRecordsUrl: "/services/data/v67.0/query/01gA-2000",
-            records: [{ Id: "001A" }, { Id: "001B" }],
+            records: [
+              { Id: "001A", IsDeleted: false },
+              { Id: "001B", IsDeleted: true },
+            ],
           });
         case "/query/01gA-2000":
           return Response.json({ totalSize: 3, done: true, records: [{ Id: "001C" }] });
@@ -1277,7 +1286,16 @@ describe("hue world create --export-from", () => {
     );
     const exchanges = (await json(stand.stored.get("salesforce-1"))) as {
       request: { url: string; headers: Record<string, string> };
+      response: { body: { records?: Record<string, unknown>[] } };
     }[];
+    // queryAll's deleted records reach the upload with IsDeleted true, in every field group.
+    expect(
+      exchanges.find((item) => item.request.url.includes("FROM+Account"))!.response.body.records,
+    ).toContainEqual({ Id: "001B", IsDeleted: true });
+    const wideGroups = exchanges.filter((item) => item.request.url.includes("FROM+Wide__c"));
+    expect(wideGroups.length).toBe(wideQueries.length);
+    for (const group of wideGroups)
+      expect(group.response.body.records![0]).toMatchObject({ Id: "a0W1", IsDeleted: true });
     // A query page keeps its query options header and loses the access token.
     expect(
       exchanges.find((item) => item.request.url.endsWith("/query/01gA-2000"))!.request.headers,
