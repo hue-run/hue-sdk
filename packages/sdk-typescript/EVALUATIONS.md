@@ -377,7 +377,9 @@ On the outbound worker, supply `directTarget` beside or instead of `target`. Sup
 a registration that declares both; the evaluation client sends `X-Hue-World-Reference: 1` on every
 request, which Hue requires to read such a case. Hue keeps a registered key and revision's
 capabilities fixed, so a worker upgrading to an SDK that declares `world-model-reference:v1`
-registers under a new revision. Declare the file
+registers under a new revision. Such a case lists `worldModelReference` with a null
+`environmentVersionId`; the runner, `hue eval` and `runLocalAgent` run it as a World case, and Hue
+prepares its World from the execution alone. Declare the file
 capabilities the agent accepts and returns — `input:docx`, `input:pdf`, `output:docx` and so on — so
 Hue matches them against each case's `hue.requiredCapabilities` metadata and offers only matching
 cases. A case pinned to a world whose manifest also holds agent-visible files is offered only to a

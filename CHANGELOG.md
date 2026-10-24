@@ -8,6 +8,18 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [Unreleased]
+
+#### Fixed
+
+- A case pinned to a user World through a World model reference (`worldModelReference` set,
+  `environmentVersionId` null) ran direct: `hue eval --check` reported `mode: direct` and the agent
+  never received `HUE_WORLD_TOKEN` or the `HUE_SIM_*` mirrors. `DatasetCase` and `Subject` now carry
+  `worldModelReference`, and every World decision (`hue eval` mode and crash reruns, the runner's
+  case directory and file-name checks, `runLocalAgent` target choice, scoring with environment
+  evidence) treats such a case as a World case; the World is created from the execution alone, with
+  no `environmentVersionId`. `CreateRunInput.environmentVersionId` is optional for that call.
+
 ### [0.24.2] - 2026-10-24
 
 #### Added

@@ -508,6 +508,7 @@
             "VerdictResults",
             "VerdictSummary",
             "WaitForResultsOptions",
+            "WorldModelReference",
             "actualAgentManifestV2",
             "agentManifestDigestV2",
             "attemptBaselineV2",

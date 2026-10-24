@@ -376,13 +376,13 @@ export async function runEnvironmentTarget(
 ): Promise<JsonValue | TargetResult | undefined> {
   const { context } = options;
   const environmentVersionId = context.item.environmentVersionId;
-  if (!environmentVersionId)
+  if (!environmentVersionId && !context.item.worldModelReference)
     throw new Error("The simulation case has no pinned environment version");
   // One stable idempotency key per case attempt: a replay after a lost acknowledgement gets
   // the same world and the same token.
   const run: EnvironmentRun = await createWorldForExecution(options.environmentClient, {
     idempotencyKey: `execution:${context.executionId}`,
-    environmentVersionId,
+    ...(environmentVersionId ? { environmentVersionId } : {}),
     executionId: context.executionId,
     maxSteps: options.maxSteps,
     ttlSeconds: options.ttlSeconds,

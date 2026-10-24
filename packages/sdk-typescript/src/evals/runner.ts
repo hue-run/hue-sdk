@@ -40,6 +40,7 @@ import {
   type TerminalState,
   type TypedError,
 } from "./types.js";
+import { pinsWorld } from "./types.js";
 
 /**
  * Thrown when a case has a started attempt without a saved outcome. The runner never reruns the
@@ -803,7 +804,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         },
         options,
         saved.executionId,
-        Boolean(frozenCase.environmentVersionId),
+        pinsWorld(frozenCase),
       );
       const complete: CompleteExecution = {
         idempotencyKey: randomUUID(),
@@ -843,7 +844,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       const file = `case-${uuid(item.id)}`;
       const directDirectory = directDirectoryOf(item.id);
       const caseDirectoryOf = (frozen: ExperimentCase) =>
-        frozen.environmentVersionId ? files.directory : directDirectory;
+        pinsWorld(frozen) ? files.directory : directDirectory;
       let checkpoint: CaseCheckpoint | undefined;
       try {
         checkpoint = await store.read<CaseCheckpoint>(file);
@@ -932,7 +933,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         const needed = neededInputFiles(frozenCase.inputFiles, versions, options);
         const agentFiles = needed.filter(isTargetFile);
         // An agent working in a world receives its files by name: each must be one safe name.
-        if (frozenCase.environmentVersionId) assertSafeFileNames(agentFiles);
+        if (pinsWorld(frozenCase)) assertSafeFileNames(agentFiles);
         await verifyCaseFiles(
           options.client,
           needed.filter((entry) => !isTargetFile(entry)),
@@ -1373,7 +1374,9 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
             : [];
         // Older servers omit the world pin; keep their previous behaviour.
         const hasEnvironment =
-          subject.environmentVersionId === undefined ? true : subject.environmentVersionId !== null;
+          subject.environmentVersionId === undefined
+            ? true
+            : subject.environmentVersionId !== null || Boolean(subject.worldModelReference);
         const scores = await scoresFor(
           pending,
           {

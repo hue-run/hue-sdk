@@ -157,6 +157,8 @@ function fixture(options: {
   claimStatuses?: number[];
   /** The lifetime of each world the fixture creates; ten minutes by default. */
   worldTtlMs?: number;
+  /** The case pins a user World through a model reference instead of an environment version. */
+  modelReference?: boolean;
   /** Statuses the connection check answers before it answers the project. */
   connectionStatuses?: number[];
   /** The status the queue answers an attention completion with; 200 records it. */
@@ -178,7 +180,16 @@ function fixture(options: {
     hasExpected: true,
     expected: { answer: "evaluator-private" },
     metadata: { provenance: "evaluator-private" },
-    environmentVersionId,
+    environmentVersionId: options.modelReference ? null : environmentVersionId,
+    ...(options.modelReference
+      ? {
+          worldModelReference: {
+            modelId: randomUUID(),
+            representedAt: "2026-10-01T00:00:00Z",
+            generation: "3",
+          },
+        }
+      : {}),
   };
   const items = Array.from({ length: options.caseCount ?? 1 }, (_, index) =>
     index === 0
@@ -236,6 +247,7 @@ function fixture(options: {
     prepare: 0,
     bindingReads: 0,
     worldReads: 0,
+    worldCreates: [] as Record<string, unknown>[],
     finishes: [] as { runId: string; idempotencyKey: string; status: string }[],
     completions: [] as { executionId: string; state: string; errorType?: string }[],
     localRun: [] as { state: string; failureType?: string }[],
@@ -361,6 +373,7 @@ function fixture(options: {
       }
       if (path === "/environment-runs") {
         const id = randomUUID();
+        calls.worldCreates.push(body);
         worlds.set(id, {
           executionId: String(body.executionId),
           status: "open",
@@ -735,6 +748,40 @@ describe("local agent worker", () => {
     expect(f.calls.completions[0]).toMatchObject({ state: "error", errorType: "ServiceRefused" });
     expect(f.calls.experimentFinished).toBe(1);
     expect(f.calls.localRun).toEqual([{ state: "completed" }]);
+  });
+
+  test("a case pinned through a World model reference takes the World path, created from its execution alone", async () => {
+    const f = fixture({ capabilityStatus: 200, modelReference: true });
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "local-worker-test",
+      captureContent: false,
+    });
+    let received: LocalAgentTargetContext | undefined;
+    try {
+      await runLocalAgent({
+        client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl, maxAttempts: 1 }),
+        environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+        hue,
+        checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-local-worker-")),
+        agent: { key: "reference", name: "Reference", revision: "1" },
+        maxRuns: 1,
+        target(_inputs, _tools, context) {
+          received = context;
+          return { drafted: true };
+        },
+      });
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+    expect(received?.environmentRunId).toBe([...f.worlds.keys()][0]);
+    expect(f.calls.worldCreates).toHaveLength(1);
+    expect(f.calls.worldCreates[0]).not.toHaveProperty("environmentVersionId");
+    expect(f.calls.worldCreates[0]).toMatchObject({ executionId: expect.any(String) });
+    expect([...f.worlds.values()].map((world) => world.status)).toEqual(["completed"]);
+    expect(f.calls.completions[0]).toMatchObject({ state: "succeeded" });
   });
 
   test("provider-ready work prepares once, skips the legacy grant and keeps credentials memory-only", async () => {

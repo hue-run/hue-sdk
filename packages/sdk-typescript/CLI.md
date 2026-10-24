@@ -1212,7 +1212,8 @@ on any Node.js version.
 
 Eval sets whose cases pin no simulated world — a task plus pinned input files, answered with
 generated documents — run as **direct** cases through `runExperiment()`. `hue eval` reads this from the saved
-version's cases: a case that pins a world runs in a fresh world, one that pins none (an
+version's cases: a case that pins a world (an immutable version, or a World model reference
+whose World Hue prepares at execution) runs in a fresh world, one that pins none (an
 answer-graded trace-to-case publication included) runs direct, and a version holding both runs
 mixed. `--mode direct|simulation` forces one kind and is refused when a case cannot run that way. `--set` accepts the eval set's slug, name, ID or URL; `--set-version <n>` pins a
 saved version other than the latest; `--scorer <slug|name|id>` pins an evaluator at its newest

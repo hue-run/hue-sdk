@@ -609,9 +609,10 @@ export type WorldEvidence = Record<string, JsonValue>;
 export interface CreateRunInput {
   /** Stable idempotency key for recovering creation acknowledgement. */
   idempotencyKey: string;
-  /** Immutable environment version to instantiate. */
-  environmentVersionId: string;
-  /** Target execution linked to this world. */
+  /** Immutable environment version to instantiate. Omitted for a case that pins a World model
+   * reference: Hue then prepares the World the execution's case selects. */
+  environmentVersionId?: string;
+  /** Target execution linked to this world; required without `environmentVersionId`. */
   executionId?: string;
   /** Optional deterministic seed. */
   seed?: string;
