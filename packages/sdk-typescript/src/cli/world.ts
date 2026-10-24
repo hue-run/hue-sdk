@@ -17,6 +17,7 @@ import {
 import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
 import { ExportError, packJson } from "./world-export.js";
 import { exportGmail } from "./world-export-gmail.js";
+import { pipedreamTransport } from "./world-export-pipedream.js";
 import { composioLinear, exportLinear, linearApi } from "./world-export-linear.js";
 import { exportSalesforce, salesforceOrigin } from "./world-export-salesforce.js";
 import { exportSlack } from "./world-export-slack.js";
@@ -108,6 +109,11 @@ description, or both, and prints its URL and World version once it is ready.
   --composio-user ID     The Composio user id your agent sends
   --composio-account ID  Its Linear connected account. Hue's World answers the Composio calls
                          that name both
+  --pipedream-user ID    Read the one --export-from app through a Pipedream Connect account
+  --pipedream-account ID instead of its credentials: the account's external user id and
+                         account id, with PIPEDREAM_CLIENT_ID, PIPEDREAM_CLIENT_SECRET,
+                         PIPEDREAM_PROJECT_ID and PIPEDREAM_PROJECT_ENVIRONMENT (default
+                         production). Salesforce still needs SALESFORCE_INSTANCE_URL
   --dry-run              Show what Hue would make, with a description's outline and estimate;
                          create and upload nothing
   --wait SECONDS         How long to wait for the World to be ready (default ${DEFAULT_WAIT_SECONDS}); 0 returns
@@ -306,6 +312,8 @@ function parseCreateArguments(argv: string[]) {
         "export-from": { type: "string" },
         "composio-user": { type: "string" },
         "composio-account": { type: "string" },
+        "pipedream-user": { type: "string" },
+        "pipedream-account": { type: "string" },
         "dry-run": { type: "boolean", default: false },
         wait: { type: "string" },
         origin: { type: "string" },
@@ -350,16 +358,35 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
     throw new UsageError(
       "--composio-user and --composio-account name the Linear connection --export-from linear reads",
     );
-  for (const value of [composioUser, composioAccount])
+  const pipedreamUser = values["pipedream-user"];
+  const pipedreamAccount = values["pipedream-account"];
+  if ((pipedreamUser === undefined) !== (pipedreamAccount === undefined))
+    throw new UsageError("Pass both --pipedream-user and --pipedream-account");
+  if (pipedreamUser !== undefined && exportFrom.length !== 1)
+    throw new UsageError(
+      "--pipedream-user and --pipedream-account name the account of one --export-from app",
+    );
+  if (pipedreamUser !== undefined && composioUser !== undefined)
+    throw new UsageError("Read through Composio or Pipedream, not both");
+  for (const value of [composioUser, composioAccount, pipedreamUser, pipedreamAccount])
     if (value !== undefined && (!value || value.length > 256 || /\s/u.test(value)))
-      throw new UsageError("Composio ids are 1 to 256 characters without spaces");
+      throw new UsageError("Composio and Pipedream ids are 1 to 256 characters without spaces");
   if (values["dry-run"] && exportFrom.length)
     throw new UsageError("--dry-run reads nothing; run the export without it");
   const wait = values.wait === undefined ? DEFAULT_WAIT_SECONDS : Number(values.wait);
   if (!/^\d{1,6}$/u.test(values.wait ?? "0"))
     throw new UsageError("--wait must be a whole number of seconds");
   const { origin, apiKey, env } = await connect(ctx, values);
-  const exporters = exportersFor(ctx, env, exportFrom, composioUser, composioAccount);
+  const exporters = exportersFor(ctx, env, exportFrom, {
+    composio:
+      composioUser === undefined
+        ? undefined
+        : { userId: composioUser, accountId: composioAccount! },
+    pipedream:
+      pipedreamUser === undefined
+        ? undefined
+        : { externalUserId: pipedreamUser, accountId: pipedreamAccount! },
+  });
 
   const removeInterrupt = (io.onInterrupt ?? defaultOnInterrupt)(() => ctx.stopping.abort());
   let url: string | undefined;
@@ -494,61 +521,109 @@ function list(value: string | undefined): string[] {
 
 type Exporter = (transport: Transport) => Promise<JsonObject[]>;
 
-/** Each `--export-from` app's reader with its credentials, checked before anything is sent. */
+/** Each `--export-from` app's reader with its credentials, checked before anything is sent. A
+ * Pipedream Connect account stands in for the app's credentials: the reader runs unchanged
+ * through the account's proxy. */
 function exportersFor(
   ctx: Context,
   env: NodeJS.ProcessEnv,
   apps: string[],
-  composioUser: string | undefined,
-  composioAccount: string | undefined,
+  via: {
+    composio: { userId: string; accountId: string } | undefined;
+    pipedream: { externalUserId: string; accountId: string } | undefined;
+  },
 ): Map<string, Exporter> {
   const secret = (name: string) => {
     const value = env[name]?.trim() ?? "";
     ctx.secrets.push(value);
     return value;
   };
+  const pipedream = " or a Pipedream Connect account with --pipedream-user and --pipedream-account";
+  /** The app's credential, which the proxy supplies when the export reads through Pipedream. */
+  const credential = (name: string, refusal: string) => {
+    if (via.pipedream) return "";
+    const value = secret(name);
+    if (!value) throw new UsageError(`${refusal},${pipedream}`);
+    return value;
+  };
   const report = { progress: ctx.note, warn: ctx.note };
   const exporters = new Map<string, Exporter>();
   for (const app of apps) {
-    if (app === "linear" && composioAccount !== undefined) {
+    if (app === "linear" && via.composio) {
       const apiKey = secret("COMPOSIO_API_KEY");
       if (!apiKey)
         throw new UsageError("--composio-account needs COMPOSIO_API_KEY, your Composio API key");
-      const connection = { apiKey, userId: composioUser!, connectedAccountId: composioAccount };
+      const connection = {
+        apiKey,
+        userId: via.composio.userId,
+        connectedAccountId: via.composio.accountId,
+      };
       exporters.set(app, (transport) =>
         exportLinear(composioLinear(connection, transport), report),
       );
     } else if (app === "linear") {
-      const apiKey = secret("LINEAR_API_KEY");
-      if (!apiKey)
-        throw new UsageError(
-          "--export-from linear reads LINEAR_API_KEY (a Linear API key), or COMPOSIO_API_KEY with --composio-user and --composio-account",
-        );
+      const apiKey = credential(
+        "LINEAR_API_KEY",
+        "--export-from linear reads LINEAR_API_KEY (a Linear API key), COMPOSIO_API_KEY with --composio-user and --composio-account",
+      );
       exporters.set(app, (transport) => exportLinear(linearApi(apiKey, transport), report));
     } else if (app === "slack") {
-      const token = secret("SLACK_TOKEN");
-      if (!token) throw new UsageError("--export-from slack reads SLACK_TOKEN, a Slack token");
+      const token = credential(
+        "SLACK_TOKEN",
+        "--export-from slack reads SLACK_TOKEN, a Slack token",
+      );
       exporters.set(app, (transport) => exportSlack(token, transport, ctx.note));
     } else if (app === "gmail") {
-      const token = secret("GMAIL_ACCESS_TOKEN");
-      if (!token)
-        throw new UsageError(
-          "--export-from gmail reads GMAIL_ACCESS_TOKEN, an OAuth access token with gmail.readonly",
-        );
+      const token = credential(
+        "GMAIL_ACCESS_TOKEN",
+        "--export-from gmail reads GMAIL_ACCESS_TOKEN, an OAuth access token with gmail.readonly",
+      );
       exporters.set(app, (transport) => exportGmail(token, transport, ctx.note));
     } else if (app === "salesforce") {
-      const accessToken = secret("SALESFORCE_ACCESS_TOKEN");
       const origin = salesforceOrigin(env.SALESFORCE_INSTANCE_URL?.trim() ?? "");
-      if (!accessToken || !origin)
+      if (!origin)
         throw new UsageError(
-          "--export-from salesforce reads SALESFORCE_ACCESS_TOKEN and SALESFORCE_INSTANCE_URL, the org's https://<name>.my.salesforce.com",
+          "--export-from salesforce reads SALESFORCE_INSTANCE_URL, the org's https://<name>.my.salesforce.com, with SALESFORCE_ACCESS_TOKEN or a Pipedream Connect account",
         );
+      const accessToken = credential(
+        "SALESFORCE_ACCESS_TOKEN",
+        "--export-from salesforce reads SALESFORCE_ACCESS_TOKEN, the exporting user's access token",
+      );
       exporters.set(app, (transport) =>
         exportSalesforce({ origin, accessToken }, transport, ctx.note),
       );
     }
   }
-  return exporters;
+  if (!via.pipedream) return exporters;
+  const account = {
+    ...via.pipedream,
+    clientId: secret("PIPEDREAM_CLIENT_ID"),
+    clientSecret: secret("PIPEDREAM_CLIENT_SECRET"),
+    projectId: env.PIPEDREAM_PROJECT_ID?.trim() ?? "",
+    environment: env.PIPEDREAM_PROJECT_ENVIRONMENT?.trim() || "production",
+  };
+  if (!account.clientId || !account.clientSecret || !account.projectId)
+    throw new UsageError(
+      "--pipedream-account needs PIPEDREAM_CLIENT_ID, PIPEDREAM_CLIENT_SECRET and PIPEDREAM_PROJECT_ID: your Pipedream project's OAuth client and its id",
+    );
+  const { environment } = account;
+  if (environment !== "development" && environment !== "production")
+    throw new UsageError("PIPEDREAM_PROJECT_ENVIRONMENT must be development or production");
+  return new Map(
+    [...exporters].map(([app, read]) => [
+      app,
+      async (transport: Transport) => {
+        ctx.note(
+          `${EXPORTERS[app]}: reading through Pipedream Connect account ${account.accountId}.`,
+        );
+        const proxy = pipedreamTransport({ ...account, environment }, transport, (token) =>
+          ctx.secrets.push(token),
+        );
+        await proxy.ready();
+        return read(proxy.transport);
+      },
+    ]),
+  );
 }
 
 /** The World creation every route answers in `worldCreation`. */
