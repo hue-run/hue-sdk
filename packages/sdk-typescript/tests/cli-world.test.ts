@@ -1031,11 +1031,19 @@ describe("hue world create --export-from", () => {
             return new Response("", { status: 429, headers: { "retry-after": "3" } });
           }
           if (args.channel === "G1") return Response.json({ ok: false, error: "not_in_channel" });
-          return ok({
-            messages:
-              args.channel === "C1" ? [{ ts: "1.000", reply_count: 2 }, { ts: "2.000" }] : [],
-            has_more: false,
-          });
+          if (args.channel === "C1" && !args.cursor && args.limit === "999")
+            // A first page too large for one file at 999 messages.
+            return ok({
+              messages: [{ ts: "9.000", text: "x".repeat(26 * 1024 * 1024) }],
+              has_more: true,
+            });
+          if (args.channel === "C1" && !args.cursor)
+            return ok({
+              messages: [{ ts: "1.000", reply_count: 2 }, { ts: "2.000" }],
+              has_more: true,
+              response_metadata: { next_cursor: "history-2" },
+            });
+          return ok({ messages: [], has_more: false });
         case "reactions.list":
           // Numbered pages, without a cursor.
           return ok({
@@ -1068,6 +1076,10 @@ describe("hue world create --export-from", () => {
       "conversations.members channel=C1&limit=1000",
       "conversations.history channel=C1&limit=999",
       "conversations.history channel=C1&limit=999",
+      // The oversized first page asked for again at half the limit, then the chain goes on from
+      // its cursor at the list's limit.
+      "conversations.history channel=C1&limit=499",
+      "conversations.history channel=C1&limit=999&cursor=history-2",
       "conversations.replies channel=C1&ts=1.000&limit=999",
       "pins.list channel=C1",
       "bookmarks.list channel_id=C1",
@@ -1089,8 +1101,11 @@ describe("hue world create --export-from", () => {
       request: { method: string; url: string; body: null };
       response: { status: number; headers: Record<string, string>; body: unknown };
     }[];
-    // The rate-limited attempt is waited out, not recorded.
-    expect(exchanges.length).toBe(calls.length - 1);
+    // The rate-limited attempt and the oversized page are not recorded.
+    expect(exchanges.length).toBe(calls.length - 2);
+    expect(result.stderr).toContain(
+      "Slack: a conversations.history page is larger than one file; asking for 499 a page.",
+    );
     expect(exchanges[0]).toEqual({
       request: { method: "GET", url: "https://slack.com/api/auth.test", body: null },
       response: {
@@ -1124,7 +1139,7 @@ describe("hue world create --export-from", () => {
       const url = new URL(request.url);
       const path = `${url.pathname}${url.search}`.replace("/services/data/v67.0", "");
       paths.push(path);
-      if (path.includes("query"))
+      if (path.includes("query") && !path.includes("Note__c") && !path.includes("01gN"))
         expect(request.headers.get("sforce-query-options")).toBe("batchSize=2000");
       switch (url.pathname.replace("/services/data/v67.0", "")) {
         case "/chatter/users/me":
@@ -1136,6 +1151,7 @@ describe("hue world create --export-from", () => {
               { name: "User", custom: false, queryable: true },
               { name: "Widget__c", custom: true, queryable: true },
               { name: "Wide__c", custom: true, queryable: true },
+              { name: "Note__c", custom: true, queryable: true },
               { name: "Hidden__c", custom: true, queryable: false },
               { name: "Setting__mdt", custom: true, queryable: true },
             ],
@@ -1161,7 +1177,32 @@ describe("hue world create --export-from", () => {
             ["IsDeleted", "boolean"],
             ...wide.map((name): [string, string] => [name, "double"]),
           ]);
+        case "/sobjects/Note__c/describe":
+          return describe([
+            ["Id", "id"],
+            ["IsDeleted", "boolean"],
+            ["Body__c", "textarea"],
+          ]);
+        case "/query/01gN-200":
+          return Response.json({ totalSize: 2, done: true, records: [{ Id: "a0N2" }] });
         case "/queryAll":
+          if (url.searchParams.get("q")!.endsWith(" FROM Note__c")) {
+            // 2,000 records a page are too large for one file; 200 a page fit.
+            if (request.headers.get("sforce-query-options") === "batchSize=2000")
+              return Response.json({
+                totalSize: 2,
+                done: false,
+                nextRecordsUrl: "/services/data/v67.0/query/01gN-2000",
+                records: [{ Id: "a0N1", Body__c: "x".repeat(26 * 1024 * 1024) }],
+              });
+            expect(request.headers.get("sforce-query-options")).toBe("batchSize=200");
+            return Response.json({
+              totalSize: 2,
+              done: false,
+              nextRecordsUrl: "/services/data/v67.0/query/01gN-200",
+              records: [{ Id: "a0N1", Body__c: "short" }],
+            });
+          }
           if (url.searchParams.get("q")!.endsWith(" FROM Wide__c")) {
             const fields = /^SELECT (.*) FROM Wide__c$/
               .exec(url.searchParams.get("q")!)![1]!
@@ -1235,6 +1276,18 @@ describe("hue world create --export-from", () => {
       "https://acme.my.salesforce.com/services/data/v67.0/query/01gA-2000",
     );
     expect(JSON.stringify(exchanges)).not.toContain(SALESFORCE_TOKEN);
+    // The object whose page was too large is read again from the start at 200 records a page;
+    // only that listing is recorded.
+    expect(result.stderr).toContain(
+      "Salesforce: a page of Note__c is larger than one file; reading it again 200 records a page.",
+    );
+    expect(result.stderr).toContain("Salesforce: 2 Note__c");
+    const notes = exchanges.filter((item) => /Note__c|01gN/.test(item.request.url));
+    expect(notes.map((item) => item.request.url.replace(/^.*v67\.0/, ""))).toEqual([
+      "/sobjects/Note__c/describe",
+      "/queryAll?q=SELECT+Id%2CIsDeleted%2CBody__c+FROM+Note__c",
+      "/query/01gN-200",
+    ]);
   });
 
   test("gmail: reads every message in full, raw ones with attachments, and the drafts", async () => {
@@ -1256,7 +1309,14 @@ describe("hue world create --export-from", () => {
         case "/messages?includeSpamTrash=true&maxResults=500":
           return Response.json({ messages: [{ id: "m1" }, { id: "m2" }], nextPageToken: "p2" });
         case "/messages?includeSpamTrash=true&maxResults=500&pageToken=p2":
-          return Response.json({ messages: [{ id: "m3" }] });
+          return Response.json({ messages: [{ id: "m3" }, { id: "m4" }] });
+        case "/messages/m4?format=full":
+          // A message too large for one file.
+          return Response.json({
+            id: "m4",
+            sizeEstimate: 30_000_000,
+            payload: { body: { data: "x".repeat(26 * 1024 * 1024) } },
+          });
         case "/messages/m1?format=full":
           return Response.json({ id: "m1", sizeEstimate: 1000, payload: attachment });
         case "/messages/m2?format=full":
@@ -1313,6 +1373,7 @@ describe("hue world create --export-from", () => {
     expect(result.stderr).toContain(
       "Gmail: listing /drafts?maxResults=500 answered HTTP 403; the list is incomplete.",
     );
+    expect(result.stderr).toContain("Gmail: skipped 1 message larger than one file: m4.");
     expect(JSON.stringify(exchanges)).not.toContain(token);
   });
 

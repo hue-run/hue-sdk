@@ -1,4 +1,4 @@
-import { exchange, ExportError } from "./world-export.js";
+import { exchange, ExportError, fitsOneFile } from "./world-export.js";
 import {
   isObject,
   quote,
@@ -20,6 +20,8 @@ export const SLACK_API_URL = "https://slack.com/api/";
 const TYPES = "public_channel,private_channel,mpim,im";
 /** A 429 without `Retry-After` waits this long. */
 const RATE_LIMIT_WAIT_MS = 30_000;
+/** The smallest page an oversized page is asked for again at. */
+const MIN_LIMIT = 100;
 /** Slack's answers that mean the token itself is refused: the export cannot go on. */
 const REFUSED_TOKEN = new Set([
   "invalid_auth",
@@ -37,8 +39,10 @@ export async function exportSlack(
   const exchanges: JsonObject[] = [];
   /** The calls Slack refused, by method and error: kept as Slack answered them, and named. */
   const refused = new Map<string, number>();
-  /** One call with only the arguments named, recorded as sent and answered. */
-  const call = async (method: string, args: Record<string, string> = {}): Promise<JsonObject> => {
+  /** Answers too large for one file even at the smallest page, named in the summary. */
+  const oversized: string[] = [];
+  /** One call with only the arguments named, as sent and answered; `record` keeps it. */
+  const request = async (method: string, args: Record<string, string> = {}) => {
     const query = new URLSearchParams(args).toString();
     const url = `${SLACK_API_URL}${method}${query ? `?${query}` : ""}`;
     const answer = await send(
@@ -48,24 +52,53 @@ export async function exportSlack(
       ({ status, headers }) =>
         status === 429 ? (retryAfterMs(headers) ?? RATE_LIMIT_WAIT_MS) : undefined,
     );
-    exchanges.push(exchange(url, answer));
     const body = isObject(answer.body) ? answer.body : {};
     if (answer.status === 401 || (typeof body.error === "string" && REFUSED_TOKEN.has(body.error)))
       throw new ExportError(
         `Slack refused the token (${typeof body.error === "string" ? quote(body.error) : `HTTP ${answer.status}`})`,
       );
-    if (body.ok !== true) {
-      const reason = `${method} ${typeof body.error === "string" ? quote(body.error) : `HTTP ${answer.status}`}`;
-      refused.set(reason, (refused.get(reason) ?? 0) + 1);
-    }
+    const reason =
+      body.ok === true
+        ? undefined
+        : `${method} ${typeof body.error === "string" ? quote(body.error) : `HTTP ${answer.status}`}`;
+    return { body, recorded: exchange(url, answer), label: `${method} ${query}`.trim(), reason };
+  };
+  /** Keeps a call's exchange, unless it is too large for one file: that one is named. */
+  const record = ({ body, recorded, label, reason }: Awaited<ReturnType<typeof request>>) => {
+    if (!fitsOneFile(recorded)) oversized.push(label);
+    else exchanges.push(recorded);
+    if (reason) refused.set(reason, (refused.get(reason) ?? 0) + 1);
     return body;
   };
-  /** Every page of a cursor list, each with the same arguments: Hue serves a four-kind
-   * `conversations.list` page only at the page size the export used. */
+  const call = async (method: string, args: Record<string, string> = {}) =>
+    record(await request(method, args));
+  /**
+   * Every page of a cursor list. A page too large for one file is asked for again from the same
+   * cursor at half the limit, down to 100, and only the page that fits is recorded, so the cursor
+   * chain stays continuous; the next page goes back to the list's limit. `conversations.list`
+   * keeps its one limit: Hue serves its four-kind pages only at the page size the export used.
+   */
   const pages = async (method: string, args: Record<string, string> = {}) => {
     const answers: JsonObject[] = [];
     for (let cursor = ""; ; ) {
-      const body = await call(method, cursor ? { ...args, cursor } : args);
+      const at = (limit: string | undefined) => ({
+        ...args,
+        ...(limit === undefined ? {} : { limit }),
+        ...(cursor ? { cursor } : {}),
+      });
+      let limit = args.limit;
+      let answer = await request(method, at(limit));
+      while (
+        !fitsOneFile(answer.recorded) &&
+        method !== "conversations.list" &&
+        limit !== undefined &&
+        Number(limit) > MIN_LIMIT
+      ) {
+        limit = String(Math.max(MIN_LIMIT, Math.floor(Number(limit) * 0.5)));
+        progress(`Slack: a ${method} page is larger than one file; asking for ${limit} a page.`);
+        answer = await request(method, at(limit));
+      }
+      const body = record(answer);
       answers.push(body);
       const next =
         isObject(body.response_metadata) && typeof body.response_metadata.next_cursor === "string"
@@ -138,6 +171,10 @@ export async function exportSlack(
       if ((await call("reactions.list", { page: String(page) })).ok !== true) break;
   await call("users.profile.get", { user: auth.user_id });
   await call("dnd.teamInfo");
+  if (oversized.length)
+    progress(
+      `Slack: ${oversized.length} ${oversized.length === 1 ? "answer was" : "answers were"} larger than one file even at ${MIN_LIMIT} a page and ${oversized.length === 1 ? "is" : "are"} missing: ${oversized.slice(0, 5).join("; ")}${oversized.length > 5 ? "; ..." : ""}.`,
+    );
   if (refused.size) {
     const total = [...refused.values()].reduce((sum, count) => sum + count, 0);
     const reasons = [...refused].map(([reason, count]) => `${reason} ×${count}`);

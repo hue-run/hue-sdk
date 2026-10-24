@@ -1,4 +1,4 @@
-import { exchange, ExportError } from "./world-export.js";
+import { exchange, ExportError, fitsOneFile } from "./world-export.js";
 import {
   isObject,
   retryAfterMs,
@@ -103,13 +103,16 @@ export async function exportGmail(
   let raw = 0;
   let batches = 0;
   let failed = 0;
+  /** Messages too large for one file, named in the summary. */
+  const tooLarge: string[] = [];
   for (let index = 0; index < ids.length; index += CONCURRENCY) {
     const batch = ids.slice(index, index + CONCURRENCY);
     const full = await Promise.all(
       batch.map((id) => get(`/messages/${encodeURIComponent(id)}?format=full`)),
     );
-    for (const { answer, recorded } of full) {
-      exchanges.push(recorded);
+    for (const [at, { answer, recorded }] of full.entries()) {
+      if (!fitsOneFile(recorded)) tooLarge.push(batch[at]!);
+      else exchanges.push(recorded);
       if (answer.status !== 200) failed++;
     }
     const withAttachments = batch.filter((_, at) => {
@@ -135,6 +138,10 @@ export async function exportGmail(
   if (raw) progress(`Gmail: ${raw} messages read again for their attachments`);
   // A failed read is kept as Gmail answered it; that message is missing from the World.
   if (failed) progress(`Gmail: ${failed} message reads failed; those messages are incomplete.`);
+  if (tooLarge.length)
+    progress(
+      `Gmail: skipped ${tooLarge.length} ${tooLarge.length === 1 ? "message" : "messages"} larger than one file: ${tooLarge.slice(0, 10).join(", ")}${tooLarge.length > 10 ? ", ..." : ""}.`,
+    );
   await pages("/drafts?maxResults=500");
   return exchanges;
 }
