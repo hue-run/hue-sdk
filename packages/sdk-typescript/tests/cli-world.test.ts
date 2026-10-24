@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { runWorldCommand, WORLD_USAGE, type WorldCommandIo } from "../src/cli/world.js";
+import { PIPEDREAM_API_URL, pipedreamTransport } from "../src/cli/world-export-pipedream.js";
 
 // A synthetic stand-in for Hue written from the World creation contract (REST twin of
 // `create_world`: POST /api/v1/world-creations, PUT to each signed URL, POST …/uploaded, GET
@@ -1404,6 +1405,224 @@ describe("hue world create --export-from", () => {
         "--origin",
         "http://127.0.0.1:9",
       ]);
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain(message);
+    }
+  });
+});
+
+// A synthetic Pipedream Connect API written from its public contract: client-credentials tokens
+// from /v1/oauth/token and the proxy at /v1/connect/{project_id}/proxy/{base64url(url)}, which
+// forwards x-pd-proxy- headers without their prefix and adds the account's own credential.
+
+const PIPEDREAM_ENV = {
+  PIPEDREAM_CLIENT_ID: "client-synthetic",
+  PIPEDREAM_CLIENT_SECRET: "pd-secret-synthetic-value",
+  PIPEDREAM_PROJECT_ID: "proj_synthetic",
+  PIPEDREAM_PROJECT_ENVIRONMENT: "development",
+};
+
+/** Pipedream's token route and proxy, handing each proxied request to the app's stand-in with
+ * the credential the account holds. */
+function pipedream(upstream: Handler, credential: string, options: { expiresIn?: number } = {}) {
+  const tokens: Record<string, unknown>[] = [];
+  const proxied: { url: string; method: string; query: Record<string, string> }[] = [];
+  const handler: Handler = async (request) => {
+    const url = new URL(request.url);
+    if (url.pathname === "/v1/oauth/token") {
+      tokens.push((await request.json()) as Record<string, unknown>);
+      return Response.json({
+        access_token: `pd-token-${tokens.length}`,
+        token_type: "Bearer",
+        expires_in: options.expiresIn ?? 3600,
+      });
+    }
+    const match = /^\/v1\/connect\/([^/]+)\/proxy\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
+    if (!match) return Response.json({ error: "not found" }, { status: 404 });
+    expect(match[1]).toBe("proj_synthetic");
+    expect(request.headers.get("authorization")).toMatch(/^Bearer pd-token-\d+$/);
+    expect(request.headers.get("x-pd-environment")).toBe("development");
+    expect(request.headers.get("x-pd-proxy-authorization")).toBeNull();
+    const target = Buffer.from(match[2]!, "base64url").toString("utf8");
+    proxied.push({
+      url: target,
+      method: request.method,
+      query: Object.fromEntries(url.searchParams),
+    });
+    const headers = new Headers({ authorization: credential });
+    request.headers.forEach((value, name) => {
+      if (name.startsWith("x-pd-proxy-")) headers.set(name.slice("x-pd-proxy-".length), value);
+    });
+    return upstream(
+      new Request(target, {
+        method: request.method,
+        headers,
+        ...(request.method === "GET" ? {} : { body: await request.text() }),
+      }),
+    );
+  };
+  return { tokens, proxied, handler };
+}
+
+describe("hue world create --export-from through a Pipedream Connect account", () => {
+  test("linear: runs the guide's queries through the account's proxy without a Linear key", async () => {
+    const stand = hue();
+    const api = linearApi();
+    const connect = pipedream(api.handler, LINEAR_KEY);
+    const result = await world(
+      [
+        "create",
+        "--apps",
+        "linear",
+        "--export-from",
+        "linear",
+        "--pipedream-user",
+        "user-42",
+        "--pipedream-account",
+        "apn_synthetic",
+        "--origin",
+        stand.origin,
+      ],
+      { env: PIPEDREAM_ENV, io: { fetch: route({ [PIPEDREAM_API_URL]: connect.handler }) } },
+    );
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain(
+      "Linear: reading through Pipedream Connect account apn_synthetic.",
+    );
+    expect(connect.tokens).toEqual([
+      {
+        grant_type: "client_credentials",
+        client_id: "client-synthetic",
+        client_secret: "pd-secret-synthetic-value",
+      },
+    ]);
+    expect(connect.proxied.every((call) => call.url === "https://api.linear.app/graphql")).toBe(
+      true,
+    );
+    expect(connect.proxied.every((call) => call.method === "POST")).toBe(true);
+    expect(connect.proxied[0]!.query).toEqual({
+      external_user_id: "user-42",
+      account_id: "apn_synthetic",
+    });
+    expect(((await json(stand.stored.get("linear-1"))) as unknown[]).length).toBe(5);
+    expect(result.stdout + result.stderr).not.toContain("pd-secret-synthetic-value");
+    expect(result.stdout + result.stderr).not.toContain("pd-token-1");
+  });
+
+  test("proxies a request's URL and query exactly and renews the token before it expires", async () => {
+    const seen: string[] = [];
+    const connect = pipedream(
+      (request) => {
+        seen.push(
+          `${request.method} ${request.url} ${request.headers.get("sforce-query-options")}`,
+        );
+        return Response.json({ ok: true });
+      },
+      "Bearer upstream",
+      { expiresIn: 30 },
+    );
+    const controller = new AbortController();
+    const { transport, ready } = pipedreamTransport(
+      {
+        clientId: "client-synthetic",
+        clientSecret: "pd-secret-synthetic-value",
+        projectId: "proj_synthetic",
+        environment: "development",
+        externalUserId: "user-42",
+        accountId: "apn_synthetic",
+      },
+      {
+        fetch: route({ [PIPEDREAM_API_URL]: connect.handler }),
+        sleep: async () => {},
+        signal: controller.signal,
+        warn: () => {},
+      },
+      () => {},
+    );
+    await ready();
+    const target = "https://slack.com/api/conversations.history?channel=C1&limit=999&cursor=a%2Fb";
+    const request = () =>
+      transport.fetch(target, {
+        headers: { authorization: "Bearer ignored", "sforce-query-options": "batchSize=2000" },
+      });
+    await Promise.all([request(), request()]);
+    expect(seen).toEqual([`GET ${target} batchSize=2000`, `GET ${target} batchSize=2000`]);
+    // A token with less than a minute left is renewed before the next requests, once for both.
+    expect(connect.tokens.length).toBe(2);
+  });
+
+  test("stops before reading when Pipedream refuses the client credentials", async () => {
+    const stand = hue();
+    const result = await world(
+      [
+        "create",
+        "--apps",
+        "slack",
+        "--export-from",
+        "slack",
+        "--pipedream-user",
+        "user-42",
+        "--pipedream-account",
+        "apn_synthetic",
+        "--origin",
+        stand.origin,
+      ],
+      {
+        env: PIPEDREAM_ENV,
+        io: {
+          fetch: route({
+            [PIPEDREAM_API_URL]: () => Response.json({ error: "invalid_client" }, { status: 401 }),
+          }),
+        },
+      },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("Error: Pipedream refused the client credentials (HTTP 401)");
+    expect(stand.creations.length).toBe(0);
+  });
+
+  test("refuses Pipedream usage errors before reading anything", async () => {
+    const flags = ["--pipedream-user", "user-42", "--pipedream-account", "apn_synthetic"];
+    const cases: [string[], Record<string, string>, string][] = [
+      [
+        ["--apps", "linear,slack", "--export-from", "linear,slack", ...flags],
+        PIPEDREAM_ENV,
+        "one --export-from app",
+      ],
+      [
+        ["--apps", "slack", "--export-from", "slack", "--pipedream-user", "user-42"],
+        PIPEDREAM_ENV,
+        "Pass both --pipedream-user",
+      ],
+      [
+        [
+          "--apps",
+          "linear",
+          "--export-from",
+          "linear",
+          ...flags,
+          "--composio-user",
+          "u",
+          "--composio-account",
+          "c",
+        ],
+        PIPEDREAM_ENV,
+        "not both",
+      ],
+      [["--apps", "slack", "--export-from", "slack", ...flags], {}, "PIPEDREAM_CLIENT_ID"],
+      [
+        ["--apps", "slack", "--export-from", "slack", ...flags],
+        { ...PIPEDREAM_ENV, PIPEDREAM_PROJECT_ENVIRONMENT: "staging" },
+        "development or production",
+      ],
+      [
+        ["--apps", "salesforce", "--export-from", "salesforce", ...flags],
+        PIPEDREAM_ENV,
+        "SALESFORCE_INSTANCE_URL",
+      ],
+    ];
+    for (const [args, env, message] of cases) {
+      const result = await world(["create", ...args, "--origin", "http://127.0.0.1:9"], { env });
       expect(result.code).toBe(2);
       expect(result.stderr).toContain(message);
     }

@@ -360,6 +360,18 @@ travel only in request headers, are never recorded and are replaced with `[redac
 Rate limits are waited out as the app's answer asks, and a 5xx or a dropped connection is tried
 again after 1, 2, 4 and 8 seconds.
 
+`--pipedream-user <external user id>` and `--pipedream-account <account id>` read the one
+`--export-from` app through a Pipedream Connect account instead of the app's own credentials.
+They need `PIPEDREAM_CLIENT_ID`, `PIPEDREAM_CLIENT_SECRET` and `PIPEDREAM_PROJECT_ID` (the
+project's OAuth client and its id) and `PIPEDREAM_PROJECT_ENVIRONMENT` (`development` or
+`production`, the default). The command gets a client-credentials token, renewed before it
+expires, and sends each request of the app's reader through
+`https://api.pipedream.com/v1/connect/<project id>/proxy/<base64url of the URL>` with the account's
+`external_user_id` and `account_id` and the `x-pd-environment` header. Pipedream adds the
+account's credential upstream; the reader's other headers are forwarded with the `x-pd-proxy-`
+prefix. Salesforce still needs `SALESFORCE_INSTANCE_URL`. Recorded exchanges hold the app's own
+URL; their response headers are those the proxy returns.
+
 Hue answers a signed upload URL per file. The command sends each file's exact bytes there (it
 checks a file on disk has not changed since it was hashed), retries a busy upload, then tells Hue
 the uploads are done. It prints each status as Hue reports it and waits up to `--wait` seconds
