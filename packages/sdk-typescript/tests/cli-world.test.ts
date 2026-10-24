@@ -32,7 +32,7 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 
 interface Declared {
   app: string;
-  files: { byteSize: number; sha256: string }[];
+  files: { name?: string; byteSize: number; sha256: string }[];
 }
 
 /** A loopback Hue. `statuses` are the states each GET answers in turn after the uploads. */
@@ -333,11 +333,14 @@ describe("hue world create", () => {
         {
           app: "linear",
           files: [
-            { byteSize: issues.byteLength, sha256: sha256(issues) },
-            { byteSize: nested.byteLength, sha256: sha256(nested) },
+            { name: "issues.json", byteSize: issues.byteLength, sha256: sha256(issues) },
+            { name: "more/teams.json", byteSize: nested.byteLength, sha256: sha256(nested) },
           ],
         },
-        { app: "slack", files: [{ byteSize: slack.byteLength, sha256: sha256(slack) }] },
+        {
+          app: "slack",
+          files: [{ name: "messages.csv", byteSize: slack.byteLength, sha256: sha256(slack) }],
+        },
       ],
       description: { text: "A support team triaging bugs" },
     });

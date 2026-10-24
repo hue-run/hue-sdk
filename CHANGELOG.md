@@ -14,7 +14,8 @@ refuses to publish a version without a matching entry below.
 
 - `hue world create --apps <list>` makes a World of Hue's simulated apps, several apps in one
   World, through `POST /api/v1/world-creations`. `--files <dir>` uploads each file's exact bytes
-  to the signed URL Hue answers (with several apps, each app's files go in `<dir>/<app>/`),
+  to the signed URL Hue answers and names it by its path under the app's directory (with several
+  apps, each app's files go in `<dir>/<app>/`),
   `--describe "<text>"` asks Hue to generate the data, and both can be combined. The command
   marks the uploads done, waits up to `--wait` seconds (default 900) for the World, and prints
   its URL, its World version and Hue's report of what it stored, normalized, stood in for, does

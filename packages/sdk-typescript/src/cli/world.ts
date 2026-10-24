@@ -106,9 +106,11 @@ class UsageError extends Error {}
 /** A failure that ends the command with exit code 1; its message names no credential. */
 class WorldCommandError extends Error {}
 
-/** One file to upload: its app, a name for messages, its size and digest, and its exact bytes. */
+/** One file to upload: its app, its path in the app's export, a name for messages, its size and
+ * digest, and its exact bytes. */
 interface Upload {
   app: string;
+  name: string;
   label: string;
   byteSize: number;
   sha256: string;
@@ -314,7 +316,7 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
         ? {
             files: [...groups].map(([app, files]) => ({
               app,
-              files: files.map(({ byteSize, sha256 }) => ({ byteSize, sha256 })),
+              files: files.map(({ name, byteSize, sha256 }) => ({ name, byteSize, sha256 })),
             })),
           }
         : {}),
@@ -449,12 +451,8 @@ async function filesFrom(ctx: Context, directory: string, apps: string[]): Promi
       !(entry.isSymbolicLink() && (await stat(path).catch(() => null))?.isFile())
     )
       continue;
-    const app =
-      parts.length > 1 && apps.includes(parts[0]!)
-        ? parts[0]!
-        : apps.length === 1
-          ? apps[0]!
-          : undefined;
+    const inApp = parts.length > 1 && apps.includes(parts[0]!);
+    const app = inApp ? parts[0]! : apps.length === 1 ? apps[0]! : undefined;
     if (!app)
       throw new UsageError(
         `${join(directory, label)} is not in an app's directory: with several apps, put each app's files in ${join(directory, "<app>")}/`,
@@ -466,6 +464,8 @@ async function filesFrom(ctx: Context, directory: string, apps: string[]): Promi
     }
     uploads.push({
       app,
+      // The path under the app's directory, as the export laid it out.
+      name: (inApp ? parts.slice(1) : parts).join("/"),
       label,
       byteSize,
       sha256,
