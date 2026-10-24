@@ -151,6 +151,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
@@ -173,17 +174,20 @@ jobs:
         run: python3 scripts/check-doc-versions.py
       - name: Generated documentation contract is current
         run: python3 scripts/generate-docs-contract.py --check
-      - name: Markdown links resolve
+      - name: Markdown files and fragments resolve without network requests
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
-          # npmjs.com rejects automated link-check requests with 403. Package/version freshness is
-          # checked from the registry by Fern's ecosystem audit; keep only that known UI excluded.
           args: >-
-            --no-progress --include-fragments
+            --offline --no-progress --include-fragments
             --exclude-path node_modules --exclude-path docs/reference
-            --exclude '^https://www\.npmjs\.com/package/@hue-run/sdk/?$'
+            --remap '^https://github\.com/hue-run/hue-sdk/(?:blob|tree)/main/(.*)$ file://${{ github.workspace }}/$1'
             "./**/*.md"
           fail: true
+      - name: Own GitHub links resolve to the right Git ref and file kind
+        shell: bash
+        run: |
+          lychee --dump --no-progress --exclude-path node_modules --exclude-path docs/reference "./**/*.md" |
+            python3 scripts/check-repository-links.py
   python-artifact:
     name: Python candidate archive
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
@@ -283,7 +287,18 @@ jobs:
           uv lock --resolution lowest-direct
           uv sync --frozen --all-groups
           uv run --frozen --all-groups python -c 'from importlib.metadata import version; print(*(f"{name}=={version(name)}" for name in ("opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp-proto-http", "requests", "pytest")), sep="\n")'
-          uv run --frozen --all-groups pytest
+          floor_artifacts="$RUNNER_TEMP/floor-artifacts"
+          uv run --frozen --all-groups python -m build --no-isolation --outdir "$floor_artifacts"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          export HUE_TEST_WHEEL="$floor_artifacts/hue_run-${version}-py3-none-any.whl"
+          uv run --frozen --all-groups pytest -k 'not installed_wheel' &
+          consumers_pid=$!
+          uv run --frozen --all-groups pytest tests/test_wheel.py tests/test_evaluations.py -k installed_wheel &
+          packaging_pid=$!
+          checks_status=0
+          wait "$packaging_pid" || checks_status=1
+          wait "$consumers_pid" || checks_status=1
+          exit "$checks_status"
   checks-passed:
     name: All checks passed
     if: always()

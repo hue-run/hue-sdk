@@ -3,13 +3,12 @@
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import tempfile
 import textwrap
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github/workflows/ci.yml").read_text()
@@ -47,6 +46,7 @@ class CiConsumerTests(unittest.TestCase):
                     ["bash", "-e", "-c", script],
                     env={**os.environ, "RESULTS": json.dumps(results)},
                     capture_output=True,
+                    check=False,
                     timeout=10,
                 )
                 self.assertEqual(
@@ -54,58 +54,113 @@ class CiConsumerTests(unittest.TestCase):
                 )
 
     def test_parallel_python_checks_both_finish_and_either_failure_refuses(self):
-        script = step_script(job("python"), "Installed behavior, packaging boundaries")
-        for failure in ("none", "packaging", "consumers", "tampered"):
+        for name, step in (
+            ("python", "Installed behavior, packaging boundaries"),
+            ("python-lowest-bounds", "Resolve direct dependencies at their floors"),
+        ):
+            script = step_script(job(name), step)
+            for failure in (
+                ("none", "packaging", "consumers", "tampered")
+                if name == "python"
+                else ("none", "packaging", "consumers")
+            ):
+                with (
+                    self.subTest(job=name, failure=failure),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    root = Path(directory)
+                    (root / "packages/sdk-python").mkdir(parents=True)
+                    artifacts = root / ".artifacts"
+                    artifacts.mkdir()
+                    wheel = artifacts / "hue_run-0.13.6-py3-none-any.whl"
+                    wheel.write_bytes(b"synthetic wheel")
+                    (artifacts / "SHA256SUMS").write_text(
+                        f"{hashlib.sha256(wheel.read_bytes()).hexdigest()}  {wheel.name}\n"
+                    )
+                    if failure == "tampered":
+                        wheel.write_bytes(b"different archive")
+                    bin_directory = root / "bin"
+                    bin_directory.mkdir()
+                    uv = bin_directory / "uv"
+                    uv.write_text(
+                        '#!/bin/sh\ncase "$*" in\n'
+                        '*"not installed_wheel"*) target=consumers;;\n'
+                        '*" pytest "*|*" pytest") target=packaging;;\n'
+                        "*) exit 0;;\nesac\n"
+                        'sleep 0.05\ntouch "$GITHUB_WORKSPACE/$target-finished"\n'
+                        'test "$FAILURE" != "$target"\n'
+                    )
+                    python = bin_directory / "python3"
+                    python.write_text(
+                        '#!/bin/sh\nif [ "$1" = -c ]; then echo 0.13.6; exit 0; fi\n'
+                        'sleep 0.05\ntouch "$GITHUB_WORKSPACE/consumers-finished"\n'
+                        'test "$FAILURE" != consumers\n'
+                    )
+                    uv.chmod(0o700)
+                    python.chmod(0o700)
+                    run = subprocess.run(
+                        ["bash", "-e", "-c", script],
+                        cwd=root if name == "python" else root / "packages/sdk-python",
+                        env={
+                            **os.environ,
+                            "PATH": f"{bin_directory}:{os.environ['PATH']}",
+                            "GITHUB_WORKSPACE": str(root),
+                            "RUNNER_TEMP": str(root),
+                            "PYTHON_VERSION": "3.14",
+                            "FAILURE": failure,
+                        },
+                        capture_output=True,
+                        check=False,
+                        timeout=10,
+                    )
+                    self.assertEqual(run.returncode == 0, failure == "none", run.stderr)
+                    self.assertEqual(
+                        (root / "packaging-finished").is_file(), failure != "tampered"
+                    )
+                    self.assertEqual(
+                        (root / "consumers-finished").is_file(), failure != "tampered"
+                    )
+
+    def test_doc_link_extraction_failure_cannot_pass_with_empty_input(self):
+        name = "Own GitHub links resolve to the right Git ref and file kind"
+        docs = job("docs")
+        step = next(part for part in re.split(r"(?m)^      - ", docs) if name in part)
+        self.assertIn("        shell: bash\n", step)
+        script = step_script(docs, name)
+        for status in (0, 19):
             with (
-                self.subTest(failure=failure),
+                self.subTest(status=status),
                 tempfile.TemporaryDirectory() as directory,
             ):
-                root = Path(directory)
-                (root / "packages/sdk-python").mkdir(parents=True)
-                artifacts = root / ".artifacts"
-                artifacts.mkdir()
-                wheel = artifacts / "hue_run-0.13.6-py3-none-any.whl"
-                wheel.write_bytes(b"synthetic wheel")
-                (artifacts / "SHA256SUMS").write_text(
-                    f"{hashlib.sha256(wheel.read_bytes()).hexdigest()}  {wheel.name}\n"
+                lychee = Path(directory) / "lychee"
+                lychee.write_text(
+                    "#!/bin/sh\n"
+                    + (
+                        "echo https://github.com/hue-run/hue-sdk/blob/main/AGENTS.md\n"
+                        if status == 0
+                        else ""
+                    )
+                    + f"exit {status}\n"
                 )
-                if failure == "tampered":
-                    wheel.write_bytes(b"different archive")
-                bin_directory = root / "bin"
-                bin_directory.mkdir()
-                uv = bin_directory / "uv"
-                uv.write_text(
-                    '#!/bin/sh\nsleep 0.05\ntouch "$GITHUB_WORKSPACE/packaging-finished"\n'
-                    'test "$FAILURE" != packaging\n'
-                )
-                python = bin_directory / "python3"
-                python.write_text(
-                    '#!/bin/sh\nif [ "$1" = -c ]; then echo 0.13.6; exit 0; fi\n'
-                    'sleep 0.05\ntouch "$GITHUB_WORKSPACE/consumers-finished"\n'
-                    'test "$FAILURE" != consumers\n'
-                )
-                uv.chmod(0o700)
-                python.chmod(0o700)
+                lychee.chmod(0o700)
                 run = subprocess.run(
-                    ["bash", "-e", "-c", script],
-                    cwd=root,
-                    env={
-                        **os.environ,
-                        "PATH": f"{bin_directory}:{os.environ['PATH']}",
-                        "GITHUB_WORKSPACE": str(root),
-                        "PYTHON_VERSION": "3.14",
-                        "FAILURE": failure,
-                    },
+                    [
+                        "bash",
+                        "--noprofile",
+                        "--norc",
+                        "-e",
+                        "-o",
+                        "pipefail",
+                        "-c",
+                        script,
+                    ],
+                    cwd=ROOT,
+                    env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"},
                     capture_output=True,
+                    check=False,
                     timeout=10,
                 )
-                self.assertEqual(run.returncode == 0, failure == "none", run.stderr)
-                self.assertEqual(
-                    (root / "packaging-finished").is_file(), failure != "tampered"
-                )
-                self.assertEqual(
-                    (root / "consumers-finished").is_file(), failure != "tampered"
-                )
+                self.assertEqual(run.returncode, status, run.stderr)
 
     def test_runtime_profile_cannot_produce_an_unchecked_archive(self):
         verifier = ROOT / "packages/sdk-typescript/scripts/verify-package.mjs"
@@ -114,7 +169,10 @@ class CiConsumerTests(unittest.TestCase):
             ["--profile", "runtime", "--archive", "x.tgz", "--artifacts-dir", "output"],
         ):
             run = subprocess.run(
-                ["node", str(verifier), *arguments], capture_output=True, timeout=10
+                ["node", str(verifier), *arguments],
+                capture_output=True,
+                check=False,
+                timeout=10,
             )
             self.assertNotEqual(run.returncode, 0)
             self.assertIn(b"requires an already checked archive", run.stderr)
@@ -126,7 +184,10 @@ class CiConsumerTests(unittest.TestCase):
             ["--profile", "pack", "--archive", "x.tgz", "--artifacts-dir", "output"],
         ):
             run = subprocess.run(
-                ["node", str(verifier), *arguments], capture_output=True, timeout=10
+                ["node", str(verifier), *arguments],
+                capture_output=True,
+                check=False,
+                timeout=10,
             )
             self.assertNotEqual(run.returncode, 0)
             self.assertIn(b"Packing requires a source build", run.stderr)

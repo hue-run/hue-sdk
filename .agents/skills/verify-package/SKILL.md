@@ -11,6 +11,8 @@ Run the narrowest check that covers the change. CI runs broad installed behavior
 
 ## Launch
 
+Source CI checks Markdown files and fragments offline and checks own GitHub links against Git refs. Daily/manual hosted checks retain external-link availability.
+
 Nothing to keep running. Install once: `bun install --frozen-lockfile` at the root, plus the package installs in [verify-sdk](../verify-sdk/SKILL.md). Then make a per-run directory for archives: `mkdir -p .context && export V=$(mktemp -d "$PWD/.context/verify-package-XXXXXX")` (ignored by Git and eslint; concurrent runs do not collide).
 
 ## Doctor

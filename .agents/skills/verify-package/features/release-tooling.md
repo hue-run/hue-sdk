@@ -6,6 +6,7 @@ The scripts under `scripts/` back the owner-run `Release SDK` workflow and docs 
 
 - `release-scripts` (`release-policy.py`, `release-artifacts.py`, `verify-prepared-release.py`, `wait-for-registry.py`, `npm-release-tags.py`).
 - `doc-versions` keeps version mentions in docs current.
+- `repository-links` resolves own GitHub blob/tree URLs against actual Git refs. Lychee checks local files and Markdown fragments offline; hosted link availability runs daily or manually.
 - `docs-contract` keeps `docs-contract.json` in step with the public API.
 - `changelog` validates changelog entries.
 - `npm-alias-release` (`release.yml`): `publish-npm-alias` publishes the `hue-run` npm alias through trusted publishing after `accept-npm`, when it pins exactly the released SDK at the same version, and `accept-npm-alias` checks it on npm; `publish-npm` skips a version npm already holds. `test_npm_release_tags` runs those steps' shell against a fake `curl` (200, 404, 503) and the committed alias.
@@ -20,7 +21,7 @@ Preconditions:
 
 - Python 3.11+. No network or registry credentials needed.
 
-- **One script's tests** (under 0.5 s). `python3 -m unittest scripts.test_release_artifacts`. Expected: exit 0 and a final `OK`; keep the full output if it fails. Test modules: `test_release_policy`, `test_verify_prepared_release`, `test_wait_for_registry`, `test_npm_release_tags`, `test_changelog`, `test_check_doc_versions`, `test_generate_docs_contract`, `test_docs_drift`, `test_skill_gate`.
+- **One script's tests** (under 0.5 s). `python3 -m unittest scripts.test_release_artifacts`. Expected: exit 0 and a final `OK`; keep the full output if it fails. Test modules: `test_release_policy`, `test_verify_prepared_release`, `test_wait_for_registry`, `test_npm_release_tags`, `test_changelog`, `test_check_doc_versions`, `test_generate_docs_contract`, `test_docs_drift`, `test_skill_gate`, `test_ci_consumers`, `test_repository_links`.
 - **All script tests** (0.6 s). `python3 -m unittest discover -s scripts -p 'test_*.py'`. Expected: `OK`.
 - **Docs files** (0.3 s). `python3 scripts/check-doc-versions.py && python3 scripts/generate-docs-contract.py --check`. Expected: `0 stale mention(s)` and `docs-contract.json is current`. After an intended API change run `bun run docs:contract` and commit the result.
 

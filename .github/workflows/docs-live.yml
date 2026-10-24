@@ -27,3 +27,14 @@ jobs:
         run: python3 scripts/check-docs-drift.py
       - name: Hosted API reference covers every public export
         run: python3 scripts/check-reference-coverage.py
+      - name: Published Markdown links remain available
+        if: always()
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          # npm's package UI rejects automated requests. Registry identity is checked separately.
+          args: >-
+            --no-progress --include-fragments
+            --exclude-path node_modules --exclude-path docs/reference
+            --exclude '^https://www\.npmjs\.com/package/@hue-run/sdk/?$'
+            "./**/*.md"
+          fail: true

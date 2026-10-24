@@ -35,7 +35,7 @@ Preconditions:
 
 - `uv build --out-dir` writes a `.gitignore` into the directory; `release-artifacts.py inspect` rejects it as unexpected inventory, so delete it first.
 - `scripts/verify-python-release.py` is the release-time consumer check and needs the selected Python 3.10 or 3.14 available. Its fresh pip and uv consumers run concurrently in separate environments; a failure waits for the other consumer to finish before temporary files are removed.
-- CI builds one universal wheel and shares its checksummed bytes across the two certified-runtime jobs. Lowest-dependency jobs retain their own build-tool floor proof and build one wheel per session. `HUE_TEST_WHEEL` supplies that archive to the four nested packaging cases. Without it, the source tests build once per pytest session. Source-only packaging cases and installed behavior run in parallel, and either failure fails the job.
+- CI builds one universal wheel and shares its checksummed bytes across the two certified-runtime jobs. Lowest-dependency jobs retain their own build-tool floor proof and build one wheel per session. `HUE_TEST_WHEEL` supplies that archive to the four nested packaging cases. Without it, the source tests build once per pytest session. Certified-runtime and dependency-floor jobs run source-only packaging cases and broad behavior in parallel. Either failure fails the job.
 
 ## Media release contract
 
