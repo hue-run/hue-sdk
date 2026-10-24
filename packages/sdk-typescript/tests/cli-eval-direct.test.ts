@@ -161,7 +161,8 @@ function documentStandIn(
   options: {
     gradedAfterPolls?: number;
     /** Queued CLI worker cases; ordinary document tests use their original single file case. */
-    workerKinds?: ("direct" | "world")[];
+    /** `reference`: a case pinned to a user World through a World model reference. */
+    workerKinds?: ("direct" | "world" | "reference")[];
     /** Number of sequential synthetic queue entries available to a worker. */
     workerRuns?: number;
     /** Transient result-read failures, after hosted jobs have already been accepted. */
@@ -290,10 +291,22 @@ function documentStandIn(
     inputs: { query: "Answer the user", tipo_diligencia: "Virtual" },
     metadata: { private: "evaluator-only canary" },
     environmentVersionId: kind === "world" ? environmentVersionId : null,
+    ...(kind === "reference"
+      ? {
+          worldModelReference: {
+            modelId: randomUUID(),
+            representedAt: "2026-10-01T00:00:00Z",
+            generation: "3",
+          },
+        }
+      : {}),
     inputFiles: [],
   }));
   const casesFor = (versionId: string) => workerCases ?? [cases.get(versionId)!];
-  const worlds = new Map<string, { id: string; executionId: string; status: string }>();
+  const worlds = new Map<
+    string,
+    { id: string; executionId: string; status: string; environmentVersionId: unknown }
+  >();
   const worldToken = "hue_world_synthetic_worker_canary";
   let queued: { runId: string; experimentId: string; state: string; workerId?: string } | undefined;
   let failWorkerCompletions = options.failWorkerCompletions ?? 0;
@@ -725,7 +738,12 @@ function documentStandIn(
       if (path === "/environment-runs") {
         const id = randomUUID();
         const expiresAt = new Date(Date.now() + 600_000).toISOString();
-        worlds.set(id, { id, executionId: String(body.executionId), status: "open" });
+        worlds.set(id, {
+          id,
+          executionId: String(body.executionId),
+          status: "open",
+          environmentVersionId: body.environmentVersionId,
+        });
         const mirror = `${url.origin}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
         return Response.json({
           id,
@@ -1874,7 +1892,13 @@ describe("hue eval hosted judges", () => {
 });
 
 describe("hue eval command workers", () => {
-  for (const kinds of [["direct"], ["world"], ["direct", "world"]] as const)
+  for (const kinds of [
+    ["direct"],
+    ["world"],
+    ["direct", "world"],
+    ["reference"],
+    ["direct", "reference"],
+  ] as const)
     test(
       `one relative command executes ${kinds.join(" and ")} cases with only their own handoff`,
       async () => {
@@ -1897,7 +1921,13 @@ describe("hue eval command workers", () => {
           expect(standIn.calls.localRuns.at(-1)).toMatchObject({ state: "completed" });
           expect(standIn.calls.starts).toBe(kinds.length);
           expect(standIn.calls.completions).toHaveLength(kinds.length);
-          expect(standIn.worlds.size).toBe(kinds.filter((kind) => kind === "world").length);
+          expect(standIn.worlds.size).toBe(kinds.filter((kind) => kind !== "direct").length);
+          // A model-reference case's World comes from its execution alone; a pinned case names its version.
+          expect(
+            [...standIn.worlds.values()].filter(
+              (world) => world.environmentVersionId === undefined,
+            ),
+          ).toHaveLength(kinds.filter((kind) => kind === "reference").length);
           const expectedKinds = new Map(kinds.map((kind, index) => [`${kind}-${index}`, kind]));
           for (const completion of standIn.calls.completions) {
             const kind = expectedKinds.get(String(completion.caseKey));
@@ -1909,9 +1939,9 @@ describe("hue eval command workers", () => {
               config: { configured: true },
               cwd,
               relativeDependency: "application settings",
-              hasWorld: kind === "world",
-              hasMcp: kind === "world",
-              hasMirror: kind === "world",
+              hasWorld: kind !== "direct",
+              hasMcp: kind !== "direct",
+              hasMirror: kind !== "direct",
               staleMirror: null,
               hueKey: null,
               mcpKey: null,
@@ -2863,6 +2893,37 @@ process.stdout.write(JSON.stringify({
 `;
 
 describe("hue eval on a mixed eval set", () => {
+  test("a case pinned to a user World through a model reference is a World case", async () => {
+    const standIn = documentStandIn({ workerKinds: ["reference"] });
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-reference-"));
+    // The preflight only reads the cases; the command never runs.
+    const args = [
+      "--set",
+      "gia-d1-citation",
+      "--set-version",
+      "1",
+      "--scorer",
+      "gia-d1-citation",
+      "--command",
+      `${process.execPath} -e ""`,
+      "--check",
+      "--json",
+    ];
+    try {
+      const checked = await hue(args, { cwd, env: { HUE_BASE_URL: standIn.baseUrl } });
+      expect(checked.status).toBe(0);
+      expect(JSON.parse(checked.stdout).check).toMatchObject({
+        ok: true,
+        mode: "simulation",
+        worldCases: 1,
+        directCases: 0,
+      });
+    } finally {
+      standIn.server.stop(true);
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   test(
     "one run executes the world case in a fresh world and the answer-only case without one, under its own checkpoint identity",
     async () => {

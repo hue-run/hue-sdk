@@ -34,6 +34,7 @@ import type {
   LocalScorer,
   TargetResult,
 } from "./types.js";
+import { pinsWorld } from "./types.js";
 
 /** Capability strings a registration declares; Hue offers only matching cases. */
 export const localAgentCapabilities = {
@@ -514,7 +515,7 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
           scorers: options.scorers,
           concurrency: options.concurrency,
           target: (inputs, context) => {
-            if (!context.item.environmentVersionId) {
+            if (!pinsWorld(context.item)) {
               // Hue offers ordinary cases only to registrations that declared direct:v1.
               if (!options.directTarget)
                 throw new Error("This worker runs only cases pinned to a Hue environment");

@@ -104,6 +104,25 @@ export interface DatasetVersion {
   /** Digest of the frozen content, or `null` for a draft. */
   contentDigest: string | null;
 }
+/** A case's frozen World model selection: Hue prepares its runtime World at execution. */
+export interface WorldModelReference {
+  /** The World model the case was built against. */
+  modelId: string;
+  /** When the model's state was captured, as an RFC 3339 timestamp. */
+  representedAt: string;
+  /** The model generation the case freezes. */
+  generation: string;
+}
+
+/** Whether a case runs in a World: it pins an immutable world version or a World model
+ * reference. A case with neither runs direct. */
+export function pinsWorld(item: {
+  environmentVersionId?: string | null;
+  worldModelReference?: WorldModelReference | null;
+}): boolean {
+  return Boolean(item.environmentVersionId || item.worldModelReference);
+}
+
 /** A stored case: inputs, an optional reference output and metadata. */
 export interface DatasetCase {
   /** Case ID. */
@@ -120,6 +139,8 @@ export interface DatasetCase {
   datasetVersionId: string;
   /** Exact immutable simulated world selected for this case, when present. */
   environmentVersionId?: string | null;
+  /** A frozen World model selection whose runtime World Hue prepares at execution. */
+  worldModelReference?: WorldModelReference | null;
   /** Immutable trace provenance retained when the case was promoted from a trace. */
   sourceTraceId?: string | null;
   /** Immutable source trace revision paired with `sourceTraceId`. */
@@ -838,6 +859,8 @@ export interface Subject {
   omissionReason: string | null;
   /** Present on current servers: the case's pinned world, or null for an ordinary case. */
   environmentVersionId?: string | null;
+  /** Present on current servers: the case's frozen World model selection, or null. */
+  worldModelReference?: WorldModelReference | null;
   /** Present on current servers: the frozen input and output files of this subject. */
   files?: SubjectFile[];
   /** The target's declared primary generated artifact, or `null`. */

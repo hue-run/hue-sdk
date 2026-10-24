@@ -27,7 +27,7 @@ import type {
   Scorer,
   ScorerVersion,
 } from "../evals/types.js";
-import { TargetResult } from "../evals/types.js";
+import { pinsWorld, TargetResult } from "../evals/types.js";
 import { CheckpointIdentityError, CheckpointStore, checkpointPath } from "../evals/checkpoint.js";
 import { onForcedExit, runForcedExitCleanups } from "../evals/exit-cleanup.js";
 import { safeFilename } from "../evals/files.js";
@@ -1169,7 +1169,8 @@ function parseMode(value: string | undefined): RunMode {
 type RunKind = "direct" | "simulation" | "mixed";
 
 /** How the selection's cases run, read from the one fact Hue publishes about each case: whether
- * it pins a simulated world (`environmentVersionId`). A trace-to-case publication with no world
+ * it pins a simulated world (`environmentVersionId`, or a `worldModelReference` whose World Hue
+ * prepares at execution). A trace-to-case publication with no world
  * (an answer-graded case, `grading: "answer"`) lists its case with a null pin, so selecting it
  * through its Scenario decides nothing. Left open, every world case runs in a fresh world, every
  * answer-only case runs direct, and a version holding both runs mixed; a forced `--mode` is
@@ -1214,7 +1215,7 @@ async function inspectSelection(
   do {
     const page = await client.listCases(pins.datasetVersionId, { after });
     cases += page.items.length;
-    worldCases += page.items.filter((item) => item.environmentVersionId).length;
+    worldCases += page.items.filter(pinsWorld).length;
     after = page.nextCursor ?? undefined;
   } while (after);
   return { cases, worldCases, ...runKindOf({ mode, cases, worldCases }) };
@@ -1919,13 +1920,11 @@ async function runExperimentAttempt(
       // A world case that a process which died here left running runs again in a fresh world;
       // an answer-only case it left running stays uncertain, since its agent may still be
       // acting. A direct run gives no case a world, so none of its cases reruns.
-      ...(environmentClient
-        ? { rerunCrashedCases: (item: ExperimentCase) => Boolean(item.environmentVersionId) }
-        : {}),
+      ...(environmentClient ? { rerunCrashedCases: pinsWorld } : {}),
       async target(inputs, context) {
         if (signal.aborted) throw new TargetCancelledError();
         const label = context.item.externalKey;
-        if (environmentClient && context.item.environmentVersionId)
+        if (environmentClient && pinsWorld(context.item))
           return runEnvironmentTarget({
             client,
             environmentClient,

@@ -396,7 +396,9 @@ export class WorldClient {
       "/environment-runs",
       {
         ...input,
-        environmentVersionId: uuid(input.environmentVersionId),
+        ...(input.environmentVersionId === undefined
+          ? {}
+          : { environmentVersionId: uuid(input.environmentVersionId) }),
         ...(input.executionId === undefined ? {} : { executionId: uuid(input.executionId) }),
       },
       options,
