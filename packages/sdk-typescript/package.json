@@ -129,6 +129,9 @@
       "optional": true
     }
   },
+  "resolutions": {
+    "zod": "^4.6.7"
+  },
   "engines": {
     "node": ">=22.12"
   }

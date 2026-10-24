@@ -897,6 +897,7 @@ try {
       "input:pdf",
       "input:docx",
       "environment:v1",
+      "world-model-reference:v1",
     ]);
     const { context } = seen;
     assert.equal(context.world.token, worldToken);

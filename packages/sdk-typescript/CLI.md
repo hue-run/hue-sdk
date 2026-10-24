@@ -1118,19 +1118,21 @@ script name; `--revision` is sent to Hue as the agent revision of every world.
 
 `--worker` registers the adapter through `runLocalAgent()` with key `--agent-key` (default: the
 adapter filename slug), name `--agent-name` (default: the key), revision `--revision` (default:
-`AGENT_REVISION`, then the Git `HEAD` short hash, then `dev`). Command workers register both
-`environment:v1` and `direct:v1`, plus any repeated `--capability <value>`: the same worker runs
+`AGENT_REVISION`, then the Git `HEAD` short hash, then `dev`). Command workers register
+`environment:v1`, `world-model-reference:v1` and `direct:v1`, plus any repeated `--capability <value>`: the same worker runs
 world cases, answer-only cases and mixed eval sets launched from Hue. Commands keep the launch
 directory for both case kinds, so relative application entry points and configuration work.
 Direct cases receive the task/config on stdin and private files/output through `HUE_CASE_*`,
 without a world token, MCP connection or `HUE_ENVIRONMENT_RUN_ID`. App calls that require a world
 must stay disabled for this handoff; never fall back to live app credentials.
 
-Adapter-file workers register `environment:v1` by default. Add `--capability direct:v1` only when
+Adapter-file workers register `environment:v1` and `world-model-reference:v1` by default (the
+second admits cases built from a trace and pinned to a user World). Add `--capability direct:v1` only when
 the adapter also handles `context.mode === "direct"`; its direct context carries `config`, case
 identity, `executionId`, `files`, `outputDirectory` and `signal`, with no world or tools. These
-worker behaviors are added in TypeScript 0.13.2. Upgrading an existing command worker requires a
-new `--revision`, because adding a capability to a previously registered revision is refused.
+worker behaviors are added in TypeScript 0.13.2. Upgrading an existing worker requires a new
+`--revision`, because adding a capability to a previously registered revision is refused; this
+includes the upgrade to the SDK that declares `world-model-reference:v1`.
 
 The worker prints the registration and each claimed run with its
 URL, executes runs launched from Hue until Ctrl+C or `--max-runs <n>`, and prints the verdict table

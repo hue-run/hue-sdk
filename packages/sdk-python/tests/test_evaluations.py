@@ -419,6 +419,7 @@ def evaluation_receiver():
             with state.lock:
                 state.requests.append((method, path, raw))
                 state.raw = raw
+                state.world_reference = self.headers.get("X-Hue-World-Reference")
                 state.encoding = self.headers.get("Content-Encoding")
                 state.query = urlsplit(self.path).query
                 status, value = dispatch(method, path, body)
@@ -768,6 +769,7 @@ def test_product_run_and_scoring_methods_keep_distinct_ids(evaluation_receiver):
     assert body["evaluatorVersionIds"] == [receiver.scorer_id]
     assert body["config"] == {"experimentId": "customer-config"}
     run = client.get_run(receiver.experiment_id)
+    assert receiver.world_reference == "1"
     assert run["evalSetVersionId"] == receiver.version_id
     assert run["scoring"]["evaluatorVersions"][0]["evaluatorId"] == receiver.evaluator_id
     assert run["config"] == {"answer": None}

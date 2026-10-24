@@ -39,6 +39,9 @@ import type {
 export const localAgentCapabilities = {
   /** Cases pinned to a hosted synthetic world. */
   environment: "environment:v1",
+  /** Cases pinned to a World model reference (a user World a trace-to-case case was built
+   * against); declared with `environment:v1` whenever `target` is supplied. */
+  modelReference: "world-model-reference:v1",
   /** Ordinary cases run directly on this machine: JSON inputs and pinned input files in,
    * JSON output and generated files out. */
   direct: "direct:v1",
@@ -271,12 +274,16 @@ export function registeredCapabilities(options: {
     throw new TypeError("direct:v1 requires a directTarget callback");
   if (declared.includes(localAgentCapabilities.environment) && !options.target)
     throw new TypeError("environment:v1 requires a target callback");
+  if (declared.includes(localAgentCapabilities.modelReference) && !options.target)
+    throw new TypeError("world-model-reference:v1 requires a target callback");
   if (declared.includes(localAgentCapabilities.environmentFiles) && !options.target)
     throw new TypeError("environment-files:v1 requires a target callback");
   return [
     ...new Set([
       ...declared,
-      ...(options.target ? [localAgentCapabilities.environment] : []),
+      ...(options.target
+        ? [localAgentCapabilities.environment, localAgentCapabilities.modelReference]
+        : []),
       ...(options.directTarget ? [localAgentCapabilities.direct] : []),
     ]),
   ];
