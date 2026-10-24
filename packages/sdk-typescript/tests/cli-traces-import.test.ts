@@ -2844,7 +2844,7 @@ describe("the hue binary", () => {
     const help = await hueBinary(["--help"]);
     expect(help.code).toBe(0);
     expect(help.stdout).toContain(
-      "Usage: hue <setup|resume|status|claim|login|eval|mcp|listen|import|traces>",
+      "Usage: hue <setup|resume|status|claim|login|eval|mcp|listen|import|traces|world>",
     );
     const traces = await hueBinary(["traces", "--help"]);
     expect(traces.code).toBe(0);
