@@ -1,4 +1,4 @@
-import { exchange, ExportError } from "./world-export.js";
+import { exchange, ExportError, fitsOneFile } from "./world-export.js";
 import { isObject, send, type Transport, type JsonObject } from "./world-http.js";
 
 /**
@@ -43,6 +43,10 @@ const OBJECTS = [
   "CaseStatus",
   "TaskStatus",
 ];
+/** Records a query page asks for, and the fewest Salesforce allows, which an object whose page
+ * is too large for one file is read again at. */
+const BATCH_SIZE = 2000;
+const MIN_BATCH_SIZE = 200;
 /** The longest query URL sent: Salesforce refuses a request URL past about 16 KB. */
 const MAX_QUERY_URL = 12_000;
 /** Field types a query leaves out: their component fields carry the values. */
@@ -73,7 +77,8 @@ export async function exportSalesforce(
   progress: (line: string) => void,
 ): Promise<JsonObject[]> {
   const exchanges: JsonObject[] = [];
-  const get = async (path: string, query = false) => {
+  /** One call, as sent and answered; a query page asks for `batchSize` records. */
+  const request = async (path: string, batchSize?: number) => {
     const url = `${org.origin}${path}`;
     const answer = await send(
       "Salesforce",
@@ -82,13 +87,12 @@ export async function exportSalesforce(
         url,
         headers: {
           authorization: `Bearer ${org.accessToken}`,
-          ...(query ? { "sforce-query-options": "batchSize=2000" } : {}),
+          ...(batchSize ? { "sforce-query-options": `batchSize=${batchSize}` } : {}),
         },
       },
       transport,
       () => undefined,
     );
-    exchanges.push(exchange(url, answer));
     if (answer.status === 401)
       throw new ExportError("Salesforce refused the access token (HTTP 401)");
     const code =
@@ -97,7 +101,51 @@ export async function exportSalesforce(
       throw new ExportError(
         "The org has used its Salesforce API requests for today (REQUEST_LIMIT_EXCEEDED)",
       );
+    return { answer, recorded: exchange(url, answer) };
+  };
+  const get = async (path: string) => {
+    const { answer, recorded } = await request(path);
+    exchanges.push(recorded);
     return answer;
+  };
+  /** Pages too large for one file even at the fewest records a page, named in the summary. */
+  const missing: string[] = [];
+  /**
+   * One field group's full listing at a page size, followed through `nextRecordsUrl` and kept
+   * only once it is complete. Undefined when a page is too large for one file and a smaller page
+   * size is left; at the fewest records a page, such a page is left out and counted.
+   */
+  const readListing = async (name: string, path: string, batchSize: number) => {
+    const recorded: JsonObject[] = [];
+    let read = 0;
+    let skipped = 0;
+    let page = await request(path, batchSize);
+    for (;;) {
+      const body = isObject(page.answer.body) ? page.answer.body : {};
+      const count = Array.isArray(body.records) ? body.records.length : 0;
+      if (fitsOneFile(page.recorded)) {
+        recorded.push(page.recorded);
+        read += count;
+      } else if (batchSize > MIN_BATCH_SIZE) return undefined;
+      else skipped += count;
+      const next = body.nextRecordsUrl;
+      if (page.answer.status !== 200 || body.done !== false || typeof next !== "string")
+        return { recorded, read, skipped, status: page.answer.status };
+      if (!next.startsWith("/services/data/"))
+        throw new ExportError(`Salesforce answered an unexpected next page for ${name}`);
+      page = await request(next, batchSize);
+    }
+  };
+  /** A listing at the usual page size, or from the start at the fewest records a page when one
+   * of its pages is too large for one file. */
+  const listing = async (name: string, path: string) => {
+    for (let batchSize = BATCH_SIZE; ; batchSize = MIN_BATCH_SIZE) {
+      const result = await readListing(name, path, batchSize);
+      if (result) return result;
+      progress(
+        `Salesforce: a page of ${name} is larger than one file; reading it again ${MIN_BATCH_SIZE} records a page.`,
+      );
+    }
   };
 
   const me = await get(`${API}/chatter/users/me`);
@@ -168,22 +216,14 @@ export async function exportSalesforce(
     let records = 0;
     let failed: string | undefined;
     for (const [index, fieldGroup] of groups.entries()) {
-      let page = await get(queryPath(fieldGroup), true);
-      let read = 0;
-      for (;;) {
-        const body = isObject(page.body) ? page.body : {};
-        if (Array.isArray(body.records)) read += body.records.length;
-        const next = body.nextRecordsUrl;
-        if (page.status !== 200 || body.done !== false || typeof next !== "string") break;
-        if (!next.startsWith("/services/data/"))
-          throw new ExportError(`Salesforce answered an unexpected next page for ${name}`);
-        page = await get(next, true);
-      }
+      const { recorded, read, skipped, status } = await listing(name, queryPath(fieldGroup));
+      exchanges.push(...recorded);
+      if (skipped) missing.push(`${name} (${skipped} records)`);
       // Every group lists the same records; the first group's count is the object's.
       if (index === 0) records = read;
       // A failed page is kept as Salesforce answered it; the records after it are missing.
-      if (page.status !== 200)
-        failed ??= `Salesforce: reading ${name}${groups.length > 1 ? ` (field group ${index + 1} of ${groups.length})` : ""} answered HTTP ${page.status} after ${read} records; the rest of ${name} is missing.`;
+      if (status !== 200)
+        failed ??= `Salesforce: reading ${name}${groups.length > 1 ? ` (field group ${index + 1} of ${groups.length})` : ""} answered HTTP ${status} after ${read} records; the rest of ${name} is missing.`;
     }
     if (groups.length > 1) split.push(`${name} (${groups.length})`);
     progress(
@@ -191,6 +231,10 @@ export async function exportSalesforce(
         `Salesforce: ${records} ${name}${groups.length > 1 ? ` in ${groups.length} field groups` : ""}`,
     );
   }
+  if (missing.length)
+    progress(
+      `Salesforce: pages larger than one file even at ${MIN_BATCH_SIZE} records a page are missing: ${missing.join(", ")}.`,
+    );
   if (split.length)
     progress(
       `Salesforce: read ${split.length === 1 ? "1 wide object" : `${split.length} wide objects`} in field groups to stay within the URL limit: ${split.join(", ")}.`,

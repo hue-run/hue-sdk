@@ -348,7 +348,11 @@ Slack, Salesforce and Gmail calls are recorded as exchanges,
 answer and its headers as the app gave them (cookies left out); a conversation the token cannot
 read is recorded with Slack's `ok: false` answer. Each read an app refuses (a Slack `ok: false`,
 a Salesforce describe or query error, a Gmail list or message error) is also named on stderr, so
-a partial export shows as one. Through Composio, Linear's queries run with the
+a partial export shows as one. A page too large for one file (25 MiB) is asked for again in
+smaller pages: a Slack list page from the same cursor at half its limit, down to 100, keeping
+the cursor chain whole (`conversations.list` stays at 200), and a Salesforce listing from the
+start at `batchSize=200`. A Gmail message too large for one file, or a page still too large at
+the smallest size, is left out and named in the summary. Through Composio, Linear's queries run with the
 `LINEAR_RUN_QUERY_OR_MUTATION` tool on the connected account, and the World also answers the
 Composio calls your agent makes with the same user id and connected account. The credentials
 travel only in request headers, are never recorded and are replaced with `[redacted]` in output.

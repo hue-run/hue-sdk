@@ -30,7 +30,9 @@ refuses to publish a version without a matching entry below.
   wide for one query URL in field groups, each with `Id`), and `gmail`
   every message (in `full` format, and `raw` when it has an attachment), label and draft a
   `gmail.readonly` token can read, each call as an exchange with its answer and response headers
-  exactly as the app gave them. Credentials travel
+  exactly as the app gave them. A page too large for one file is asked for again in smaller
+  pages (Slack at half its limit, down to 100; Salesforce at `batchSize=200`); a Gmail message
+  that large is left out and named. Credentials travel
   only in request headers and are never recorded or printed.
 - `hue world run <world version> -- <command>` starts an instance (`POST /api/v1/instances`),
   runs the command with the instance's variables (`HUE_SIM_<SURFACE>_URL`, `HUE_WORLD_TOKEN`,

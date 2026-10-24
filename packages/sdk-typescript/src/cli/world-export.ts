@@ -30,6 +30,10 @@ export function exchange(url: string, answer: Answer): JsonObject {
   };
 }
 
+/** Whether an object fits one file of its own. */
+export const fitsOneFile = (object: unknown, maxBytes = MAX_FILE_BYTES): boolean =>
+  Buffer.byteLength(JSON.stringify(object)) + 2 <= maxBytes;
+
 /**
  * The objects as JSON files, each one array within Hue's per-file limit, in their order.
  * shortcut: an export is held in memory until it is packed, which suits the size Hue accepts in
