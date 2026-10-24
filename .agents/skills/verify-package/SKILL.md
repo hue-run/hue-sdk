@@ -7,9 +7,11 @@ description: "Verify a change to how the Hue SDKs are built, packed, installed o
 
 Users get the SDKs from npm and PyPI, so the user path is: build the archive, inspect what is inside, install it into a fresh consumer and use it. Release publishing is owner-only and runs in GitHub Actions; locally you only build and verify archives, the equivalent of the `publish=false` release run. Never run `npm publish`, `uv publish` or the release workflow.
 
-Run the narrowest check that covers the change. The full verifier takes about 6.5 minutes and CI runs it on every PR across Node 22, 24, 26 and Bun.
+Run the narrowest check that covers the change. CI runs broad installed behavior once under Bun and adapter acceptance for every supported pair. Native checks use the same archive on Node 22, 24 and 26.
 
 ## Launch
+
+Source CI checks Markdown files and fragments offline and checks own GitHub links against Git refs. Daily/manual hosted checks retain external-link availability.
 
 Nothing to keep running. Install once: `bun install --frozen-lockfile` at the root, plus the package installs in [verify-sdk](../verify-sdk/SKILL.md). Then make a per-run directory for archives: `mkdir -p .context && export V=$(mktemp -d "$PWD/.context/verify-package-XXXXXX")` (ignored by Git and eslint; concurrent runs do not collide).
 
@@ -28,7 +30,7 @@ Pick the feature in [features/](features/README.md). Measured on a 4-core VM:
 | `python3 -m unittest discover -s scripts -p 'test_*.py'` | 0.6 s |
 | `check-doc-versions.py` + `generate-docs-contract.py --check` | 0.3 s |
 | One release script test: `python3 -m unittest scripts.test_<name>` | under 0.5 s |
-| Full `verify-package.mjs` (tarball, Node and Bun consumers, chatbot) | about 6.5 min, CI |
+| Full `verify-package.mjs` (tarball, isolated Bun suites, Node and Bun adapters) | CI; record elapsed time |
 | `pytest tests/test_wheel.py` (standalone wheel consumers) | about 3 min, CI |
 
 ## Evidence

@@ -13,7 +13,7 @@ This repository is public and MIT-licensed. Read README.md and the relevant pack
 
 ## Verification (definition of done)
 
-Run from the repository root. All four must succeed before a pull request merges; CI runs them on every PR. Locally, run the narrowest check from the matching verify skill (see below) and run a full command yourself when the change targets it:
+Run from the repository root. All four must succeed before a pull request merges; CI covers these claims on every PR. The Python broad suite runs from a fresh wheel consumer, with source-only packaging cases checked separately. Locally, run the narrowest check from the matching verify skill (see below) and run a full command yourself when the change targets it:
 
 ```sh
 node packages/sdk-typescript/scripts/verify-package.mjs
@@ -22,7 +22,7 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 (cd packages/sdk-python && uv sync --frozen --all-groups && uv run --frozen --all-groups pytest && uv run --frozen --all-groups ruff check src tests ../../examples/python-agent ../../examples/python-evaluation && uv run --frozen --all-groups ruff format --check src tests ../../examples/python-agent ../../examples/python-evaluation && uv run --frozen --all-groups mypy)
 ```
 
-CI runs the same checks on Node 22, 24 and 26 (the installed package also under Bun 1.4.2) and on Python 3.10 and 3.14. Documentation-only changes need accurate, runnable snippets and working links. See CONTRIBUTING.md for review expectations, RELEASING.md for releases, VERSIONING.md for the compatibility policy and SECURITY.md for vulnerability reports.
+CI runs broad Bun behavior once, adapter checks for every supported AI pair, and native package checks on Node 22, 24 and 26. Python installed behavior runs on 3.10 and 3.14, alongside complete lowest-bound suites on 3.10 and 3.12. Both installers use the same candidate archive. Documentation-only changes need accurate, runnable snippets and working links. See CONTRIBUTING.md for review expectations, RELEASING.md for releases, VERSIONING.md for the compatibility policy and SECURITY.md for vulnerability reports.
 
 ## Pstack skills
 

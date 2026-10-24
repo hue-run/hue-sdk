@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { parseArgs } from "node:util";
+import { waitForChecks } from "./wait-for-checks.mjs";
 // A namespace import: Node.js 22.12 to 22.14 have no zstd, and a missing named export fails loading.
 import * as zlib from "node:zlib";
 
@@ -15,12 +16,24 @@ const { values } = parseArgs({
     "registry-version": { type: "string" },
     "artifacts-dir": { type: "string" },
     "landing-latest": { type: "boolean", default: false },
+    profile: { type: "string", default: "full" },
   },
 });
 if (values.archive && values["registry-version"])
   throw new Error("Choose an archive or registry version");
 if (values["registry-version"] && values["artifacts-dir"])
   throw new Error("Registry verification does not produce a release archive");
+if (!["full", "runtime", "pack"].includes(values.profile))
+  throw new Error("Choose the full, runtime or pack verification profile");
+if (values.profile === "runtime" && (!values.archive || values["artifacts-dir"]))
+  throw new Error(
+    "Runtime verification requires an already checked archive and produces no archive",
+  );
+if (
+  values.profile === "pack" &&
+  (!values["artifacts-dir"] || values.archive || values["registry-version"])
+)
+  throw new Error("Packing requires a source build and a candidate archive directory");
 if (values["landing-latest"])
   throw new Error(
     "--landing-latest is not a loopback package check. Run Fern's hosted acceptance for the literal public @latest commands and preserve its separate evidence.",
@@ -184,8 +197,15 @@ if (!values.archive && !values["registry-version"]) {
     throw new Error("Outcome evaluator implementation assets are outside this release");
   console.log(`pack inventory: ${npmFiles.size} files agree between npm pack and bun pm pack`);
 }
+if (values.profile === "pack") {
+  const output = resolve(values["artifacts-dir"]);
+  await mkdir(output, { recursive: true });
+  await cp(tarball, join(output, basename(tarball)), { force: false, errorOnExist: true });
+  console.log(JSON.stringify({ candidate: tarball, checked: false }));
+  process.exit(0);
+}
 const packageSpec = values["registry-version"] ?? `file:${tarball}`;
-if (!values.archive && !values["registry-version"]) {
+if (!values["registry-version"]) {
   const aliasTarball = join(destination, `hue-run-${aliasPkg.version}.tgz`);
   run("npm", ["pack", "--ignore-scripts", "--pack-destination", destination], aliasSource);
   const aliasConsumer = join(destination, "alias-consumer");
@@ -1030,6 +1050,8 @@ run(
 );
 const installedPackageTests = [
   "sdk.test.ts",
+  "ai-sdk.test.ts",
+  "failure.test.ts",
   "tool-endpoint.test.ts",
   "live-spans.test.ts",
   "lifetime.test.ts",
@@ -1098,7 +1120,7 @@ async function verifyConsumer(patch) {
     recursive: true,
   });
   await Promise.all(
-    installedPackageTests.map((name) =>
+    [...installedPackageTests, "sdk-receiver.ts"].map((name) =>
       cp(join(source, "tests", name), join(consumer, "tests", name)),
     ),
   );
@@ -1151,6 +1173,18 @@ void [transition, event, options, backend];
         .replaceAll('"../src/world.js"', '"@hue-run/sdk/world"')
         .replaceAll('"../src/client.js"', '"@hue-run/sdk"')
         .replaceAll('"../src/managed.js"', '"@hue-run/sdk/managed"')
+        .replaceAll(
+          '"../src/environment/client.js"',
+          '"../node_modules/@hue-run/sdk/dist/environment/client.js"',
+        )
+        .replaceAll(
+          '"../src/evals/client.js"',
+          '"../node_modules/@hue-run/sdk/dist/evals/client.js"',
+        )
+        .replaceAll(
+          '"../src/evals/failure.js"',
+          '"../node_modules/@hue-run/sdk/dist/evals/failure.js"',
+        )
         .replaceAll(
           '"../src/evals/checkpoint.js"',
           '"../node_modules/@hue-run/sdk/dist/evals/checkpoint.js"',
@@ -1214,29 +1248,72 @@ void [transition, event, options, backend];
   );
   if (installed.name !== pkg.name || installed.version !== pkg.version)
     throw new Error("Installed package does not match this checkout");
-  for (const runtime of [process.execPath, "bun"]) {
-    await runAsync(
-      runtime,
-      [join(source, "scripts/verify-scorer-deferral.mjs"), consumer],
-      destination,
-    );
-    await runAsync(runtime, [join(source, "scripts/verify-file-cases.mjs"), consumer], destination);
+  if (patch === 139) {
+    for (const runtime of values.profile === "runtime"
+      ? [process.execPath]
+      : [process.execPath, "bun"]) {
+      await runAsync(
+        runtime,
+        [join(source, "scripts/verify-scorer-deferral.mjs"), consumer],
+        destination,
+      );
+      await runAsync(
+        runtime,
+        [join(source, "scripts/verify-file-cases.mjs"), consumer],
+        destination,
+      );
+    }
   }
   // Check consumers against the packed declarations, not only source types.
   await runAsync("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], consumer);
-  // HUE_JUNIT_DIR (set by CI) collects a JUnit report per AI SDK pair for the workflow summary.
-  const junit = process.env.HUE_JUNIT_DIR
-    ? [
-        "--reporter=junit",
-        `--reporter-outfile=${join(process.env.HUE_JUNIT_DIR, `bun-test-ai7.0.${patch}.xml`)}`,
-      ]
-    : [];
   if (process.env.HUE_JUNIT_DIR) await mkdir(process.env.HUE_JUNIT_DIR, { recursive: true });
-  await runAsync(
-    "bun",
-    ["--no-env-file", "test", ...junit, ...installedPackageTests.map((name) => `./tests/${name}`)],
-    consumer,
-  );
+  if (values.profile === "full") {
+    // Separate processes keep each suite's global providers and environment changes isolated.
+    const transport = [
+      "sdk.test.ts",
+      "live-spans.test.ts",
+      "lifetime.test.ts",
+      "tool-endpoint.test.ts",
+    ];
+    const media = [
+      "blobs.test.ts",
+      "large-media.test.ts",
+      "media.test.ts",
+      "files.test.ts",
+      "inline-files.test.ts",
+      "case-files.test.ts",
+    ];
+    const groups =
+      patch === 139
+        ? [
+            transport,
+            media,
+            installedPackageTests.filter(
+              (name) => !transport.includes(name) && !media.includes(name),
+            ),
+          ]
+        : [["ai-sdk.test.ts", "failure.test.ts"]];
+    await waitForChecks(
+      groups.map((tests, index) =>
+        runAsync(
+          "bun",
+          [
+            "--no-env-file",
+            "test",
+            ...(process.env.HUE_JUNIT_DIR
+              ? [
+                  "--reporter=junit",
+                  `--reporter-outfile=${join(process.env.HUE_JUNIT_DIR, `bun-test-ai7.0.${patch}-${index}.xml`)}`,
+                ]
+              : []),
+            ...tests.map((name) => `./tests/${name}`),
+          ],
+          consumer,
+        ),
+      ),
+      "Installed test batch failed",
+    );
+  }
   const exampleSource = resolve(source, "../../examples/reference-chatbot");
   await cp(exampleSource, chatbot, {
     recursive: true,
@@ -1258,16 +1335,19 @@ void [transition, event, options, backend];
   );
   // The same acceptance under Bun: verify-node.mjs starts the chatbot with process.execPath,
   // so this exercises the installed package and the reference chatbot on the Bun runtime.
-  await runAsync(
-    "bun",
-    ["--no-env-file", join(source, "scripts/verify-node.mjs"), consumer, chatbot],
-    destination,
-  );
-  await runAsync(
-    process.execPath,
-    ["--unhandled-rejections=strict", join(source, "scripts/verify-safety.mjs"), consumer],
-    destination,
-  );
+  if (values.profile === "full") {
+    await runAsync(
+      "bun",
+      ["--no-env-file", join(source, "scripts/verify-node.mjs"), consumer, chatbot],
+      destination,
+    );
+  }
+  if (patch === 139)
+    await runAsync(
+      process.execPath,
+      ["--unhandled-rejections=strict", join(source, "scripts/verify-safety.mjs"), consumer],
+      destination,
+    );
   console.log(
     JSON.stringify({
       tarball: values["registry-version"] ? undefined : tarball,
@@ -1277,11 +1357,10 @@ void [transition, event, options, backend];
     }),
   );
 }
-const consumers = await Promise.allSettled([99, 100, 137, 138, 139].map(verifyConsumer));
-const failures = consumers
-  .filter((result) => result.status === "rejected")
-  .map((result) => result.reason);
-if (failures.length) throw new AggregateError(failures, "Installed consumer verification failed");
+await waitForChecks(
+  [99, 100, 137, 138, 139].map(verifyConsumer),
+  "Installed consumer verification failed",
+);
 // Copy only after all installed-package and Node chatbot checks pass. Publishers
 // consume these exact bytes; they must never rebuild a package after verification.
 if (values["artifacts-dir"]) {

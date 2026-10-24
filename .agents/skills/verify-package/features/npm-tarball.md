@@ -6,7 +6,7 @@
 
 - `npm-inventory` ships exactly the intended `dist/` files, docs and license.
 - `npm-exports` resolves every `exports` entry under ESM, `require(esm)` and TypeScript.
-- `npm-consumer` installs the tarball into fresh Node and Bun projects for all five AI SDK 7/`@ai-sdk/otel` pairs. The pairs run concurrently, with each pair's checks kept in order. The verifier waits for every pair before returning failure and copies a release artifact only after every check passes.
+- `npm-consumer` installs the tarball into fresh Node and Bun projects for all five AI SDK 7/`@ai-sdk/otel` pairs. The pairs run concurrently, with each pair's checks kept in order. Broad Bun behavior runs in three isolated batches with pair 139; `tests/ai-sdk.test.ts`, AI SDK error classification in `tests/failure.test.ts`, and the reference chatbot cover every pair. Node-native safety and file/scorer boundaries run once per Node version, since their dependencies do not change with the AI pair. The verifier waits for every pair before returning failure and copies a release artifact only after every check passes.
 - `npm-bundle-safe` keeps every module reachable from `.` and `./ai-sdk` free of computed `import()` specifiers, so a bundling framework (Next.js) can resolve them; the verifier prints `bundle safety: N runtime modules`.
 
 ## How to get to it (user POV)
@@ -30,11 +30,12 @@ Preconditions:
   ```
 
   Expected: `function`. Replace the import with the subpath or export you changed.
-- **Full verifier** (about 6.5 min, CI also runs it). `env -u HUE_API_KEY node packages/sdk-typescript/scripts/verify-package.mjs`. Expected: ends with `{"tarball":...,"consumer":...,"chatbot":...}` and exit 0. Run it locally only when the change affects the verifier itself or installed setup.
+- **Full verifier** (CI also runs it). `env -u HUE_API_KEY node packages/sdk-typescript/scripts/verify-package.mjs`. Expected: ends with `{"tarball":...,"consumer":...,"chatbot":...}` and exit 0. Run it locally only when the change affects the verifier itself or installed setup.
 
 ## Gotchas
 
 - `npm pack` without `--ignore-scripts` is fine too, but build first: the tarball takes whatever is in `dist/`.
+- CI builds one candidate with `--profile pack --artifacts-dir .artifacts`. All three Node jobs download those checksummed bytes concurrently, and the required fan-in rejects any failed or skipped producer or consumer. Node 24 runs full behavior. Node 22 and 26 call `verify-package.mjs --archive <tarball> --profile runtime`. This profile preserves packed declarations, optional-peer refusals, native safety and every pair's Node chatbot acceptance. It omits repeated Bun checks and cannot produce a release archive.
 - A `HUE_API_KEY` in the shell fails the full verifier's `express-npm installed setup succeeds` assertion with `configuration_conflict`.
 - The verifier's own temp directory is printed in its final JSON; it is not cleaned up automatically.
 

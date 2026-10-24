@@ -5,7 +5,7 @@
 ## Sub-features
 
 - `wheel-inventory` ships exactly the intended modules and metadata.
-- `wheel-consumer` installs into a fresh environment on Python 3.10 and 3.14 and exports a trace.
+- `wheel-consumer` installs the same candidate wheel into fresh pip and uv environments on Python 3.10 and 3.14. Pip runs broad behavior; uv runs content-default, metadata-only and isolated schema-worker checks. Both import before frozen test dependencies are added.
 
 ## How to get to it (user POV)
 
@@ -34,7 +34,8 @@ Preconditions:
 ## Gotchas
 
 - `uv build --out-dir` writes a `.gitignore` into the directory; `release-artifacts.py inspect` rejects it as unexpected inventory, so delete it first.
-- `scripts/verify-python-release.py` is the release-time version of the consumer check and needs both Python 3.10 and 3.14 available. Its fresh pip and uv consumers run concurrently in separate environments; a failure waits for the other consumer to finish before temporary files are removed.
+- `scripts/verify-python-release.py` is the release-time consumer check and needs the selected Python 3.10 or 3.14 available. Its fresh pip and uv consumers run concurrently in separate environments; a failure waits for the other consumer to finish before temporary files are removed.
+- CI builds one universal wheel and shares its checksummed bytes across the two certified-runtime jobs. Lowest-dependency jobs retain their own build-tool floor proof and build one wheel per session. `HUE_TEST_WHEEL` supplies that archive to the four nested packaging cases. Without it, the source tests build once per pytest session. Certified-runtime and dependency-floor jobs run source-only packaging cases and broad behavior in parallel. Either failure fails the job.
 
 ## Media release contract
 
