@@ -1114,6 +1114,9 @@ describe("hue world create --export-from", () => {
   test("salesforce: describes each object and pages queryAll, or query without IsDeleted", async () => {
     const stand = hue();
     const paths: string[] = [];
+    // A custom object too wide for one query URL: 600 long field names.
+    const wide = Array.from({ length: 600 }, (_, i) => `Customer_Satisfaction_Score_${i}__c`);
+    const wideQueries: { fields: string[]; urlLength: number }[] = [];
     const describe = (fields: [string, string][]) =>
       Response.json({ fields: fields.map(([name, type]) => ({ name, type })) });
     const salesforce: Handler = (request) => {
@@ -1132,6 +1135,7 @@ describe("hue world create --export-from", () => {
               { name: "Account", custom: false, queryable: true },
               { name: "User", custom: false, queryable: true },
               { name: "Widget__c", custom: true, queryable: true },
+              { name: "Wide__c", custom: true, queryable: true },
               { name: "Hidden__c", custom: true, queryable: false },
               { name: "Setting__mdt", custom: true, queryable: true },
             ],
@@ -1151,7 +1155,26 @@ describe("hue world create --export-from", () => {
           ]);
         case "/sobjects/Widget__c/describe":
           return Response.json([{ errorCode: "NOT_FOUND", message: "gone" }], { status: 404 });
+        case "/sobjects/Wide__c/describe":
+          return describe([
+            ["Id", "id"],
+            ["IsDeleted", "boolean"],
+            ...wide.map((name): [string, string] => [name, "double"]),
+          ]);
         case "/queryAll":
+          if (url.searchParams.get("q")!.endsWith(" FROM Wide__c")) {
+            const fields = /^SELECT (.*) FROM Wide__c$/
+              .exec(url.searchParams.get("q")!)![1]!
+              .split(",");
+            wideQueries.push({ fields, urlLength: request.url.length });
+            return Response.json({
+              totalSize: 1,
+              done: true,
+              records: [
+                Object.fromEntries(fields.map((field) => [field, field === "Id" ? "a0W1" : 1])),
+              ],
+            });
+          }
           return Response.json({
             totalSize: 3,
             done: false,
@@ -1178,7 +1201,7 @@ describe("hue world create --export-from", () => {
     expect(result.code).toBe(0);
     // The standard objects in the list's order, then the queryable custom objects; an object
     // whose describe fails is recorded and not queried.
-    expect(paths).toEqual([
+    expect(paths.slice(0, 9)).toEqual([
       "/chatter/users/me",
       "/sobjects",
       "/sobjects/User/describe",
@@ -1187,7 +1210,20 @@ describe("hue world create --export-from", () => {
       "/queryAll?q=SELECT+Id%2CName%2CIsDeleted+FROM+Account",
       "/query/01gA-2000",
       "/sobjects/Widget__c/describe",
+      "/sobjects/Wide__c/describe",
     ]);
+    // The wide object is read in field groups: each within the URL budget, each with Id and
+    // IsDeleted, together every field once.
+    expect(wideQueries.length).toBeGreaterThan(1);
+    for (const query of wideQueries) {
+      expect(query.urlLength).toBeLessThanOrEqual(12_000);
+      expect(query.fields.slice(0, 2)).toEqual(["Id", "IsDeleted"]);
+    }
+    expect(wideQueries.flatMap((query) => query.fields.slice(2))).toEqual(wide);
+    expect(result.stderr).toContain(`Salesforce: 1 Wide__c in ${wideQueries.length} field groups`);
+    expect(result.stderr).toContain(
+      `Salesforce: read 1 wide object in field groups to stay within the URL limit: Wide__c (${wideQueries.length}).`,
+    );
     expect(result.stderr).toContain("Salesforce: 3 Account");
     expect(result.stderr).toContain(
       "Salesforce: describing Widget__c answered HTTP 404; Widget__c is not exported.",

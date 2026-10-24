@@ -43,6 +43,8 @@ const OBJECTS = [
   "CaseStatus",
   "TaskStatus",
 ];
+/** The longest query URL sent: Salesforce refuses a request URL past about 16 KB. */
+const MAX_QUERY_URL = 12_000;
 /** Field types a query leaves out: their component fields carry the values. */
 const SKIPPED_TYPES = new Set(["base64", "address", "location"]);
 
@@ -121,6 +123,8 @@ export async function exportSalesforce(
       .map((sobject) => sobject.name as string),
   ];
 
+  /** Objects read in field groups, with their group counts, for the summary. */
+  const split: string[] = [];
   for (const name of new Set(names)) {
     const describe = await get(`${API}/sobjects/${name}/describe`);
     if (describe.status !== 200) {
@@ -137,27 +141,59 @@ export async function exportSalesforce(
       .filter((field) => typeof field.name === "string" && !SKIPPED_TYPES.has(String(field.type)))
       .map((field) => field.name as string);
     if (!selected.length) continue;
-    const route = fields.some((field) => field.name === "IsDeleted") ? "queryAll" : "query";
-    let page = await get(
-      `${API}/${route}?${new URLSearchParams({ q: `SELECT ${selected.join(",")} FROM ${name}` })}`,
-      true,
+    const hasIsDeleted = fields.some((field) => field.name === "IsDeleted");
+    const route = hasIsDeleted ? "queryAll" : "query";
+    const queryPath = (group: string[]) =>
+      `${API}/${route}?${new URLSearchParams({ q: `SELECT ${group.join(",")} FROM ${name}` })}`;
+    // An object whose query would pass the URL budget is read in field groups, each the same full
+    // listing with Id (and IsDeleted), so the import merges their fields by record.
+    const keys = selected.filter(
+      (field) => field === "Id" || (hasIsDeleted && field === "IsDeleted"),
     );
-    let records = 0;
-    for (;;) {
-      const body = isObject(page.body) ? page.body : {};
-      if (Array.isArray(body.records)) records += body.records.length;
-      const next = body.nextRecordsUrl;
-      if (page.status !== 200 || body.done !== false || typeof next !== "string") break;
-      if (!next.startsWith("/services/data/"))
-        throw new ExportError(`Salesforce answered an unexpected next page for ${name}`);
-      page = await get(next, true);
+    const fits = (group: string[]) => `${org.origin}${queryPath(group)}`.length <= MAX_QUERY_URL;
+    const groups: string[][] = [];
+    if (fits(selected)) groups.push(selected);
+    else {
+      let group = [...keys];
+      for (const field of selected) {
+        if (keys.includes(field)) continue;
+        if (group.length > keys.length && !fits([...group, field])) {
+          groups.push(group);
+          group = [...keys];
+        }
+        group.push(field);
+      }
+      groups.push(group);
     }
-    // A failed page is kept as Salesforce answered it; the records after it are missing.
+    let records = 0;
+    let failed: string | undefined;
+    for (const [index, fieldGroup] of groups.entries()) {
+      let page = await get(queryPath(fieldGroup), true);
+      let read = 0;
+      for (;;) {
+        const body = isObject(page.body) ? page.body : {};
+        if (Array.isArray(body.records)) read += body.records.length;
+        const next = body.nextRecordsUrl;
+        if (page.status !== 200 || body.done !== false || typeof next !== "string") break;
+        if (!next.startsWith("/services/data/"))
+          throw new ExportError(`Salesforce answered an unexpected next page for ${name}`);
+        page = await get(next, true);
+      }
+      // Every group lists the same records; the first group's count is the object's.
+      if (index === 0) records = read;
+      // A failed page is kept as Salesforce answered it; the records after it are missing.
+      if (page.status !== 200)
+        failed ??= `Salesforce: reading ${name}${groups.length > 1 ? ` (field group ${index + 1} of ${groups.length})` : ""} answered HTTP ${page.status} after ${read} records; the rest of ${name} is missing.`;
+    }
+    if (groups.length > 1) split.push(`${name} (${groups.length})`);
     progress(
-      page.status === 200
-        ? `Salesforce: ${records} ${name}`
-        : `Salesforce: reading ${name} answered HTTP ${page.status} after ${records} records; the rest of ${name} is missing.`,
+      failed ??
+        `Salesforce: ${records} ${name}${groups.length > 1 ? ` in ${groups.length} field groups` : ""}`,
     );
   }
+  if (split.length)
+    progress(
+      `Salesforce: read ${split.length === 1 ? "1 wide object" : `${split.length} wide objects`} in field groups to stay within the URL limit: ${split.join(", ")}.`,
+    );
   return exchanges;
 }
