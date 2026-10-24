@@ -676,7 +676,9 @@ async function filesFrom(ctx: Context, directory: string, apps: string[]): Promi
       throw new UsageError(
         `${join(directory, label)} is not in an app's directory: with several apps, put each app's files in ${join(directory, "<app>")}/`,
       );
-    const { byteSize, sha256 } = await digest(path);
+    const { byteSize, sha256 } = await digest(path).catch((error: unknown) => {
+      throw unreadable(join(directory, label), error);
+    });
     if (!byteSize) {
       ctx.note(`Skipped ${label}: the file is empty.`);
       continue;
@@ -690,7 +692,9 @@ async function filesFrom(ctx: Context, directory: string, apps: string[]): Promi
       byteSize,
       sha256,
       bytes: async () => {
-        const bytes = await readFile(path);
+        const bytes = await readFile(path).catch((error: unknown) => {
+          throw unreadable(join(directory, label), error);
+        });
         if (
           bytes.byteLength !== byteSize ||
           createHash("sha256").update(bytes).digest("hex") !== sha256
@@ -702,6 +706,14 @@ async function filesFrom(ctx: Context, directory: string, apps: string[]): Promi
   }
   if (!uploads.length) throw new UsageError(`--files ${directory} holds no files`);
   return uploads.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
+}
+
+/** A file that could not be read, named with the filesystem's code: the command's error, not a
+ * crash. */
+function unreadable(file: string, error: unknown): WorldCommandError {
+  return new WorldCommandError(
+    `Unable to read ${file}: ${(error as NodeJS.ErrnoException).code ?? "unreadable"}`,
+  );
 }
 
 async function digest(path: string): Promise<{ byteSize: number; sha256: string }> {
