@@ -189,15 +189,12 @@ export async function exportSalesforce(
       .filter((field) => typeof field.name === "string" && !SKIPPED_TYPES.has(String(field.type)))
       .map((field) => field.name as string);
     if (!selected.length) continue;
-    const hasIsDeleted = fields.some((field) => field.name === "IsDeleted");
-    const route = hasIsDeleted ? "queryAll" : "query";
+    // Live records only (`query`, not `queryAll`): deleted rows are not exported for now.
     const queryPath = (group: string[]) =>
-      `${API}/${route}?${new URLSearchParams({ q: `SELECT ${group.join(",")} FROM ${name}` })}`;
+      `${API}/query?${new URLSearchParams({ q: `SELECT ${group.join(",")} FROM ${name}` })}`;
     // An object whose query would pass the URL budget is read in field groups, each the same full
-    // listing with Id (and IsDeleted), so the import merges their fields by record.
-    const keys = selected.filter(
-      (field) => field === "Id" || (hasIsDeleted && field === "IsDeleted"),
-    );
+    // listing with Id, so the import merges their fields by record.
+    const keys: string[] = selected.filter((field) => field === "Id");
     const fits = (group: string[]) => `${org.origin}${queryPath(group)}`.length <= MAX_QUERY_URL;
     const groups: string[][] = [];
     if (fits(selected)) groups.push(selected);

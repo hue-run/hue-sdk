@@ -26,8 +26,8 @@ refuses to publish a version without a matching entry below.
   with `LINEAR_API_KEY`, or through Composio's `LINEAR_RUN_QUERY_OR_MUTATION` tool with
   `COMPOSIO_API_KEY`, `--composio-user` and `--composio-account` (Hue's World then answers the
   Composio calls that name both); `slack` records the Web API calls a Slack token can make,
-  `salesforce` the REST API v67.0 describes and queries an access token can make (an object too
-  wide for one query URL in field groups, each with `Id`), and `gmail`
+  `salesforce` the REST API v67.0 describes and `query` pages of live records an access token can
+  make (an object too wide for one query URL in field groups, each with `Id`), and `gmail`
   every message (in `full` format, and `raw` when it has an attachment), label and draft a
   `gmail.readonly` token can read, each call as an exchange with its answer and response headers
   exactly as the app gave them. A page too large for one file is asked for again in smaller
