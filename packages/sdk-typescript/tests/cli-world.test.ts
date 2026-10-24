@@ -572,8 +572,10 @@ describe("hue world create", () => {
     const cases: [string[], string][] = [
       [["create"], "--apps is required"],
       [["create", "--apps", "Linear"], "not an app id"],
+      [["create", "--apps", "slack", "--export-from", "linear"], "needs linear in --apps"],
       [["create", "--apps", "linear,slack", "--files", "data"], "data/misc/a.json"],
       [["create", "--apps", "linear", "--wait", "soon"], "--wait must be a whole number"],
+      [["create", "--apps", "linear", "--composio-user", "u1"], "Pass both"],
       [["run"], "Name the World version"],
       [["run", "not-a-version", "--", "true"], "not a World version id"],
       [["run", VERSION], "Name the command to run after --"],
@@ -780,5 +782,630 @@ describe("the hue binary", () => {
     const code = await new Promise<number | null>((done) => child.on("close", done));
     expect(code).toBe(0);
     expect(stdout).toBe(`${WORLD_USAGE}\n`);
+  });
+});
+
+// Synthetic app APIs for `--export-from`, served through the command's fetch seam. They follow
+// the public contracts: Linear's GraphQL API (cursor pages, RATELIMITED with reset instants,
+// field errors with a path), Composio's tool execution (`data` holds Linear's body), Slack's Web
+// API (cursor pages, `ok: false`, 429 with Retry-After) and Salesforce's REST API (describe,
+// query pages). Nothing reaches the real services.
+
+const LINEAR_KEY = "lin_api_synthetic_export_key";
+const SLACK_TOKEN = "xoxp-synthetic-export-token";
+const SALESFORCE_TOKEN = "00D000000000001!synthetic.access.token";
+
+type Handler = (request: Request) => Response | Promise<Response>;
+function route(handlers: Record<string, Handler>): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const handler = Object.entries(handlers).find(([prefix]) => request.url.startsWith(prefix));
+    return handler ? handler[1](request) : fetch(input, init);
+  }) as typeof fetch;
+}
+
+const page = (nodes: unknown[], endCursor: string | null = null) => ({
+  nodes,
+  pageInfo: { hasNextPage: endCursor !== null, endCursor },
+});
+
+/** Linear's GraphQL API over a three-issue workspace. */
+function linearApi() {
+  const queries: { query: string; variables: Record<string, string | null> }[] = [];
+  let limited = false;
+  const issue = (id: string, labels = page([{ id: "label-1" }])) => ({
+    __typename: "Issue",
+    id,
+    title: `Issue ${id}`,
+    labels,
+  });
+  const answer = (query: string, variables: Record<string, string | null>) => {
+    queries.push({ query, variables });
+    const root = /^query (?:\([^)]*\) )?\{ (\w+)/.exec(query)![1]!;
+    if (root === "organization")
+      return query.includes(" samlEnabled ")
+        ? {
+            data: { organization: null },
+            errors: [
+              {
+                message: "Only admins can read this field",
+                path: ["organization", "samlEnabled"],
+                extensions: { code: "FORBIDDEN" },
+              },
+            ],
+          }
+        : { data: { organization: { __typename: "Organization", id: "org-1", name: "Acme" } } };
+    if (root === "users")
+      return { data: { users: page([{ __typename: "User", id: "user-1", isMe: true }]) } };
+    if (root === "issues")
+      return variables.after === null
+        ? {
+            data: {
+              issues: page(
+                [issue("issue-1", page([{ id: "label-1" }], "labels-cursor")), issue("issue-2")],
+                "issues-cursor",
+              ),
+            },
+          }
+        : { data: { issues: page([issue("issue-3")]) } };
+    if (root === "issue") {
+      expect(variables).toEqual({ id: "issue-1", after: "labels-cursor" });
+      return { data: { issue: { labels: page([{ id: "label-2" }]) } } };
+    }
+    return { data: { [root]: page([]) } };
+  };
+  const handler: Handler = async (request) => {
+    expect(request.headers.get("authorization")).toBe(LINEAR_KEY);
+    const { query, variables } = (await request.json()) as {
+      query: string;
+      variables: Record<string, string | null>;
+    };
+    if (query.includes("{ teams(") && !limited) {
+      limited = true;
+      return Response.json(
+        { errors: [{ message: "Rate limit exceeded", extensions: { code: "RATELIMITED" } }] },
+        { status: 400, headers: { "x-ratelimit-requests-reset": String(Date.now() + 5000) } },
+      );
+    }
+    return Response.json(answer(query, variables));
+  };
+  return { queries, answer, handler };
+}
+
+const json = async (bytes: Buffer | undefined) => JSON.parse(bytes!.toString("utf8")) as unknown;
+
+describe("hue world create --export-from", () => {
+  test("linear: pages every list, completes nested lists, drops a refused field and waits out the rate limit", async () => {
+    const stand = hue();
+    const api = linearApi();
+    const result = await world(
+      ["create", "--apps", "linear", "--export-from", "linear", "--origin", stand.origin],
+      {
+        env: { LINEAR_API_KEY: LINEAR_KEY },
+        io: { fetch: route({ "https://api.linear.app/graphql": api.handler }) },
+      },
+    );
+    expect(result.stderr).toContain(
+      "Linear refused organization.samlEnabled for this key; exporting organization without it.",
+    );
+    expect(result.code).toBe(0);
+    expect(result.sleeps.some((ms) => ms > 3000 && ms <= 5000)).toBe(true);
+    expect(stand.creations[0]!.sources).toEqual({
+      files: [
+        {
+          app: "linear",
+          files: [
+            {
+              name: "linear-export-1.json",
+              byteSize: expect.any(Number),
+              sha256: expect.any(String),
+            },
+          ],
+        },
+      ],
+    });
+    const records = (await json(stand.stored.get("linear-1"))) as Record<string, unknown>[];
+    expect(records).toEqual([
+      { __typename: "Organization", id: "org-1", name: "Acme" },
+      { __typename: "User", id: "user-1", isMe: true },
+      {
+        __typename: "Issue",
+        id: "issue-1",
+        title: "Issue issue-1",
+        labels: {
+          nodes: [{ id: "label-1" }, { id: "label-2" }],
+          pageInfo: { hasNextPage: false, endCursor: "labels-cursor" },
+        },
+      },
+      {
+        __typename: "Issue",
+        id: "issue-2",
+        title: "Issue issue-2",
+        labels: page([{ id: "label-1" }]),
+      },
+      {
+        __typename: "Issue",
+        id: "issue-3",
+        title: "Issue issue-3",
+        labels: page([{ id: "label-1" }]),
+      },
+    ]);
+    // Every list of the guide was asked for, the dropped field gone from the organization query.
+    const roots = api.queries.map((item) => /\{ (\w+)/.exec(item.query)![1]);
+    expect(new Set(roots).size).toBe(21);
+    expect(
+      api.queries.filter((item) => item.query.startsWith("query { organization")).at(-1)!.query,
+    ).not.toContain("samlEnabled");
+    expect(result.stdout + result.stderr).not.toContain(LINEAR_KEY);
+  });
+
+  test("linear through Composio: runs the guide's queries on the connected account and names it to Hue", async () => {
+    const stand = hue();
+    const api = linearApi();
+    const executions: Record<string, unknown>[] = [];
+    const composio: Handler = async (request) => {
+      expect(request.headers.get("x-api-key")).toBe("ak_synthetic_composio");
+      const body = (await request.json()) as {
+        arguments: { query_or_mutation: string; variables: Record<string, string | null> };
+      };
+      executions.push(body);
+      return Response.json({
+        data: api.answer(body.arguments.query_or_mutation, body.arguments.variables),
+        successful: true,
+        error: null,
+      });
+    };
+    const result = await world(
+      [
+        "create",
+        "--apps",
+        "linear",
+        "--export-from",
+        "linear",
+        "--composio-user",
+        "user-42",
+        "--composio-account",
+        "ca_synthetic",
+        "--origin",
+        stand.origin,
+      ],
+      {
+        env: { COMPOSIO_API_KEY: "ak_synthetic_composio" },
+        io: { fetch: route({ "https://backend.composio.dev/": composio }) },
+      },
+    );
+    expect(result.code).toBe(0);
+    expect(executions[0]).toMatchObject({
+      connected_account_id: "ca_synthetic",
+      user_id: "user-42",
+      version: "latest",
+    });
+    expect((stand.creations[0]!.sources as Record<string, unknown>).composio).toEqual({
+      linear: { userId: "user-42", connectedAccountId: "ca_synthetic" },
+    });
+    expect(((await json(stand.stored.get("linear-1"))) as unknown[]).length).toBe(5);
+  });
+
+  test("slack: records every call of the list as an exchange, answers and headers as Slack gave them", async () => {
+    const stand = hue();
+    const members = Array.from({ length: 51 }, (_, index) => `U${index + 1}`);
+    const calls: string[] = [];
+    let limited = false;
+    const slack: Handler = (request) => {
+      expect(request.headers.get("authorization")).toBe(`Bearer ${SLACK_TOKEN}`);
+      const url = new URL(request.url);
+      const method = url.pathname.slice("/api/".length);
+      const args = Object.fromEntries(url.searchParams);
+      calls.push(`${method} ${url.searchParams}`);
+      const ok = (body: Record<string, unknown>) =>
+        Response.json(
+          { ok: true, ...body },
+          { headers: { "x-oauth-scopes": "channels:history,users:read" } },
+        );
+      const done = { response_metadata: { next_cursor: "" } };
+      switch (method) {
+        case "auth.test":
+          return ok({ user_id: "U1", team_id: "T1" });
+        case "users.list":
+          // 51 members over two pages, so dnd.teamInfo takes two calls.
+          return args.cursor
+            ? ok({ members: members.slice(1).map((id) => ({ id })), ...done })
+            : ok({ members: [{ id: "U1" }], response_metadata: { next_cursor: "users-2" } });
+        case "conversations.list":
+          return ok({
+            channels: [
+              { id: "C1", is_channel: true },
+              { id: "D1", is_im: true },
+            ],
+            ...done,
+          });
+        case "users.conversations":
+          return ok({
+            channels: [
+              { id: "C1", is_channel: true },
+              { id: "G1", is_group: true },
+            ],
+            ...done,
+          });
+        case "conversations.history":
+          if (args.channel === "C1" && !limited) {
+            limited = true;
+            return new Response("", { status: 429, headers: { "retry-after": "3" } });
+          }
+          if (args.channel === "G1") return Response.json({ ok: false, error: "not_in_channel" });
+          if (args.channel === "C1" && !args.cursor && args.limit === "999")
+            // A first page too large for one file at 999 messages.
+            return ok({
+              messages: [{ ts: "9.000", text: "x".repeat(26 * 1024 * 1024) }],
+              has_more: true,
+            });
+          if (args.channel === "C1" && !args.cursor)
+            return ok({
+              messages: [{ ts: "1.000", reply_count: 2 }, { ts: "2.000" }],
+              has_more: true,
+              response_metadata: { next_cursor: "history-2" },
+            });
+          return ok({ messages: [], has_more: false });
+        case "reactions.list":
+          // Numbered pages, without a cursor.
+          return ok({
+            items: [{ type: "message" }],
+            paging: { page: Number(args.page ?? 1), pages: 2 },
+          });
+        case "files.list":
+          return ok({
+            files: [{ id: `F${args.page}` }],
+            paging: { page: Number(args.page), pages: 2 },
+          });
+        default:
+          return ok(method.startsWith("conversations.") || method === "reactions.list" ? done : {});
+      }
+    };
+    const result = await world(
+      ["create", "--apps", "slack", "--export-from", "slack", "--origin", stand.origin],
+      { env: { SLACK_TOKEN }, io: { fetch: route({ "https://slack.com/api/": slack }) } },
+    );
+    expect(result.code).toBe(0);
+    expect(result.sleeps).toContain(3000);
+    expect(calls).toEqual([
+      "auth.test ",
+      "team.info ",
+      "users.list limit=200",
+      "users.list limit=200&cursor=users-2",
+      "conversations.list types=public_channel%2Cprivate_channel%2Cmpim%2Cim&exclude_archived=false&limit=200",
+      "users.conversations types=public_channel%2Cprivate_channel%2Cmpim%2Cim&exclude_archived=false&limit=200",
+      "conversations.info channel=C1",
+      "conversations.members channel=C1&limit=1000",
+      "conversations.history channel=C1&limit=999",
+      "conversations.history channel=C1&limit=999",
+      // The oversized first page asked for again at half the limit, then the chain goes on from
+      // its cursor at the list's limit.
+      "conversations.history channel=C1&limit=499",
+      "conversations.history channel=C1&limit=999&cursor=history-2",
+      "conversations.replies channel=C1&ts=1.000&limit=999",
+      "pins.list channel=C1",
+      "bookmarks.list channel_id=C1",
+      "conversations.info channel=D1",
+      "conversations.history channel=D1&limit=999",
+      "conversations.info channel=G1",
+      "conversations.members channel=G1&limit=1000",
+      "conversations.history channel=G1&limit=999",
+      "pins.list channel=G1",
+      "bookmarks.list channel_id=G1",
+      "files.list count=100&page=1",
+      "files.list count=100&page=2",
+      "reactions.list ",
+      "reactions.list page=2",
+      "users.profile.get user=U1",
+      `dnd.teamInfo ${new URLSearchParams({ users: members.slice(0, 50).join(",") })}`,
+      `dnd.teamInfo ${new URLSearchParams({ users: members.slice(50).join(",") })}`,
+    ]);
+    const exchanges = (await json(stand.stored.get("slack-1"))) as {
+      request: { method: string; url: string; headers: Record<string, string>; body: null };
+      response: { status: number; headers: Record<string, string>; body: unknown };
+    }[];
+    // The rate-limited attempt and the oversized page are not recorded.
+    expect(exchanges.length).toBe(calls.length - 2);
+    expect(result.stderr).toContain(
+      "Slack: a conversations.history page is larger than one file; asking for 499 a page.",
+    );
+    expect(exchanges[0]).toEqual({
+      // The request's headers are kept without the token.
+      request: { method: "GET", url: "https://slack.com/api/auth.test", headers: {}, body: null },
+      response: {
+        status: 200,
+        headers: expect.objectContaining({ "x-oauth-scopes": "channels:history,users:read" }),
+        body: { ok: true, user_id: "U1", team_id: "T1" },
+      },
+    });
+    expect(
+      exchanges.find((item) => item.request.url.includes("channel=G1&limit=999"))!.response.body,
+    ).toEqual({
+      ok: false,
+      error: "not_in_channel",
+    });
+    expect(JSON.stringify(exchanges)).not.toContain(SLACK_TOKEN);
+    expect(result.stderr).toContain(
+      "Slack: 1 call answered ok: false, kept as Slack answered them (conversations.history not_in_channel ×1).",
+    );
+  });
+
+  test("salesforce: describes each object and pages its live records with query", async () => {
+    const stand = hue();
+    const paths: string[] = [];
+    // A custom object too wide for one query URL: 600 long field names.
+    const wide = Array.from({ length: 600 }, (_, i) => `Customer_Satisfaction_Score_${i}__c`);
+    const wideQueries: { fields: string[]; urlLength: number }[] = [];
+    const describe = (fields: [string, string][]) =>
+      Response.json({ fields: fields.map(([name, type]) => ({ name, type })) });
+    const salesforce: Handler = (request) => {
+      expect(request.headers.get("authorization")).toBe(`Bearer ${SALESFORCE_TOKEN}`);
+      const url = new URL(request.url);
+      const path = `${url.pathname}${url.search}`.replace("/services/data/v67.0", "");
+      paths.push(path);
+      if (path.includes("query") && !path.includes("Note__c") && !path.includes("01gN"))
+        expect(request.headers.get("sforce-query-options")).toBe("batchSize=2000");
+      switch (url.pathname.replace("/services/data/v67.0", "")) {
+        case "/chatter/users/me":
+          return Response.json({ id: "005000000000001" });
+        case "/sobjects":
+          return Response.json({
+            sobjects: [
+              { name: "Account", custom: false, queryable: true },
+              { name: "User", custom: false, queryable: true },
+              { name: "Widget__c", custom: true, queryable: true },
+              { name: "Wide__c", custom: true, queryable: true },
+              { name: "Note__c", custom: true, queryable: true },
+              { name: "Hidden__c", custom: true, queryable: false },
+              { name: "Setting__mdt", custom: true, queryable: true },
+            ],
+          });
+        case "/sobjects/Account/describe":
+          return describe([
+            ["Id", "id"],
+            ["Name", "string"],
+            ["IsDeleted", "boolean"],
+            ["BillingAddress", "address"],
+            ["Logo", "base64"],
+          ]);
+        case "/sobjects/User/describe":
+          return describe([
+            ["Id", "id"],
+            ["Username", "string"],
+          ]);
+        case "/sobjects/Widget__c/describe":
+          return Response.json([{ errorCode: "NOT_FOUND", message: "gone" }], { status: 404 });
+        case "/sobjects/Wide__c/describe":
+          return describe([
+            ["Id", "id"],
+            ["IsDeleted", "boolean"],
+            ...wide.map((name): [string, string] => [name, "double"]),
+          ]);
+        case "/sobjects/Note__c/describe":
+          return describe([
+            ["Id", "id"],
+            ["IsDeleted", "boolean"],
+            ["Body__c", "textarea"],
+          ]);
+        case "/query/01gN-200":
+          return Response.json({ totalSize: 2, done: true, records: [{ Id: "a0N2" }] });
+        case "/query":
+          if (url.searchParams.get("q")!.endsWith(" FROM User"))
+            return Response.json({ totalSize: 1, done: true, records: [{ Id: "005A" }] });
+          if (url.searchParams.get("q")!.endsWith(" FROM Note__c")) {
+            // 2,000 records a page are too large for one file; 200 a page fit.
+            if (request.headers.get("sforce-query-options") === "batchSize=2000")
+              return Response.json({
+                totalSize: 2,
+                done: false,
+                nextRecordsUrl: "/services/data/v67.0/query/01gN-2000",
+                records: [{ Id: "a0N1", Body__c: "x".repeat(26 * 1024 * 1024) }],
+              });
+            expect(request.headers.get("sforce-query-options")).toBe("batchSize=200");
+            return Response.json({
+              totalSize: 2,
+              done: false,
+              nextRecordsUrl: "/services/data/v67.0/query/01gN-200",
+              records: [{ Id: "a0N1", Body__c: "short" }],
+            });
+          }
+          if (url.searchParams.get("q")!.endsWith(" FROM Wide__c")) {
+            const fields = /^SELECT (.*) FROM Wide__c$/
+              .exec(url.searchParams.get("q")!)![1]!
+              .split(",");
+            wideQueries.push({ fields, urlLength: request.url.length });
+            return Response.json({
+              totalSize: 1,
+              done: true,
+              records: [
+                Object.fromEntries(fields.map((field) => [field, field === "Id" ? "a0W1" : 1])),
+              ],
+            });
+          }
+          return Response.json({
+            totalSize: 3,
+            done: false,
+            nextRecordsUrl: "/services/data/v67.0/query/01gA-2000",
+            records: [{ Id: "001A" }, { Id: "001B" }],
+          });
+        case "/query/01gA-2000":
+          return Response.json({ totalSize: 3, done: true, records: [{ Id: "001C" }] });
+      }
+      return Response.json([{ errorCode: "NOT_FOUND" }], { status: 404 });
+    };
+    const result = await world(
+      ["create", "--apps", "salesforce", "--export-from", "salesforce", "--origin", stand.origin],
+      {
+        env: {
+          SALESFORCE_ACCESS_TOKEN: SALESFORCE_TOKEN,
+          SALESFORCE_INSTANCE_URL: "https://acme.my.salesforce.com",
+        },
+        io: { fetch: route({ "https://acme.my.salesforce.com/": salesforce }) },
+      },
+    );
+    expect(result.code).toBe(0);
+    // The standard objects in the list's order, then the queryable custom objects; an object
+    // whose describe fails is recorded and not queried.
+    expect(paths.slice(0, 9)).toEqual([
+      "/chatter/users/me",
+      "/sobjects",
+      "/sobjects/User/describe",
+      "/query?q=SELECT+Id%2CUsername+FROM+User",
+      "/sobjects/Account/describe",
+      "/query?q=SELECT+Id%2CName%2CIsDeleted+FROM+Account",
+      "/query/01gA-2000",
+      "/sobjects/Widget__c/describe",
+      "/sobjects/Wide__c/describe",
+    ]);
+    // The wide object is read in field groups: each within the URL budget, each with Id,
+    // together every field once.
+    expect(wideQueries.length).toBeGreaterThan(1);
+    for (const query of wideQueries) {
+      expect(query.urlLength).toBeLessThanOrEqual(12_000);
+      expect(query.fields[0]).toBe("Id");
+    }
+    expect(wideQueries.flatMap((query) => query.fields.slice(1))).toEqual(["IsDeleted", ...wide]);
+    expect(result.stderr).toContain(`Salesforce: 1 Wide__c in ${wideQueries.length} field groups`);
+    expect(result.stderr).toContain(
+      `Salesforce: read 1 wide object in field groups to stay within the URL limit: Wide__c (${wideQueries.length}).`,
+    );
+    expect(result.stderr).toContain("Salesforce: 3 Account");
+    expect(result.stderr).toContain(
+      "Salesforce: describing Widget__c answered HTTP 404; Widget__c is not exported.",
+    );
+    const exchanges = (await json(stand.stored.get("salesforce-1"))) as {
+      request: { url: string; headers: Record<string, string> };
+    }[];
+    // A query page keeps its query options header and loses the access token.
+    expect(
+      exchanges.find((item) => item.request.url.endsWith("/query/01gA-2000"))!.request.headers,
+    ).toEqual({ "sforce-query-options": "batchSize=2000" });
+    expect(exchanges.map((item) => item.request.url)).toContain(
+      "https://acme.my.salesforce.com/services/data/v67.0/query/01gA-2000",
+    );
+    expect(JSON.stringify(exchanges)).not.toContain(SALESFORCE_TOKEN);
+    // The object whose page was too large is read again from the start at 200 records a page;
+    // only that listing is recorded.
+    expect(result.stderr).toContain(
+      "Salesforce: a page of Note__c is larger than one file; reading it again 200 records a page.",
+    );
+    expect(result.stderr).toContain("Salesforce: 2 Note__c");
+    const notes = exchanges.filter((item) => /Note__c|01gN/.test(item.request.url));
+    expect(notes.map((item) => item.request.url.replace(/^.*v67\.0/, ""))).toEqual([
+      "/sobjects/Note__c/describe",
+      "/query?q=SELECT+Id%2CIsDeleted%2CBody__c+FROM+Note__c",
+      "/query/01gN-200",
+    ]);
+  });
+
+  test("gmail: reads every message in full, raw ones with attachments, and the drafts", async () => {
+    const stand = hue();
+    const token = "ya29.synthetic-gmail-access-token";
+    let limited = false;
+    const gmail: Handler = (request) => {
+      expect(request.headers.get("authorization")).toBe(`Bearer ${token}`);
+      const url = new URL(request.url);
+      const path = `${url.pathname.replace("/gmail/v1/users/me", "")}${url.search}`;
+      const attachment = {
+        parts: [{ body: { size: 5 } }, { parts: [{ body: { attachmentId: "a1" } }] }],
+      };
+      switch (path) {
+        case "/profile":
+          return Response.json({ emailAddress: "owner@example.test" });
+        case "/labels":
+          return Response.json({ labels: [{ id: "INBOX" }] });
+        case "/messages?includeSpamTrash=true&maxResults=500":
+          return Response.json({ messages: [{ id: "m1" }, { id: "m2" }], nextPageToken: "p2" });
+        case "/messages?includeSpamTrash=true&maxResults=500&pageToken=p2":
+          return Response.json({ messages: [{ id: "m3" }, { id: "m4" }] });
+        case "/messages/m4?format=full":
+          // A message too large for one file.
+          return Response.json({
+            id: "m4",
+            sizeEstimate: 30_000_000,
+            payload: { body: { data: "x".repeat(26 * 1024 * 1024) } },
+          });
+        case "/messages/m1?format=full":
+          return Response.json({ id: "m1", sizeEstimate: 1000, payload: attachment });
+        case "/messages/m2?format=full":
+          return Response.json({ id: "m2", sizeEstimate: 500_000, payload: attachment });
+        case "/messages/m3?format=full":
+          if (!limited) {
+            limited = true;
+            return Response.json(
+              { error: { code: 403, errors: [{ reason: "userRateLimitExceeded" }] } },
+              { status: 403 },
+            );
+          }
+          return Response.json({ id: "m3", sizeEstimate: 800, payload: { body: { size: 9 } } });
+        case "/messages/m1?format=raw":
+          return Response.json({ id: "m1", raw: "RnJvbTogb3duZXI" });
+        case "/drafts?maxResults=500":
+          return Response.json(
+            { error: { code: 403, errors: [{ reason: "insufficientPermissions" }] } },
+            { status: 403 },
+          );
+      }
+      return Response.json({ error: { code: 404 } }, { status: 404 });
+    };
+    const result = await world(
+      ["create", "--apps", "gmail", "--export-from", "gmail", "--origin", stand.origin],
+      {
+        env: { GMAIL_ACCESS_TOKEN: token },
+        io: { fetch: route({ "https://gmail.googleapis.com/gmail/v1/users/me": gmail }) },
+      },
+    );
+    expect(result.code).toBe(0);
+    expect(result.sleeps).toContain(5000);
+    const exchanges = (await json(stand.stored.get("gmail-1"))) as {
+      request: { url: string };
+      response: { status: number };
+    }[];
+    // In the order the calls were made, without the rate-limited attempt; m2 is too large to be
+    // read again in raw format and m3 has no attachment.
+    expect(exchanges.map((item) => item.request.url.replace(/^.*\/users\/me/, ""))).toEqual([
+      "/profile",
+      "/labels",
+      "/messages?includeSpamTrash=true&maxResults=500",
+      "/messages?includeSpamTrash=true&maxResults=500&pageToken=p2",
+      "/messages/m1?format=full",
+      "/messages/m2?format=full",
+      "/messages/m3?format=full",
+      "/messages/m1?format=raw",
+      "/drafts?maxResults=500",
+    ]);
+    // A refused list is recorded as Gmail answered it, and named.
+    expect(exchanges.map((item) => item.response.status)).toEqual([
+      200, 200, 200, 200, 200, 200, 200, 200, 403,
+    ]);
+    expect(result.stderr).toContain(
+      "Gmail: listing /drafts?maxResults=500 answered HTTP 403; the list is incomplete.",
+    );
+    expect(result.stderr).toContain("Gmail: skipped 1 message larger than one file: m4.");
+    expect(JSON.stringify(exchanges)).not.toContain(token);
+  });
+
+  test("refuses an export without its credentials before reading anything", async () => {
+    const cases: [string, string][] = [
+      ["linear", "LINEAR_API_KEY"],
+      ["slack", "SLACK_TOKEN"],
+      ["salesforce", "SALESFORCE_INSTANCE_URL"],
+      ["gmail", "GMAIL_ACCESS_TOKEN"],
+      ["jira", "--export-from reads linear, slack, salesforce, gmail"],
+      ["constructor", "--export-from reads linear, slack, salesforce, gmail"],
+    ];
+    for (const [app, message] of cases) {
+      const result = await world([
+        "create",
+        "--apps",
+        app,
+        "--export-from",
+        app,
+        "--origin",
+        "http://127.0.0.1:9",
+      ]);
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain(message);
+    }
   });
 });

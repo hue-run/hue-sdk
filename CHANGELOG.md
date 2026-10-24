@@ -21,6 +21,19 @@ refuses to publish a version without a matching entry below.
   its URL, its World version and Hue's report by app account of what it stored, normalized, stood
   in for, assumed, does not simulate and excluded. `--dry-run` shows a description's outline and estimate and creates
   nothing. Requires a Hue deployment that serves the World creation routes.
+- `hue world create --export-from <list>` reads an app's data on your machine with your own
+  access and uploads it as that app's files: `linear` runs the queries of Hue's world-import guide
+  with `LINEAR_API_KEY`, or through Composio's `LINEAR_RUN_QUERY_OR_MUTATION` tool with
+  `COMPOSIO_API_KEY`, `--composio-user` and `--composio-account` (Hue's World then answers the
+  Composio calls that name both); `slack` records the Web API calls a Slack token can make,
+  `salesforce` the REST API v67.0 describes and `query` pages of live records an access token can
+  make (an object too wide for one query URL in field groups, each with `Id`), and `gmail`
+  every message (in `full` format, and `raw` when it has an attachment), label and draft a
+  `gmail.readonly` token can read, each call as an exchange with its request headers (credentials
+  left out) and its answer and response headers exactly as the app gave them. A page too large for one file is asked for again in smaller
+  pages (Slack at half its limit, down to 100; Salesforce at `batchSize=200`); a Gmail message
+  that large is left out and named. Credentials travel
+  only in request headers and are never recorded or printed.
 - `hue world run <world version> -- <command>` starts an instance (`POST /api/v1/instances`),
   runs the command with the instance's variables (`HUE_SIM_<SURFACE>_URL`, `HUE_WORLD_TOKEN`,
   `HUE_WORLD_NOW`, and `HUE_MCP_CONFIG` naming an owner-only `mcpServers` file removed afterwards)
