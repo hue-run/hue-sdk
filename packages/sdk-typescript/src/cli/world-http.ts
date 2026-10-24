@@ -108,7 +108,9 @@ export async function send(
           AbortSignal.timeout(request.timeoutMs ?? REQUEST_TIMEOUT_MS),
         ]),
       });
-    } catch {
+    } catch (error) {
+      // A fetch that sends through a proxy reports its own failures, retries done, as this error.
+      if (error instanceof RequestError) throw error;
       response = undefined;
     }
     let answer: Answer | undefined;
