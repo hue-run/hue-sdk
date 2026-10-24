@@ -13,6 +13,10 @@ Your agent runs in your process while a disposable simulated world runs in Hue. 
 authoritative and records an ordered journal; Hue does not execute your agent code or provider
 credentials.
 
+To make a World of Hue's simulated apps from your files or a description, and
+to run an agent command in a fresh instance of it, use
+[`hue world create` and `hue world run`](CLI.md#create-a-world-and-run-your-agent-in-it).
+
 A World model is retained entity history. A World is a reconstructed starting state. A World
 instance is an isolated running copy of that state. Starting another World instance does not
 share the first World instance's changes. The handoff's

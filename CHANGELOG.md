@@ -8,6 +8,25 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.25.0] - 2026-10-24
+
+#### Added
+
+- `hue world create --apps <list>` makes a World of Hue's simulated apps, several apps in one
+  World, through `POST /api/v1/world-creations`. `--files <dir>` uploads each file's exact bytes
+  to the signed URL Hue answers (with several apps, each app's files go in `<dir>/<app>/`),
+  `--describe "<text>"` asks Hue to generate the data, and both can be combined. The command
+  marks the uploads done, waits up to `--wait` seconds (default 900) for the World, and prints
+  its URL, its World version and Hue's report of what it stored, normalized, stood in for, does
+  not simulate and assumed. `--dry-run` shows a description's outline and estimate and creates
+  nothing. Requires a Hue deployment that serves the World creation routes.
+- `hue world run <world version> -- <command>` starts an instance (`POST /api/v1/instances`),
+  runs the command with the instance's variables (`HUE_SIM_<SURFACE>_URL`, `HUE_WORLD_TOKEN`,
+  `HUE_WORLD_NOW`, and `HUE_MCP_CONFIG` naming an owner-only `mcpServers` file removed afterwards)
+  and without Hue project credentials, finishes the instance as completed or abandoned by the
+  command's exit code, and prints the calls the command made, what it changed and the coverage
+  gaps it met from the instance's evidence. It exits with the command's code.
+
 ### [0.24.2] - 2026-10-24
 
 #### Added
