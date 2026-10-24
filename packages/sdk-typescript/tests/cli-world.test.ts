@@ -69,12 +69,18 @@ function hue(
     url: `http://127.0.0.1:${server.port}/worlds/${CREATION}`,
     ...(status === "ready" || status === "failed"
       ? {
+          // The World import's report by app account.
           report: options.report ?? {
-            stored: 3,
-            normalized: [{ label: "dates", detail: "Read dueDate as a date" }],
+            stored: [
+              { app: "linear", instanceKey: "linear", collection: "issues", count: 1200 },
+              { app: "linear", instanceKey: "linear", collection: "users", count: 40 },
+            ],
+            normalized: [{ app: "linear", code: "date_format", count: 3 }],
             standIns: [],
-            notSimulated: ["Linear webhooks"],
-            assumptions: ["Times are UTC"],
+            assumptions: [{ app: "linear", collection: "issues", field: "priority", count: 2 }],
+            notSimulated: [{ app: "slack", account: "T01", kind: "webhooks", count: 1 }],
+            excluded: [],
+            truncated: true,
           },
         }
       : {}),
@@ -368,14 +374,18 @@ describe("hue world create", () => {
       [
         `World: ${stand.origin}/worlds/${CREATION}`,
         `World version: ${VERSION}`,
-        "Stored: 3",
-        "Normalized: 1",
-        "  label dates, detail Read dueDate as a date",
+        "Stored: 1240",
+        "  linear issues: 1200",
+        "  linear users: 40",
+        "Normalized: 3",
+        "  linear date_format: 3",
         "Stand-ins: none",
+        "Assumptions: 2",
+        "  linear issues.priority: 2",
         "Not simulated: 1",
-        "  Linear webhooks",
-        "Assumptions: 1",
-        "  Times are UTC",
+        "  slack (T01) webhooks: 1",
+        "Excluded: none",
+        "The report lists its first rows only.",
         `Run your agent in it: hue world run ${VERSION} -- <command>`,
         "",
       ].join("\n"),

@@ -18,8 +18,8 @@ refuses to publish a version without a matching entry below.
   app's files go in `<dir>/<app>/`),
   `--describe "<text>"` asks Hue to generate the data, and both can be combined. The command
   marks the uploads done, waits up to `--wait` seconds (default 900) for the World, and prints
-  its URL, its World version and Hue's report of what it stored, normalized, stood in for, does
-  not simulate and assumed. `--dry-run` shows a description's outline and estimate and creates
+  its URL, its World version and Hue's report by app account of what it stored, normalized, stood
+  in for, assumed, does not simulate and excluded. `--dry-run` shows a description's outline and estimate and creates
   nothing. Requires a Hue deployment that serves the World creation routes.
 - `hue world run <world version> -- <command>` starts an instance (`POST /api/v1/instances`),
   runs the command with the instance's variables (`HUE_SIM_<SURFACE>_URL`, `HUE_WORLD_TOKEN`,

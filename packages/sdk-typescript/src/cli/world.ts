@@ -634,26 +634,40 @@ function describe(value: unknown, depth = 0): string {
   return text.length > 300 ? `${text.slice(0, 297)}...` : text;
 }
 
-const REPORT_LABELS: Record<string, string> = {
-  stored: "Stored",
-  normalized: "Normalized",
-  standIns: "Stand-ins",
-  notSimulated: "Not simulated",
-  assumptions: "Assumptions",
+/** Each section of the World's report: its label and the fields that name one of its rows. */
+const REPORT_SECTIONS: Record<string, { label: string; names: string[] }> = {
+  stored: { label: "Stored", names: ["collection"] },
+  normalized: { label: "Normalized", names: ["code"] },
+  standIns: { label: "Stand-ins", names: ["collection"] },
+  assumptions: { label: "Assumptions", names: ["collection", "field"] },
+  notSimulated: { label: "Not simulated", names: ["kind"] },
+  excluded: { label: "Excluded", names: ["code"] },
 };
 
-/** The World's report: what Hue stored, normalized, stood in for, does not simulate and
- * assumed. A list prints one item per line. */
+/** The World's report by app account: each section's total, then a line per row, such as
+ * `linear issues: 1200`. A section Hue adds later prints as it comes. */
 function printReport(print: (line: string) => void, report: JsonObject) {
   for (const [key, value] of Object.entries(report)) {
-    const label = REPORT_LABELS[key] ?? key;
-    if (!Array.isArray(value)) {
-      print(`${label}: ${describe(value)}`);
+    if (key === "truncated") {
+      if (value === true) print("The report lists its first rows only.");
       continue;
     }
-    print(`${label}: ${value.length === 0 ? "none" : value.length}`);
-    for (const item of value.slice(0, LISTED)) print(`  ${describe(item, 1)}`);
-    if (value.length > LISTED) print(`  ... and ${value.length - LISTED} more`);
+    const section = Object.hasOwn(REPORT_SECTIONS, key) ? REPORT_SECTIONS[key] : undefined;
+    if (!section || !Array.isArray(value)) {
+      print(`${section?.label ?? key}: ${describe(value)}`);
+      continue;
+    }
+    const rows = value.filter(isObject);
+    const count = (row: JsonObject) => (typeof row.count === "number" ? row.count : 0);
+    print(
+      `${section.label}: ${rows.length ? rows.reduce((sum, row) => sum + count(row), 0) : "none"}`,
+    );
+    for (const row of rows.slice(0, LISTED)) {
+      const account = typeof row.account === "string" && row.account ? ` (${row.account})` : "";
+      const name = section.names.map((field) => text(row[field], "?")).join(".");
+      print(`  ${text(row.app, "?")}${account} ${name}: ${count(row)}`);
+    }
+    if (rows.length > LISTED) print(`  ... and ${rows.length - LISTED} more`);
   }
 }
 
