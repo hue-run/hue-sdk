@@ -20,6 +20,8 @@ export const SLACK_API_URL = "https://slack.com/api/";
 const TYPES = "public_channel,private_channel,mpim,im";
 /** A 429 without `Retry-After` waits this long. */
 const RATE_LIMIT_WAIT_MS = 30_000;
+/** The most users one dnd.teamInfo call names. */
+const DND_USERS = 50;
 /** The smallest page an oversized page is asked for again at. */
 const MIN_LIMIT = 100;
 /** Slack's answers that mean the token itself is refused: the export cannot go on. */
@@ -176,7 +178,12 @@ export async function exportSlack(
     for (let page = 2; page <= paging.pages; page++)
       if ((await call("reactions.list", { page: String(page) })).ok !== true) break;
   await call("users.profile.get", { user: auth.user_id });
-  await call("dnd.teamInfo");
+  // dnd.teamInfo answers for the users it names, at most 50 a call: every member, or the token's
+  // own user when the member list could not be read.
+  const members = users.flatMap((user) => (typeof user.id === "string" ? [user.id] : []));
+  const dnd = members.length ? members : [auth.user_id];
+  for (let index = 0; index < dnd.length; index += DND_USERS)
+    await call("dnd.teamInfo", { users: dnd.slice(index, index + DND_USERS).join(",") });
   if (oversized.length)
     progress(
       `Slack: ${oversized.length} ${oversized.length === 1 ? "answer was" : "answers were"} larger than one file even at ${MIN_LIMIT} a page and ${oversized.length === 1 ? "is" : "are"} missing: ${oversized.slice(0, 5).join("; ")}${oversized.length > 5 ? "; ..." : ""}.`,
