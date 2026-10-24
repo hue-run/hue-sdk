@@ -1581,6 +1581,40 @@ describe("hue world create --export-from through a Pipedream Connect account", (
     expect(stand.creations.length).toBe(0);
   });
 
+  test("ends the export with Pipedream's error when a token renewal fails", async () => {
+    const stand = hue();
+    const api = linearApi();
+    // The first token lasts less than a minute, so the next request renews it; every renewal
+    // answers 503.
+    const connect = pipedream(api.handler, LINEAR_KEY, { expiresIn: 30 });
+    let tokenRequests = 0;
+    const handler: Handler = (request) =>
+      new URL(request.url).pathname === "/v1/oauth/token" && ++tokenRequests > 1
+        ? Response.json({ error: "unavailable" }, { status: 503 })
+        : connect.handler(request);
+    const result = await world(
+      [
+        "create",
+        "--apps",
+        "linear",
+        "--export-from",
+        "linear",
+        "--pipedream-user",
+        "user-42",
+        "--pipedream-account",
+        "apn_synthetic",
+        "--origin",
+        stand.origin,
+      ],
+      { env: PIPEDREAM_ENV, io: { fetch: route({ [PIPEDREAM_API_URL]: handler }) } },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("Error: Pipedream answered HTTP 503");
+    // One token, then one renewal with its own five attempts, not retried again as Linear's.
+    expect(tokenRequests).toBe(6);
+    expect(stand.creations.length).toBe(0);
+  });
+
   test("refuses Pipedream usage errors before reading anything", async () => {
     const flags = ["--pipedream-user", "user-42", "--pipedream-account", "apn_synthetic"];
     const cases: [string[], Record<string, string>, string][] = [
