@@ -15,6 +15,11 @@ import {
   type McpConfigFile,
 } from "../world/world.js";
 import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
+import { ExportError, packJson } from "./world-export.js";
+import { exportGmail } from "./world-export-gmail.js";
+import { composioLinear, exportLinear, linearApi } from "./world-export-linear.js";
+import { exportSalesforce, salesforceOrigin } from "./world-export-salesforce.js";
+import { exportSlack } from "./world-export-slack.js";
 import {
   isObject,
   RequestError,
@@ -39,7 +44,7 @@ export interface WorldCommandIo {
   stderr?: NodeJS.WritableStream;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
-  /** The fetch for Hue's World creation routes and the uploads. */
+  /** The fetch for Hue's World creation routes, the uploads and the app export. */
   fetch?: typeof fetch;
   /** Waits `ms`, resolving early when the command is stopped. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -50,6 +55,13 @@ export interface WorldCommandIo {
 const DEFAULT_ORIGIN = "https://app.hue.run";
 const APP = /^[a-z][a-z0-9._-]{0,127}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The apps `--export-from` reads, with their names in messages. */
+const EXPORTERS: Record<string, string> = {
+  linear: "Linear",
+  slack: "Slack",
+  salesforce: "Salesforce",
+  gmail: "Gmail",
+};
 /** The default wait for a World to be ready. */
 const DEFAULT_WAIT_SECONDS = 900;
 const POLL_MS = 2_000;
@@ -85,6 +97,17 @@ description, or both, and prints its URL and World version once it is ready.
                          With one app every file is that app's; with several, each app's files
                          go in DIR/<app>/. Hidden files are skipped
   --describe TEXT        Describe the data Hue generates for the apps
+  --export-from LIST     Read these apps' data on this machine with your own access and upload
+                         it, comma-separated:
+                         linear      LINEAR_API_KEY, or Composio with COMPOSIO_API_KEY,
+                                     --composio-user and --composio-account
+                         slack       SLACK_TOKEN (a user token reads the most)
+                         salesforce  SALESFORCE_ACCESS_TOKEN and SALESFORCE_INSTANCE_URL,
+                                     the org's https://<name>.my.salesforce.com
+                         gmail       GMAIL_ACCESS_TOKEN, an OAuth token with gmail.readonly
+  --composio-user ID     The Composio user id your agent sends
+  --composio-account ID  Its Linear connected account. Hue's World answers the Composio calls
+                         that name both
   --dry-run              Show what Hue would make, with a description's outline and estimate;
                          create and upload nothing
   --wait SECONDS         How long to wait for the World to be ready (default ${DEFAULT_WAIT_SECONDS}); 0 returns
@@ -280,6 +303,9 @@ function parseCreateArguments(argv: string[]) {
         name: { type: "string" },
         files: { type: "string" },
         describe: { type: "string" },
+        "export-from": { type: "string" },
+        "composio-user": { type: "string" },
+        "composio-account": { type: "string" },
         "dry-run": { type: "boolean", default: false },
         wait: { type: "string" },
         origin: { type: "string" },
@@ -308,15 +334,54 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
   const description = values.describe?.trim();
   if (values.describe !== undefined && !description)
     throw new UsageError("--describe needs the text that describes the data");
+  const exportFrom = list(values["export-from"]);
+  for (const app of exportFrom) {
+    if (!(app in EXPORTERS))
+      throw new UsageError(
+        `--export-from reads ${Object.keys(EXPORTERS).join(", ")}; for another app, export its data yourself and pass --files`,
+      );
+    if (!apps.includes(app)) throw new UsageError(`--export-from ${app} needs ${app} in --apps`);
+  }
+  const composioUser = values["composio-user"];
+  const composioAccount = values["composio-account"];
+  if ((composioUser === undefined) !== (composioAccount === undefined))
+    throw new UsageError("Pass both --composio-user and --composio-account");
+  if (composioUser !== undefined && !exportFrom.includes("linear"))
+    throw new UsageError(
+      "--composio-user and --composio-account name the Linear connection --export-from linear reads",
+    );
+  for (const value of [composioUser, composioAccount])
+    if (value !== undefined && (!value || value.length > 256 || /\s/u.test(value)))
+      throw new UsageError("Composio ids are 1 to 256 characters without spaces");
+  if (values["dry-run"] && exportFrom.length)
+    throw new UsageError("--dry-run reads nothing; run the export without it");
   const wait = values.wait === undefined ? DEFAULT_WAIT_SECONDS : Number(values.wait);
   if (!/^\d{1,6}$/u.test(values.wait ?? "0"))
     throw new UsageError("--wait must be a whole number of seconds");
-  const { origin, apiKey } = await connect(ctx, values);
+  const { origin, apiKey, env } = await connect(ctx, values);
+  const exporters = exportersFor(ctx, env, exportFrom, composioUser, composioAccount);
 
   const removeInterrupt = (io.onInterrupt ?? defaultOnInterrupt)(() => ctx.stopping.abort());
   let url: string | undefined;
   try {
     const uploads = values.files ? await filesFrom(ctx, values.files, apps) : [];
+    for (const [app, read] of exporters) {
+      const objects = await read(ctx.transport);
+      const files = packJson(objects);
+      ctx.note(
+        `${EXPORTERS[app]}: exported ${objects.length} ${app === "linear" ? "records" : "calls"} in ${files.length} ${files.length === 1 ? "file" : "files"}.`,
+      );
+      files.forEach((bytes, index) =>
+        uploads.push({
+          app,
+          name: `${app}-export-${index + 1}.json`,
+          label: `${EXPORTERS[app]} export ${index + 1}`,
+          byteSize: bytes.byteLength,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          bytes: async () => bytes,
+        }),
+      );
+    }
     const groups = new Map<string, Upload[]>();
     for (const upload of uploads)
       groups.set(upload.app, [...(groups.get(upload.app) ?? []), upload]);
@@ -330,6 +395,13 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
           }
         : {}),
       ...(description ? { description: { text: description } } : {}),
+      ...(composioUser !== undefined
+        ? {
+            composio: {
+              linear: { userId: composioUser, connectedAccountId: composioAccount },
+            },
+          }
+        : {}),
     };
     const hue = { origin, apiKey };
     const answer = await hueJson(ctx, hue, "POST", "/api/v1/world-creations", {
@@ -394,7 +466,11 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
       ctx.note(`Stopped.${url ? ` Hue keeps what it received: ${url}` : ""}`);
       return 130;
     }
-    if (error instanceof WorldCommandError || error instanceof RequestError) {
+    if (
+      error instanceof WorldCommandError ||
+      error instanceof RequestError ||
+      error instanceof ExportError
+    ) {
       ctx.note(`Error: ${error.message}`);
       return 1;
     }
@@ -414,6 +490,65 @@ function list(value: string | undefined): string[] {
         .filter(Boolean),
     ),
   ];
+}
+
+type Exporter = (transport: Transport) => Promise<JsonObject[]>;
+
+/** Each `--export-from` app's reader with its credentials, checked before anything is sent. */
+function exportersFor(
+  ctx: Context,
+  env: NodeJS.ProcessEnv,
+  apps: string[],
+  composioUser: string | undefined,
+  composioAccount: string | undefined,
+): Map<string, Exporter> {
+  const secret = (name: string) => {
+    const value = env[name]?.trim() ?? "";
+    ctx.secrets.push(value);
+    return value;
+  };
+  const report = { progress: ctx.note, warn: ctx.note };
+  const exporters = new Map<string, Exporter>();
+  for (const app of apps) {
+    if (app === "linear" && composioAccount !== undefined) {
+      const apiKey = secret("COMPOSIO_API_KEY");
+      if (!apiKey)
+        throw new UsageError("--composio-account needs COMPOSIO_API_KEY, your Composio API key");
+      const connection = { apiKey, userId: composioUser!, connectedAccountId: composioAccount };
+      exporters.set(app, (transport) =>
+        exportLinear(composioLinear(connection, transport), report),
+      );
+    } else if (app === "linear") {
+      const apiKey = secret("LINEAR_API_KEY");
+      if (!apiKey)
+        throw new UsageError(
+          "--export-from linear reads LINEAR_API_KEY (a Linear API key), or COMPOSIO_API_KEY with --composio-user and --composio-account",
+        );
+      exporters.set(app, (transport) => exportLinear(linearApi(apiKey, transport), report));
+    } else if (app === "slack") {
+      const token = secret("SLACK_TOKEN");
+      if (!token) throw new UsageError("--export-from slack reads SLACK_TOKEN, a Slack token");
+      exporters.set(app, (transport) => exportSlack(token, transport, ctx.note));
+    } else if (app === "gmail") {
+      const token = secret("GMAIL_ACCESS_TOKEN");
+      if (!token)
+        throw new UsageError(
+          "--export-from gmail reads GMAIL_ACCESS_TOKEN, an OAuth access token with gmail.readonly",
+        );
+      exporters.set(app, (transport) => exportGmail(token, transport, ctx.note));
+    } else {
+      const accessToken = secret("SALESFORCE_ACCESS_TOKEN");
+      const origin = salesforceOrigin(env.SALESFORCE_INSTANCE_URL?.trim() ?? "");
+      if (!accessToken || !origin)
+        throw new UsageError(
+          "--export-from salesforce reads SALESFORCE_ACCESS_TOKEN and SALESFORCE_INSTANCE_URL, the org's https://<name>.my.salesforce.com",
+        );
+      exporters.set(app, (transport) =>
+        exportSalesforce({ origin, accessToken }, transport, ctx.note),
+      );
+    }
+  }
+  return exporters;
 }
 
 /** The World creation every route answers in `worldCreation`. */
