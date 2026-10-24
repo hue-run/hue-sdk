@@ -1,5 +1,4 @@
-import { ExportError } from "./world-export.js";
-import { isObject, retryAfterMs, send, type Transport } from "./world-http.js";
+import { isObject, RequestError, retryAfterMs, send, type Transport } from "./world-http.js";
 
 /**
  * `hue world create --export-from <app>` through a Pipedream Connect account: every request the
@@ -31,7 +30,9 @@ export interface PipedreamAccount {
  * `x-pd-environment` header and a token from the project's client credentials, renewed before it
  * expires. The request's credential headers are dropped and its other headers are forwarded with
  * the `x-pd-proxy-` prefix, as Pipedream's SDK sends them. `ready` gets the first token, so
- * refused client credentials stop the export before it reads anything.
+ * refused client credentials stop the export before it reads anything. A renewal that fails,
+ * after its own retries, ends the export with Pipedream's error rather than being retried as the
+ * app's connection.
  */
 export function pipedreamTransport(
   account: PipedreamAccount,
@@ -64,7 +65,7 @@ export function pipedreamTransport(
     );
     const body = isObject(answer.body) ? answer.body : {};
     if (answer.status !== 200 || typeof body.access_token !== "string" || !body.access_token)
-      throw new ExportError(`Pipedream refused the client credentials (HTTP ${answer.status})`);
+      throw new RequestError(`Pipedream refused the client credentials (HTTP ${answer.status})`);
     onToken(body.access_token);
     const lifetime =
       typeof body.expires_in === "number" && body.expires_in > 0
