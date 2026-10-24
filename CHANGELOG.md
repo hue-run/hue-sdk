@@ -26,7 +26,9 @@ refuses to publish a version without a matching entry below.
   `HUE_WORLD_NOW`, and `HUE_MCP_CONFIG` naming an owner-only `mcpServers` file removed afterwards)
   and without Hue project credentials, finishes the instance as completed or abandoned by the
   command's exit code, and prints the calls the command made, what it changed and the coverage
-  gaps it met from the instance's evidence. It exits with the command's code.
+  gaps it met from the instance's evidence. Without a terminal the command runs in a process group
+  of its own, and whatever it leaves running is stopped before the instance is finished. It exits
+  with the command's code.
 
 ### [0.24.3] - 2026-10-24
 
@@ -2650,6 +2652,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.23 (2026-10-24): pin `@hue-run/sdk@0.25.0`.
 - 0.8.22 (2026-10-22): pin `@hue-run/sdk@0.24.0` and route Composio and Pipedream SDK calls through `instrumentComposio` / `instrumentPipedream`.
 - 0.8.18 (2026-10-20): the TypeScript installation command pins `@hue-run/sdk@0.21.1`.
 - 0.8.17 (2026-10-20): pin Python `0.13.4`, document released HTTP endpoint evidence, and include Node 26.

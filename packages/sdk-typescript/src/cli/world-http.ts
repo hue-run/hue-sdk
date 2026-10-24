@@ -105,12 +105,20 @@ export async function send(
     } catch {
       response = undefined;
     }
+    let answer: Answer | undefined;
     if (response && response.status < 500) {
-      const answer = {
-        status: response.status,
-        headers: response.headers,
-        body: await readBody(response),
-      };
+      try {
+        answer = {
+          status: response.status,
+          headers: response.headers,
+          body: await readBody(response),
+        };
+      } catch (error) {
+        // An answer too large to read fails at once; one that broke off is asked for again.
+        if (error instanceof RequestError) throw error;
+      }
+    }
+    if (answer) {
       const wait = rateLimit(answer);
       if (wait === undefined) return answer;
       if (++limited > MAX_RATE_LIMITED)
@@ -132,7 +140,12 @@ export async function send(
   }
 }
 
+/** The longest `Retry-After` honoured from Hue or the upload store: they ask for seconds. */
+const MAX_SLOW_DOWN_MS = 30_000;
+
 /** A wait for an answer that asks to slow down (429) or timed out waiting for the request
- * (408): its `Retry-After`, else a second. */
+ * (408): its `Retry-After`, at most 30 seconds, else a second. */
 export const slowDown = ({ status, headers }: Answer): number | undefined =>
-  status === 429 || status === 408 ? (retryAfterMs(headers) ?? 1000) : undefined;
+  status === 429 || status === 408
+    ? Math.min(retryAfterMs(headers) ?? 1000, MAX_SLOW_DOWN_MS)
+    : undefined;

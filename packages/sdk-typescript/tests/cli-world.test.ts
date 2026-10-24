@@ -45,6 +45,10 @@ function hue(
     failCode?: string;
     evidenceConflicts?: number;
     putFailures?: number;
+    /** Every poll answers 429 with a Retry-After of an hour. */
+    pollRateLimited?: boolean;
+    /** Every instance start answers that the World is still being prepared. */
+    preparing?: boolean;
   } = {},
 ) {
   const creations: Record<string, unknown>[] = [];
@@ -142,10 +146,17 @@ function hue(
         return Response.json({ worldCreation: creation("importing") });
       }
       if (url.pathname === `/api/v1/world-creations/${CREATION}`) {
+        if (options.pollRateLimited)
+          return Response.json({}, { status: 429, headers: { "retry-after": "3600" } });
         const status = statuses[Math.min(polls++, statuses.length - 1)]!;
         return Response.json({ worldCreation: creation(status) });
       }
       if (url.pathname === "/api/v1/instances" && request.method === "POST") {
+        if (options.preparing)
+          return Response.json(
+            { error: "World is preparing" },
+            { status: 503, headers: { "x-hue-diagnostic": "world_preparing", "retry-after": "1" } },
+          );
         const body = (await request.json()) as Record<string, unknown>;
         if (body.environmentVersionId !== VERSION)
           return Response.json({ error: "Not found" }, { status: 404 });
@@ -484,6 +495,48 @@ describe("hue world create", () => {
     expect(stand.stored.size).toBe(0);
   });
 
+  test("asks again when an answer breaks off", async () => {
+    const stand = hue({ statuses: ["ready"] });
+    let broken = false;
+    const breakOnce: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (!broken && String(input).endsWith("/api/v1/world-creations")) {
+        broken = true;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"worldCreation":'));
+            setTimeout(() => controller.error(new Error("connection lost")), 5);
+          },
+        });
+        return new Response(body, { status: 201 });
+      }
+      return fetch(input, init);
+    }) as typeof fetch;
+    const result = await world(
+      ["create", "--apps", "linear", "--describe", "A small team", "--origin", stand.origin],
+      { io: { fetch: breakOnce } },
+    );
+    expect(result.code).toBe(0);
+    expect(result.sleeps).toContain(1000);
+    expect(stand.creations.length).toBe(1);
+  });
+
+  test("waits for a slowed-down poll no longer than --wait", async () => {
+    const stand = hue({ pollRateLimited: true });
+    const result = await world([
+      "create",
+      "--apps",
+      "linear",
+      "--describe",
+      "A small team",
+      "--wait",
+      "5",
+      "--origin",
+      stand.origin,
+    ]);
+    expect(result.code).toBe(1);
+    expect(Math.max(...result.sleeps)).toBeLessThanOrEqual(5000);
+  });
+
   test("refuses usage errors before calling Hue", async () => {
     const dir = await scratch();
     await mkdir(join(dir, "data", "misc"), { recursive: true });
@@ -619,6 +672,62 @@ describe("hue world run", () => {
     expect(result.code).toBe(137);
     expect(stand.finishes[0]!.status).toBe("abandoned");
     expect(result.stderr).toContain("Calls: 4");
+  });
+
+  test("stops what the command left running before it finishes the instance", async () => {
+    const stand = hue();
+    const dir = await scratch();
+    const pidFile = join(dir, "survivor.pid");
+    // The command starts a process in its group that outlives it, then exits.
+    const command = `const { spawn } = require("node:child_process");
+const survivor = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(survivor.pid));
+survivor.unref();`;
+    const result = await world([
+      "run",
+      VERSION,
+      "--origin",
+      stand.origin,
+      "--",
+      process.execPath,
+      "-e",
+      command,
+    ]);
+    expect(result.code).toBe(0);
+    const pid = Number(await readFile(pidFile, "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect(stand.finishes[0]!.status).toBe("completed");
+  });
+
+  test("abandons the instance when the MCP configuration cannot be written", async () => {
+    const stand = hue();
+    const cwd = await scratch();
+    const previous = process.env.TMPDIR;
+    process.env.TMPDIR = join(cwd, "missing", "directory");
+    try {
+      const result = await world(["run", VERSION, "--origin", stand.origin, "--", "true"], { cwd });
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("Unable to write the MCP configuration file: ENOENT");
+      expect(stand.finishes[0]!.status).toBe("abandoned");
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previous;
+    }
+  });
+
+  test("a stop while the World is being prepared ends the wait", async () => {
+    const stand = hue({ preparing: true });
+    let stop: ((signal: NodeJS.Signals) => void) | undefined;
+    const pending = world(["run", VERSION, "--origin", stand.origin, "--", "true"], {
+      io: { onInterrupt: (listener) => ((stop = listener), () => {}) },
+    });
+    while (!stand.requests.includes("POST /api/v1/instances")) await Bun.sleep(20);
+    const stoppedAt = performance.now();
+    stop!("SIGINT");
+    const result = await pending;
+    expect(result.code).toBe(130);
+    expect(performance.now() - stoppedAt).toBeLessThan(5000);
+    expect(result.stderr).toContain("Stopped before the instance started.");
   });
 
   test("names a World version the project does not have", async () => {
