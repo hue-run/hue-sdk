@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -120,21 +121,38 @@ def main() -> None:
                 consumer / "tests",
                 ignore=shutil.ignore_patterns("__pycache__", "test_wheel.py"),
             )
-            # These two source-suite cases rebuild wheels. All other behavior,
-            # including evaluations/schema subprocesses, uses the installed SDK.
-            run(
-                str(python),
-                "-m",
-                "pytest",
-                "-q",
-                "tests",
-                "--basetemp",
-                str(consumer / "test-results"),
-                "-k",
-                "not installed_wheel",
-                cwd=consumer,
-                env=environment,
+            shutil.copy2(package / "pyproject.toml", consumer / "pyproject.toml")
+            # Both installers import the same archive before test dependencies are added.
+            # Library behavior runs once; the other consumer proves installation and privacy.
+            selections = (
+                [("tests", "-k", "not installed_wheel")]
+                if installer == "pip"
+                else [
+                    (
+                        "tests/test_sdk.py",
+                        "-k",
+                        "content_is_captured_by_default_and_redacted or "
+                        "metadata_only_excludes_helper_content_and_exception_text",
+                    ),
+                    (
+                        "tests/test_evaluations.py",
+                        "-k",
+                        "builtin_types_schema_process_and_local_error_boundaries",
+                    ),
+                ]
             )
+            for selection in selections:
+                run(
+                    str(python),
+                    "-m",
+                    "pytest",
+                    "-q",
+                    *selection,
+                    "--basetemp",
+                    str(consumer / "test-results"),
+                    cwd=consumer,
+                    env=environment,
+                )
             print(
                 f"Verified {spec} with {installer} on Python {args.python}", flush=True
             )
@@ -149,6 +167,10 @@ def main() -> None:
             ]
             for future in futures:
                 future.result()
+    if args.wheel:
+        print(
+            f"Verified wheel sha256={hashlib.sha256(args.wheel.read_bytes()).hexdigest()}"
+        )
 
 
 if __name__ == "__main__":

@@ -151,7 +151,7 @@ Use Node 24, Bun 1.4.2 and uv 0.12.5. No Hue account or API key is needed; every
 node packages/sdk-typescript/scripts/verify-package.mjs
 ```
 
-This builds a tarball, installs it into independent consumers, runs the exporter/evaluation tests with AI SDK / OTel pairs `7.0.99 / 1.0.99`, `7.0.100 / 1.0.100`, `7.0.137 / 1.0.137`, `7.0.138 / 1.0.138` and `7.0.139 / 1.0.139`, then builds and exercises the reference chatbot under Node. It prints the tested archive and consumer locations.
+This builds one tarball and runs broad installed-package behavior with AI SDK / OTel `7.0.139 / 1.0.139`. Adapter tests and the reference chatbot cover all five supported pairs: `7.0.99 / 1.0.99`, `7.0.100 / 1.0.100`, `7.0.137 / 1.0.137`, `7.0.138 / 1.0.138` and `7.0.139 / 1.0.139`. CI reuses that same archive for Node 22 and 26 native checks. The verifier prints the archive and consumer locations.
 
 ```bash
 cd packages/sdk-python

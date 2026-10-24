@@ -19,10 +19,43 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+  typescript-artifact:
+    name: TypeScript candidate archive
+    runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - name: Audit locked dependencies
+        working-directory: packages/sdk-typescript
+        run: |
+          bun install --frozen-lockfile
+          bun audit --audit-level=high
+      - name: Build the candidate archive and inspect its inventory
+        run: |
+          node packages/sdk-typescript/scripts/verify-package.mjs --profile pack --artifacts-dir .artifacts
+          version=$(node -p 'require("./packages/sdk-typescript/package.json").version')
+          python3 scripts/release-artifacts.py inspect typescript "$version" .artifacts
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: candidate-typescript-${{ github.sha }}
+          path: .artifacts/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
   typescript:
     name: TypeScript installed package
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 30
+    needs: typescript-artifact
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,20 +70,17 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.12.5"
-      - name: Audit locked dependencies
-        working-directory: packages/sdk-typescript
-        run: |
-          bun install --frozen-lockfile
-          bun audit --audit-level=high
-      - run: node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifacts
-        # The installed CLI matrix includes the existing published Flask runtime through uv.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: candidate-typescript-${{ github.sha }}
+          path: .artifacts
+      - name: Verify broad behavior and every AI adapter against the candidate archive
         env:
           HUE_JUNIT_DIR: ${{ runner.temp }}/junit
-      - name: Release inventory and syntax gate on the tested archive
-        # The release workflow's own inspection, run on every change so a release never meets it first.
         run: |
+          (cd .artifacts && sha256sum --check SHA256SUMS)
           version=$(node -p 'require("./packages/sdk-typescript/package.json").version')
-          python3 scripts/release-artifacts.py inspect typescript "$version" .artifacts
+          node packages/sdk-typescript/scripts/verify-package.mjs --archive ".artifacts/hue-run-sdk-${version}.tgz"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -62,6 +92,7 @@ jobs:
     name: TypeScript installed package (Node ${{ matrix.node }})
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 30
+    needs: typescript-artifact
     strategy:
       fail-fast: false
       matrix:
@@ -80,7 +111,15 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.12.5"
-      - run: node packages/sdk-typescript/scripts/verify-package.mjs
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: candidate-typescript-${{ github.sha }}
+          path: .artifacts
+      - name: Verify the same archive on each Node runtime
+        run: |
+          (cd .artifacts && sha256sum --check SHA256SUMS)
+          version=$(node -p 'require("./packages/sdk-typescript/package.json").version')
+          node packages/sdk-typescript/scripts/verify-package.mjs --archive ".artifacts/hue-run-sdk-${version}.tgz" --profile runtime
   typescript-lint:
     name: TypeScript lint and format
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
@@ -95,7 +134,7 @@ jobs:
       # Root tooling (eslint, prettier) plus the SDK's own dependencies for type-checked lint.
       - run: bun install --frozen-lockfile
       # Advisory for the lint/docs tooling; the published package's dependencies are audited as a
-      # blocking step in the typescript job.
+      # blocking step in the typescript-artifact job.
       - run: bun audit --audit-level=high
         continue-on-error: true
       - run: bun install --frozen-lockfile
@@ -145,10 +184,39 @@ jobs:
             --exclude '^https://www\.npmjs\.com/package/@hue-run/sdk/?$'
             "./**/*.md"
           fail: true
+  python-artifact:
+    name: Python candidate archive
+    runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.5"
+      - name: Build and inspect one wheel and source archive
+        working-directory: packages/sdk-python
+        env:
+          UV_PYTHON: "3.14"
+        run: |
+          uv sync --frozen --all-groups
+          uv run --frozen --all-groups python -m build --no-isolation --outdir ../../.artifacts
+          uvx --from twine==7.0.0 twine check --strict ../../.artifacts/*
+          version=$(uv run --frozen --all-groups python -c 'from importlib.metadata import version; print(version("hue-run"))')
+          (cd ../.. && python3 scripts/release-artifacts.py inspect python "$version" .artifacts)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: candidate-python-${{ github.sha }}
+          path: .artifacts/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
   python:
     name: Python ${{ matrix.python }} source and installed wheel
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 60
+    needs: python-artifact
     strategy:
       fail-fast: false
       matrix:
@@ -160,27 +228,35 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.12.5"
-      - name: Frozen install, behavioral checks and package build
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: candidate-python-${{ github.sha }}
+          path: .artifacts
+      - name: Frozen install and source checks
         working-directory: packages/sdk-python
         env:
           UV_PYTHON: ${{ matrix.python }}
         run: |
           uv sync --frozen --all-groups
-          uv run --frozen --all-groups pytest
           uv run --frozen --all-groups ruff check src tests ../../examples/python-agent ../../examples/python-evaluation
           uv run --frozen --all-groups ruff format --check src tests ../../examples/python-agent ../../examples/python-evaluation
           uv run --frozen --all-groups mypy
-          uv run --frozen --all-groups python -m build --no-isolation --outdir ../../.artifacts
-          uvx --from twine==7.0.0 twine check --strict ../../.artifacts/*
-      - name: Release inventory gate and the release's fresh pip and uv consumers
-        # The release workflow's own checks on the built distributions, run on every change so a
-        # release never meets them first.
+      - name: Installed behavior, packaging boundaries and fresh installer consumers
         env:
           PYTHON_VERSION: ${{ matrix.python }}
+          UV_PYTHON: ${{ matrix.python }}
         run: |
+          (cd .artifacts && sha256sum --check SHA256SUMS)
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("packages/sdk-python/pyproject.toml", "rb"))["project"]["version"])')
-          python3 scripts/release-artifacts.py inspect python "$version" .artifacts
-          python3 scripts/verify-python-release.py --wheel ".artifacts/hue_run-${version}-py3-none-any.whl" --python "$PYTHON_VERSION"
+          export HUE_TEST_WHEEL="$GITHUB_WORKSPACE/.artifacts/hue_run-${version}-py3-none-any.whl"
+          (cd packages/sdk-python && uv run --frozen --all-groups pytest tests/test_wheel.py tests/test_evaluations.py -k installed_wheel) &
+          packaging_pid=$!
+          python3 scripts/verify-python-release.py --wheel "$HUE_TEST_WHEEL" --python "$PYTHON_VERSION" &
+          consumers_pid=$!
+          checks_status=0
+          wait "$packaging_pid" || checks_status=1
+          wait "$consumers_pid" || checks_status=1
+          exit "$checks_status"
   python-lowest-bounds:
     name: Python ${{ matrix.python }} at the lowest OpenTelemetry bound
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
@@ -211,7 +287,7 @@ jobs:
   checks-passed:
     name: All checks passed
     if: always()
-    needs: [release-tools, typescript, typescript-node-matrix, typescript-lint, python, python-lowest-bounds, docs]
+    needs: [release-tools, typescript-artifact, typescript, typescript-node-matrix, typescript-lint, python-artifact, python, python-lowest-bounds, docs]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
