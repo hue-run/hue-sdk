@@ -52,8 +52,11 @@ original starting World. It does not copy the earlier instance's mutations or re
 Erased or unavailable starting data fails explicitly. `eraseModel(modelId)` revokes the model
 and prevents its starting Worlds from being reproduced.
 
-Materialization, instance creation and reproduction wait up to two minutes when Hue explicitly
-reports that the World is preparing. Retries preserve the same request bytes and identity.
+Materialization, instance creation and reproduction wait while Hue explicitly reports that the
+World is preparing, asking again after each `Retry-After`, until the caller's signal stops them;
+`hue eval` logs `waiting for World preparation` meanwhile. A caller that stops waiting gets Hue's
+refusal itself (`HueEnvironmentError` with `status` 503, `diagnostic` `world_preparing` and Hue's
+message as `hint`). Retries preserve the same request bytes and identity.
 Other failures keep the client's `maxAttempts` limit. Pass `{ signal }` as the last options
 argument to cancel a preparation wait or an active request.
 

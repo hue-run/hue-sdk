@@ -1,3 +1,4 @@
+import type { WorldPreparationProgress } from "../world/readiness.js";
 import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
 import { HueEnvironmentError, type EnvironmentClient } from "../world/client.js";
@@ -116,6 +117,20 @@ export type SimulationProgress =
       caseId: string;
       /** Isolated simulated-world identity. */
       environmentRunId: string;
+    }
+  | {
+      /** Hue is still preparing the case's World; the run waits and asks again. */
+      type: "world_preparing";
+      /** Fresh experiment identity. */
+      experimentId: string;
+      /** Target execution identity. */
+      executionId: string;
+      /** Frozen experiment-case identity. */
+      caseId: string;
+      /** How long Hue asked the run to wait before asking again, in milliseconds. */
+      retryAfterMs?: number;
+      /** Hue's bounded preparation progress, when its refusal carried one. */
+      preparation?: WorldPreparationProgress;
     }
   | {
       /** Strict provider-profile preflight decision. */

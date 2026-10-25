@@ -41,62 +41,82 @@ export async function readWorldPreparation(
   response: Response,
   diagnostic?: string,
 ): Promise<WorldPreparationProgress | undefined> {
+  return (await readWorldRefusal(response, diagnostic)).preparation;
+}
+
+/** The gateway's own words for a World refusal: its `message` (bounded, control characters
+ * removed), beside the preparation progress; `{}` for any other response. */
+export async function readWorldRefusal(
+  response: Response,
+  diagnostic?: string,
+): Promise<{ preparation?: WorldPreparationProgress; message?: string }> {
   if (response.status !== 503 || diagnostic === undefined || !(diagnostic in diagnosticStates)) {
     await response.body?.cancel().catch(() => {});
-    return undefined;
+    return {};
   }
   const reader = response.body?.getReader();
-  if (!reader) return undefined;
-  try {
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > 16 * 1024) return undefined;
-      chunks.push(value);
-    }
-    const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    if (!body || typeof body !== "object" || !("preparation" in body)) return undefined;
-    const value = body.preparation;
-    if (!value || typeof value !== "object") return undefined;
-    const {
-      state,
-      selectedEvidenceCutoff: selected,
-      retainedEvidenceCutoff: retained,
-      readyEvidenceCutoff: ready,
-      pendingEvidence,
-    } = value as Record<string, unknown>;
-    const expectedState = diagnosticStates[diagnostic];
-    if (
-      expectedState === undefined ||
-      state !== expectedState ||
-      !Number.isSafeInteger(selected) ||
-      !Number.isSafeInteger(retained) ||
-      !Number.isSafeInteger(ready) ||
-      typeof selected !== "number" ||
-      typeof retained !== "number" ||
-      typeof ready !== "number" ||
-      selected < 0 ||
-      ready < 0 ||
-      selected > retained ||
-      ready > retained ||
-      pendingEvidence !== retained > ready
-    )
+  if (!reader) return {};
+  let message: string | undefined;
+  const preparation = await (async (): Promise<WorldPreparationProgress | undefined> => {
+    try {
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 16 * 1024) return undefined;
+        chunks.push(value);
+      }
+      const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (!body || typeof body !== "object") return undefined;
+      if ("message" in body && typeof body.message === "string")
+        message =
+          body.message
+            .replace(/[\p{Cc}]+/gu, " ")
+            .trim()
+            .slice(0, 512) || undefined;
+      if (!("preparation" in body)) return undefined;
+      const value = body.preparation;
+      if (!value || typeof value !== "object") return undefined;
+      const {
+        state,
+        selectedEvidenceCutoff: selected,
+        retainedEvidenceCutoff: retained,
+        readyEvidenceCutoff: ready,
+        pendingEvidence,
+      } = value as Record<string, unknown>;
+      const expectedState = diagnosticStates[diagnostic];
+      if (
+        expectedState === undefined ||
+        state !== expectedState ||
+        !Number.isSafeInteger(selected) ||
+        !Number.isSafeInteger(retained) ||
+        !Number.isSafeInteger(ready) ||
+        typeof selected !== "number" ||
+        typeof retained !== "number" ||
+        typeof ready !== "number" ||
+        selected < 0 ||
+        ready < 0 ||
+        selected > retained ||
+        ready > retained ||
+        pendingEvidence !== retained > ready
+      )
+        return undefined;
+      return {
+        state: expectedState,
+        selectedEvidenceCutoff: selected,
+        retainedEvidenceCutoff: retained,
+        readyEvidenceCutoff: ready,
+        pendingEvidence,
+      };
+    } catch {
       return undefined;
-    return {
-      state: expectedState,
-      selectedEvidenceCutoff: selected,
-      retainedEvidenceCutoff: retained,
-      readyEvidenceCutoff: ready,
-      pendingEvidence,
-    };
-  } catch {
-    return undefined;
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+  })();
+  return { preparation, message };
 }
 
 /** @internal These failures require changed evidence or processing, not another identical call. */

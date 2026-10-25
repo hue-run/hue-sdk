@@ -1,3 +1,4 @@
+import type { WorldPreparationProgress } from "../world/readiness.js";
 import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
 import {
@@ -107,6 +108,14 @@ export function pinRequestedAttemptV2(
 
 export type EnvironmentTargetProgress =
   | { type: "world_created" | "target_started" | "world_sealed"; environmentRunId: string }
+  | {
+      /** Hue is still preparing the case's World; the run waits and asks again. */
+      type: "world_preparing";
+      /** How long Hue asked the run to wait before asking again, in milliseconds. */
+      retryAfterMs?: number;
+      /** Hue's bounded preparation progress, when its refusal carried one. */
+      preparation?: WorldPreparationProgress;
+    }
   | {
       type: "attempt_prepared";
       environmentRunId: string;
@@ -350,10 +359,15 @@ export function gatewayState(
 export async function createWorldForExecution(
   client: Pick<EnvironmentClient, "createRun" | "baseUrl">,
   input: Parameters<EnvironmentClient["createRun"]>[0],
-  options: { gatewayState?: (baseUrl: string) => Promise<GatewayState> } = {},
+  options: {
+    gatewayState?: (baseUrl: string) => Promise<GatewayState>;
+    signal?: AbortSignal;
+    onPreparing?: (error: HueEnvironmentError) => void;
+  } = {},
 ): Promise<EnvironmentRun> {
+  const { signal, onPreparing } = options;
   try {
-    return await client.createRun(input);
+    return await client.createRun(input, { signal, onPreparing });
   } catch (error) {
     const { traceparent, agentRevision, ...legacy } = input;
     if (
@@ -363,7 +377,7 @@ export async function createWorldForExecution(
       (await (options.gatewayState ?? gatewayState)(client.baseUrl)) !== "off"
     )
       throw error;
-    return client.createRun(legacy);
+    return client.createRun(legacy, { signal, onPreparing });
   }
 }
 
@@ -380,18 +394,32 @@ export async function runEnvironmentTarget(
     throw new Error("The simulation case has no pinned environment version");
   // One stable idempotency key per case attempt: a replay after a lost acknowledgement gets
   // the same world and the same token.
-  const run: EnvironmentRun = await createWorldForExecution(options.environmentClient, {
-    idempotencyKey: `execution:${context.executionId}`,
-    ...(environmentVersionId ? { environmentVersionId } : {}),
-    executionId: context.executionId,
-    maxSteps: options.maxSteps,
-    ttlSeconds: options.ttlSeconds,
-    traceparent: caseTraceparent(context.span),
-    agentRevision: options.agentRevision,
-  });
+  const progress = (event: EnvironmentTargetProgress) => options.onProgress?.(event);
+  const run: EnvironmentRun = await createWorldForExecution(
+    options.environmentClient,
+    {
+      idempotencyKey: `execution:${context.executionId}`,
+      ...(environmentVersionId ? { environmentVersionId } : {}),
+      executionId: context.executionId,
+      maxSteps: options.maxSteps,
+      ttlSeconds: options.ttlSeconds,
+      traceparent: caseTraceparent(context.span),
+      agentRevision: options.agentRevision,
+    },
+    {
+      signal: options.signal,
+      onPreparing: (error) =>
+        void Promise.resolve(
+          progress({
+            type: "world_preparing",
+            ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+            ...(error.preparation ? { preparation: error.preparation } : {}),
+          }),
+        ).catch(() => {}),
+    },
+  );
   const world = worldHandoff(run);
   const timing = { ...SEAL_TIMING, ...options.sealTiming };
-  const progress = (event: EnvironmentTargetProgress) => options.onProgress?.(event);
   let finalized = false;
   try {
     await progress({ type: "world_created", environmentRunId: run.id });

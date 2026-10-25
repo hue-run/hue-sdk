@@ -171,6 +171,88 @@ describe("environment HTTP client", () => {
     }
   });
 
+  test("waits out a preparing World as long as Hue says to retry, and reports Hue's own words when stopped", async () => {
+    const hint =
+      "unavailable: World is preparing. Retry with the same idempotency_key and arguments. Retryable after 5000 ms.";
+    const refusal = () =>
+      Response.json(
+        {
+          error: "unavailable",
+          message: hint,
+          preparation: {
+            state: "preparing",
+            selectedEvidenceCutoff: 1,
+            retainedEvidenceCutoff: 2,
+            readyEvidenceCutoff: 1,
+            pendingEvidence: true,
+          },
+        },
+        { status: 503, headers: { "x-hue-diagnostic": "world_preparing", "retry-after": "0" } },
+      );
+    let refusals = 3;
+    let creates = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        creates++;
+        if (refusals-- > 0) return refusal();
+        return Response.json({
+          id: randomUUID(),
+          environmentVersionId: randomUUID(),
+          clockNs: "0",
+          stateDigest: "0".repeat(64),
+          maxSteps: 50,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          actions: [],
+        });
+      },
+    });
+    try {
+      const client = createEnvironmentClient({
+        apiKey: key,
+        baseUrl: server.url.origin,
+        maxAttempts: 1,
+      });
+      const seen: (number | undefined)[] = [];
+      const started = performance.now();
+      // Three refusals, each asking for a retry, are waited out past maxAttempts; the fourth call creates.
+      const run = await client.createRun(
+        { idempotencyKey: "k", executionId: randomUUID() },
+        { onPreparing: (error) => seen.push(error.retryAfterMs) },
+      );
+      expect(run.id).toBeTruthy();
+      expect(creates).toBe(4);
+      expect(seen).toEqual([0, 0, 0]);
+      expect(performance.now() - started).toBeGreaterThanOrEqual(250);
+
+      // A caller that stops waiting sees the gateway's refusal, code and message, not a connection failure.
+      refusals = Number.MAX_SAFE_INTEGER;
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 250);
+      const failure = await client
+        .createRun(
+          { idempotencyKey: "k2", executionId: randomUUID() },
+          { signal: controller.signal },
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(failure).toBeInstanceOf(HueEnvironmentError);
+      const error = failure as HueEnvironmentError;
+      expect(error.status).toBe(503);
+      expect(error.diagnostic).toBe("world_preparing");
+      expect(error.hint).toBe(hint);
+      expect(error.message).toBe(
+        `Hue environment request failed (HTTP 503, world_preparing): ${hint}`,
+      );
+      expect(error.preparation?.state).toBe("preparing");
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("does not retry non-idempotent registry publication", async () => {
     let requests = 0;
     const server = Bun.serve({
