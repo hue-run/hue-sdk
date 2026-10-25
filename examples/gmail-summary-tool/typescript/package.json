@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@hue-run/sdk": "0.26.0",
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@types/node": "24.10.1",
