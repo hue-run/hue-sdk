@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -1662,7 +1662,82 @@ describe("hue world create --export-from through a Pipedream Connect account", (
       [
         ["--apps", "linear,slack", "--export-from", "linear,slack", ...flags],
         PIPEDREAM_ENV,
-        "one --export-from app",
+        "With several --export-from apps, name each one's account",
+      ],
+      [
+        [
+          "--apps",
+          "linear",
+          "--export-from",
+          "linear",
+          "--pipedream-user",
+          "u",
+          "--pipedream-account",
+          "gmail=apn_1",
+        ],
+        PIPEDREAM_ENV,
+        "--pipedream-account names gmail, which --export-from does not read",
+      ],
+      [
+        [
+          "--apps",
+          "linear",
+          "--export-from",
+          "linear",
+          "--pipedream-user",
+          "u",
+          "--pipedream-account",
+          "linear=apn_1,=x",
+        ],
+        PIPEDREAM_ENV,
+        "--pipedream-account takes app=account pairs",
+      ],
+      [
+        [
+          "--apps",
+          "linear",
+          "--export-from",
+          "linear",
+          "--pipedream-user",
+          "u",
+          "--pipedream-account",
+          "linear=apn_1,linear=apn_2",
+        ],
+        PIPEDREAM_ENV,
+        "--pipedream-account names linear twice",
+      ],
+      [
+        [
+          "--apps",
+          "linear",
+          "--export-from",
+          "linear",
+          "--pipedream-user",
+          "u",
+          "--pipedream-account",
+          "linear=apn_1,linear=apn_1",
+        ],
+        PIPEDREAM_ENV,
+        "--pipedream-account names linear twice",
+      ],
+      [
+        [
+          "--apps",
+          "linear",
+          "--export-from",
+          "linear",
+          "--pipedream-user",
+          "u",
+          "--pipedream-account",
+          " ",
+        ],
+        PIPEDREAM_ENV,
+        "1 to 256 characters",
+      ],
+      [
+        ["--apps", "linear", ...flags],
+        PIPEDREAM_ENV,
+        "--pipedream-account names the accounts --export-from apps read through",
       ],
       [
         ["--apps", "slack", "--export-from", "slack", "--pipedream-user", "user-42"],
@@ -1699,7 +1774,251 @@ describe("hue world create --export-from through a Pipedream Connect account", (
     for (const [args, env, message] of cases) {
       const result = await world(["create", ...args, "--origin", "http://127.0.0.1:9"], { env });
       expect(result.code).toBe(2);
-      expect(result.stderr).toContain(message);
+      // The first line is the error itself; the usage text follows it.
+      expect(result.stderr.split("\n")[0]).toContain(message);
+    }
+  });
+});
+
+/** A Gmail API answering an empty mailbox, for exports that need a second app. */
+const emptyGmail: Handler = (request) => {
+  const path = new URL(request.url).pathname.replace("/gmail/v1/users/me", "");
+  if (path === "/profile") return Response.json({ emailAddress: "owner@example.test" });
+  if (path === "/labels") return Response.json({ labels: [] });
+  if (path === "/messages") return Response.json({ resultSizeEstimate: 0 });
+  if (path === "/drafts") return Response.json({ resultSizeEstimate: 0 });
+  return Response.json({ error: { code: 404 } }, { status: 404 });
+};
+
+describe("hue world create --export-from: several apps, saved exports, archived Slack", () => {
+  test("exports several apps in one run, each through its own Pipedream account or credentials", async () => {
+    const stand = hue();
+    const api = linearApi();
+    const gmailCalls: string[] = [];
+    const gmail: Handler = (request) => {
+      gmailCalls.push(request.headers.get("authorization") ?? "");
+      return emptyGmail(request);
+    };
+    // Linear through Pipedream; Gmail with its own token.
+    const connect = pipedream(api.handler, LINEAR_KEY);
+    const mixed = await world(
+      [
+        "create",
+        "--apps",
+        "linear,gmail",
+        "--export-from",
+        "linear,gmail",
+        "--pipedream-user",
+        "lab-coverage",
+        "--pipedream-account",
+        "linear=apn_linear",
+        "--origin",
+        stand.origin,
+      ],
+      {
+        env: { ...PIPEDREAM_ENV, GMAIL_ACCESS_TOKEN: "ya29.synthetic-gmail" },
+        io: {
+          fetch: route({
+            [PIPEDREAM_API_URL]: connect.handler,
+            "https://gmail.googleapis.com/": gmail,
+          }),
+        },
+      },
+    );
+    expect(mixed.code).toBe(0);
+    expect(connect.proxied.every((call) => call.query.account_id === "apn_linear")).toBe(true);
+    expect(connect.proxied.every((call) => call.url === "https://api.linear.app/graphql")).toBe(
+      true,
+    );
+    expect(gmailCalls.length).toBeGreaterThan(0);
+    expect(gmailCalls.every((header) => header === "Bearer ya29.synthetic-gmail")).toBe(true);
+    // One World with both apps' files.
+    const sources = stand.creations[0]!.sources as { files: Declared[] };
+    expect(sources.files.map((group) => group.app)).toEqual(["linear", "gmail"]);
+
+    // Both apps through Pipedream, each with its own account.
+    const both = hue();
+    const accounts = new Map<string, string>();
+    const upstream: Handler = (request) => {
+      const host = new URL(request.url).host;
+      return host === "api.linear.app" ? api.handler(request) : emptyGmail(request);
+    };
+    const proxy = pipedream(upstream, LINEAR_KEY);
+    const proxied: Handler = (request) => {
+      const url = new URL(request.url);
+      const target = /\/proxy\/([A-Za-z0-9_-]+)$/.exec(url.pathname)?.[1];
+      if (target)
+        accounts.set(
+          new URL(Buffer.from(target, "base64url").toString()).host,
+          url.searchParams.get("account_id")!,
+        );
+      return proxy.handler(request);
+    };
+    const result = await world(
+      [
+        "create",
+        "--apps",
+        "linear,gmail",
+        "--export-from",
+        "linear,gmail",
+        "--pipedream-user",
+        "lab-coverage",
+        "--pipedream-account",
+        "linear=apn_linear,gmail=apn_gmail",
+        "--origin",
+        both.origin,
+      ],
+      { env: PIPEDREAM_ENV, io: { fetch: route({ [PIPEDREAM_API_URL]: proxied }) } },
+    );
+    expect(result.code).toBe(0);
+    expect(Object.fromEntries(accounts)).toEqual({
+      "api.linear.app": "apn_linear",
+      "gmail.googleapis.com": "apn_gmail",
+    });
+    expect(result.stderr).toContain("Gmail: reading through Pipedream Connect account apn_gmail.");
+  });
+
+  test("--save-to saves the export owner-only without a Hue key, never over a file, for --files to upload", async () => {
+    const api = linearApi();
+    const dir = await scratch();
+    const io = { fetch: route({ "https://api.linear.app/graphql": api.handler }) };
+    const saved = await world(
+      ["create", "--apps", "linear", "--export-from", "linear", "--save-to", "out"],
+      { cwd: dir, env: { HUE_API_KEY: "", LINEAR_API_KEY: LINEAR_KEY }, io },
+    );
+    expect(saved.code).toBe(0);
+    expect(saved.stdout).toContain(
+      "Saved 1 file. Create the World from them with: hue world create --apps linear --files out",
+    );
+    const file = join(dir, "out", "linear", "linear-export-1.json");
+    expect(((await json(await readFile(file))) as unknown[]).length).toBe(5);
+    expect((await stat(file)).mode & 0o777).toBe(0o600);
+    expect((await stat(join(dir, "out", "linear"))).mode & 0o777).toBe(0o700);
+
+    // A second save to the same place is refused before Linear is read.
+    const queries = api.queries.length;
+    const again = await world(
+      ["create", "--apps", "linear", "--export-from", "linear", "--save-to", "out"],
+      { cwd: dir, env: { HUE_API_KEY: "", LINEAR_API_KEY: LINEAR_KEY }, io },
+    );
+    expect(again.code).toBe(2);
+    expect(again.stderr.split("\n")[0]).toBe(
+      `${join("out", "linear", "linear-export-1.json")} exists already; save to another directory`,
+    );
+    expect(api.queries.length).toBe(queries);
+
+    // A file in the place of the app's directory is named as such, not as an earlier export.
+    await mkdir(join(dir, "blocked"));
+    await writeFile(join(dir, "blocked", "linear"), "");
+    const blocked = await world(
+      ["create", "--apps", "linear", "--export-from", "linear", "--save-to", "blocked"],
+      { cwd: dir, env: { HUE_API_KEY: "", LINEAR_API_KEY: LINEAR_KEY }, io },
+    );
+    expect(blocked.code).toBe(1);
+    expect(blocked.stderr).toContain(
+      `Unable to write ${join("blocked", "linear", "linear-export-1.json")}: EEXIST`,
+    );
+
+    // The printed --files path is one shell word.
+    const spaced = await world(
+      ["create", "--apps", "linear", "--export-from", "linear", "--save-to", "my exports"],
+      { cwd: dir, env: { HUE_API_KEY: "", LINEAR_API_KEY: LINEAR_KEY }, io },
+    );
+    expect(spaced.stdout).toContain("--files 'my exports'");
+
+    // The saved files upload exactly with --files.
+    const stand = hue();
+    const created = await world(
+      ["create", "--apps", "linear", "--files", "out", "--origin", stand.origin],
+      { cwd: dir },
+    );
+    expect(created.code).toBe(0);
+    expect(stand.stored.get("linear-1")).toEqual(await readFile(file));
+    const sources = stand.creations[0]!.sources as { files: Declared[] };
+    expect(sources.files[0]!.files[0]!.name).toBe("linear/linear-export-1.json");
+  });
+
+  test("slack: lists archived conversations without reading them unless --slack-archived", async () => {
+    const run = async (flags: string[]) => {
+      const stand = hue();
+      const calls: string[] = [];
+      const slack: Handler = (request) => {
+        const url = new URL(request.url);
+        const method = url.pathname.slice("/api/".length);
+        calls.push(`${method} ${url.searchParams}`);
+        const done = { response_metadata: { next_cursor: "" } };
+        const ok = (body: Record<string, unknown>) => Response.json({ ok: true, ...body });
+        if (method === "auth.test") return ok({ user_id: "U1" });
+        if (method === "users.list") return ok({ members: [{ id: "U1" }], ...done });
+        if (method === "conversations.list")
+          return ok({
+            channels: [
+              { id: "C1", is_channel: true },
+              { id: "C9", is_channel: true, is_archived: true },
+            ],
+            ...done,
+          });
+        return ok(method === "files.list" ? { files: [], paging: { page: 1, pages: 1 } } : done);
+      };
+      const result = await world(
+        ["create", "--apps", "slack", "--export-from", "slack", ...flags, "--origin", stand.origin],
+        {
+          env: { SLACK_TOKEN: "xoxp-synthetic" },
+          io: { fetch: route({ "https://slack.com/api/": slack }) },
+        },
+      );
+      return { result, read: calls.filter((call) => call.includes("C9")) };
+    };
+    const skipped = await run([]);
+    expect(skipped.result.code).toBe(0);
+    expect(skipped.read).toEqual([]);
+    expect(skipped.result.stderr).toContain(
+      "Slack: listed 1 archived conversation without reading it; the World answers its history, replies, info, members, pins and bookmarks as unknown. --slack-archived reads them.",
+    );
+    const read = await run(["--slack-archived"]);
+    expect(read.result.code).toBe(0);
+    expect(read.read.map((call) => call.split(" ")[0])).toEqual([
+      "conversations.info",
+      "conversations.members",
+      "conversations.history",
+      "pins.list",
+      "bookmarks.list",
+    ]);
+  });
+
+  test("refuses save and archive usage errors before reading anything", async () => {
+    const cases: [string[], string][] = [
+      [["--apps", "linear", "--save-to", "out"], "--save-to saves what --export-from reads"],
+      [
+        ["--apps", "linear", "--export-from", "linear", "--save-to", "out", "--files", "data"],
+        "--save-to only saves the export",
+      ],
+      [
+        [
+          "--apps",
+          "linear",
+          "--export-from",
+          "linear",
+          "--save-to",
+          "out",
+          "--composio-user",
+          "u",
+          "--composio-account",
+          "c",
+        ],
+        "--save-to keeps the files but not the Composio connection",
+      ],
+      [
+        ["--apps", "linear", "--export-from", "linear", "--slack-archived"],
+        "--slack-archived goes with --export-from slack",
+      ],
+    ];
+    for (const [args, message] of cases) {
+      const result = await world(["create", ...args, "--origin", "http://127.0.0.1:9"], {
+        env: { LINEAR_API_KEY: LINEAR_KEY },
+      });
+      expect(result.code).toBe(2);
+      expect(result.stderr.split("\n")[0]).toContain(message);
     }
   });
 });
