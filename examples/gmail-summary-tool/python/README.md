@@ -36,6 +36,31 @@ even when HTTP body capture is explicitly enabled. All runs return the same summ
 These environment variables are conventions implemented by `main.py`; the SDK
 accepts constructor options and does not read them.
 
+To check an ordinary tool nested inside a model span, run:
+
+```sh
+.venv/bin/python main.py --model-scope
+```
+
+This offline mode sends a synthetic model HTTP request before and after the same
+Gmail summary tool. It checks that both model HTTP spans keep their identity and
+omit their bodies, while the six Gmail HTTP spans capture their bodies under the
+ordinary tool. The model keeps its provider and model metadata. With the default
+capture settings, the output reports eight HTTP spans. Both servers remain on
+loopback, and no model provider is called.
+
+To use the separate shared Gmail response fixture, run:
+
+```sh
+.venv/bin/python main.py --canonical
+```
+
+The [canonical fixture](../fixtures/README.md) serves fuller synthetic message
+objects with distinct timestamps in newest-first order. The offline receiver
+checks each captured response against the server fixture without changing it.
+The output identifies `"fixture": "canonical-gmail-v1"`. The original default and
+model-scope fixtures remain available as separate scenarios.
+
 ## Read a live mailbox
 
 Copy `.env.example` to the ignored `.env` and fill `HUE_API_KEY` and a short-lived

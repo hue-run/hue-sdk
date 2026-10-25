@@ -67,7 +67,18 @@ def run(hue: Hue, base_url: str, access_token: str) -> tuple[str, Summary]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--live", action="store_true", help="Read Gmail using local credentials.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--live", action="store_true", help="Read Gmail using local credentials.")
+    mode.add_argument(
+        "--model-scope",
+        action="store_true",
+        help="Verify model and nested tool HTTP capture offline.",
+    )
+    mode.add_argument(
+        "--canonical",
+        action="store_true",
+        help="Use the shared canonical Gmail server fixture offline.",
+    )
     args = parser.parse_args()
     options = {
         option: env_bool(variable)
@@ -100,7 +111,7 @@ def main() -> None:
     else:
         from offline import verify
 
-        verify(options)
+        verify(options, model_scope=args.model_scope, canonical=args.canonical)
 
 
 if __name__ == "__main__":

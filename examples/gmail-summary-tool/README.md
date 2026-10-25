@@ -21,3 +21,10 @@ and raw parsed JSON responses as `output.value`. HTTP status and selected behavi
 
 The local receiver proves capture and acknowledgement. A stored trace receipt
 and a World build require a configured Hue project and separate verification.
+
+Direct model-provider HTTP inside a recognized model span keeps identity but
+suppresses both HTTP bodies. An ordinary tool nested inside that span records
+its app HTTP bodies under the normal content controls. Inherited model metadata
+stays available. Each example also has a synthetic scope check that reads Gmail
+inside a model span and checks model HTTP before and after the tool. It uses
+loopback requests and makes no paid model call.

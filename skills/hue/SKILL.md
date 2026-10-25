@@ -107,8 +107,10 @@ only to make HTTP capture work.
 Check the installed version first. Create Hue before API clients on Node 22 and Bun, where the
 fetch fallback cannot observe a fetch reference saved before initialization. Calls in another
 process need tracing in that process. Provider-hosted tools do not make their requests in the
-application process. Hue excludes its export traffic and avoids recording model-provider HTTP
-content a second time inside recognized model spans.
+application process. Hue excludes its export traffic. Direct model-provider HTTP inside a
+recognized model span keeps HTTP identity but suppresses both request and response bodies.
+An ordinary `hue.tool` nested inside that span resumes app HTTP body capture under the normal
+content controls. Inherited model metadata stays available to the nested work.
 
 | Option in TypeScript | Option in Python | Default and effect |
 | --- | --- | --- |

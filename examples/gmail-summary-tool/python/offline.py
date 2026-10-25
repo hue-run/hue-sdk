@@ -6,9 +6,11 @@ import gzip
 import json
 from contextlib import ExitStack, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from threading import Thread
 from urllib.parse import parse_qs, urlsplit
 
+import requests
 from main import run
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
@@ -44,10 +46,24 @@ def serve(handler):
         thread.join()
 
 
-def verify(options: dict[str, bool]) -> None:
+def verify(options: dict[str, bool], *, model_scope: bool = False, canonical: bool = False) -> None:
+    fixture_name = None
+    messages = MESSAGES
+    listing = {
+        "messages": [{"id": m["id"], "threadId": m["threadId"]} for m in messages],
+        "resultSizeEstimate": len(messages),
+        "nextPageToken": NEXT_PAGE_TOKEN,
+    }
+    if canonical:
+        fixture = json.loads(
+            (Path(__file__).resolve().parents[1] / "fixtures" / "canonical-gmail.json").read_text()
+        )
+        fixture_name = fixture["name"]
+        messages, listing = fixture["messages"], fixture["list"]
     exports = []
     exported_bodies: list[bytes] = []
     reads: list[str] = []
+    provider_reads: list[str] = []
     acknowledgements: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -63,6 +79,18 @@ def verify(options: dict[str, bool]) -> None:
             pass
 
     class GmailHandler(Handler):
+        def do_POST(self) -> None:
+            assert self.path == "/v1/synthetic-model"
+            assert self.headers.get("traceparent") is None, "Capture must not inject traceparent."
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            assert body["prompt"] == f"synthetic-provider-request-{len(provider_reads)}"
+            provider_reads.append(body["prompt"])
+            self.reply(
+                200,
+                json.dumps({"completion": "synthetic-provider-response"}).encode(),
+                "application/json",
+            )
+
         def do_GET(self) -> None:
             assert self.headers.get("Authorization") == "Bearer synthetic-gmail-access-token"
             assert self.headers.get("traceparent") is None, "Capture must not inject traceparent."
@@ -72,13 +100,9 @@ def verify(options: dict[str, bool]) -> None:
                 "maxResults": ["5"],
                 "q": ["is:unread"],
             }:
-                payload = {
-                    "messages": [{"id": m["id"], "threadId": m["threadId"]} for m in MESSAGES],
-                    "resultSizeEstimate": len(MESSAGES),
-                    "nextPageToken": NEXT_PAGE_TOKEN,
-                }
+                payload = listing
             else:
-                payload = next((m for m in MESSAGES if route.path == f"{prefix}/{m['id']}"), None)
+                payload = next((m for m in messages if route.path == f"{prefix}/{m['id']}"), None)
                 if payload is None or parse_qs(route.query) != {"format": ["full"]}:
                     self.reply(404, b"{}", "application/json")
                     return
@@ -115,7 +139,28 @@ def verify(options: dict[str, bool]) -> None:
             service_name="gmail-summary-python",
             **options,
         ) as hue:
-            trace_id, summary = run(hue, gmail_url, "synthetic-gmail-access-token")
+            if model_scope:
+                with hue.model("synthetic-model", provider="synthetic") as model:
+                    model.set_input({"task": "Summarize five unread Gmail messages."})
+                    with requests.Session() as provider:
+                        before = provider.post(
+                            f"{gmail_url}/v1/synthetic-model",
+                            json={"prompt": "synthetic-provider-request-0"},
+                            timeout=15,
+                        )
+                        before.raise_for_status()
+                        assert before.json() == {"completion": "synthetic-provider-response"}
+                        trace_id, summary = run(hue, gmail_url, "synthetic-gmail-access-token")
+                        after = provider.post(
+                            f"{gmail_url}/v1/synthetic-model",
+                            json={"prompt": "synthetic-provider-request-1"},
+                            timeout=15,
+                        )
+                        after.raise_for_status()
+                        assert after.json() == {"completion": "synthetic-provider-response"}
+                    model.set_output(summary)
+            else:
+                trace_id, summary = run(hue, gmail_url, "synthetic-gmail-access-token")
             if not hue.force_flush():
                 raise RuntimeError("Telemetry export did not complete successfully.")
 
@@ -127,7 +172,7 @@ def verify(options: dict[str, bool]) -> None:
             for item in span.attributes
         }
 
-    assert summary == {"count": 5, "ids": [m["id"] for m in MESSAGES]}, summary
+    assert summary == {"count": 5, "ids": [m["id"] for m in messages]}, summary
     assert len(reads) == 6, reads
     tools = [s for s in exports if attributes(s).get("gen_ai.operation.name") == "execute_tool"]
     assert len(tools) == 1, f"Expected one tool span, got {len(tools)}."
@@ -142,12 +187,23 @@ def verify(options: dict[str, bool]) -> None:
     else:
         assert "gen_ai.tool.call.arguments" not in tool_attrs
         assert "gen_ai.tool.call.result" not in tool_attrs
-    clients = [s for s in exports if s.kind == 3]
-    expected_clients = 6 if options.get("capture_http", True) else 0
+    models = [s for s in exports if attributes(s).get("gen_ai.operation.name") == "chat"]
+    assert len(models) == int(model_scope)
+    if model_scope:
+        assert len(provider_reads) == 2
+        model_attrs = attributes(models[0])
+        assert model_attrs["gen_ai.provider.name"] == "synthetic"
+        assert model_attrs["gen_ai.request.model"] == "synthetic-model"
+    clients = [s for s in exports if "http.request.method" in attributes(s)]
+    expected_clients = (8 if model_scope else 6) if options.get("capture_http", True) else 0
     assert len(clients) == expected_clients, (
         f"Expected {expected_clients} HTTP spans, got {len(clients)}."
     )
-    assert len(exports) == 2 + expected_clients, f"Unexpected exported spans: {len(exports)}."
+    provider_clients = [s for s in clients if attributes(s)["http.request.method"] == "POST"]
+    assert len(provider_clients) == (2 if model_scope and options.get("capture_http", True) else 0)
+    assert len(exports) == 2 + int(model_scope) + expected_clients, (
+        f"Unexpected exported spans: {len(exports)}."
+    )
     bodies = (
         options.get("capture_http", True)
         and options.get("capture_content", True)
@@ -155,9 +211,15 @@ def verify(options: dict[str, bool]) -> None:
     )
     for span in clients:
         attrs = attributes(span)
-        assert span.parent_span_id == tools[0].span_id, "HTTP span must be a tool child."
-        assert attrs["http.request.method"] == "GET"
+        assert span.kind == 3, "HTTP spans must have CLIENT kind."
         assert attrs["http.response.status_code"] == 200
+        if attrs["http.request.method"] == "POST":
+            assert model_scope and span.parent_span_id == models[0].span_id
+            assert attrs["url.full"] == f"{gmail_url}/v1/synthetic-model"
+            assert "input.value" not in attrs and "output.value" not in attrs
+            continue
+        assert span.parent_span_id == tools[0].span_id, "Gmail HTTP span must be a tool child."
+        assert attrs["http.request.method"] == "GET"
         assert attrs["url.full"].startswith(f"{gmail_url}/gmail/v1/users/me/messages")
         assert "?" not in attrs["url.full"], "The URL must omit query values."
         if bodies:
@@ -168,34 +230,31 @@ def verify(options: dict[str, bool]) -> None:
             )
             output = json.loads(attrs["output.value"])
             assert output == (
-                {
-                    "messages": [{"id": m["id"], "threadId": m["threadId"]} for m in MESSAGES],
-                    "resultSizeEstimate": 5,
-                    "nextPageToken": NEXT_PAGE_TOKEN,
-                }
+                listing
                 if attrs["url.full"].endswith("/messages")
-                else next(m for m in MESSAGES if attrs["url.full"].endswith(f"/{m['id']}"))
+                else next(m for m in messages if attrs["url.full"].endswith(f"/{m['id']}"))
             ), output
         else:
             assert "input.value" not in attrs and "output.value" not in attrs
     wire = b"".join(exported_bodies)
     assert b"synthetic-gmail-access-token" not in wire, "Gmail authorization must not be exported."
     assert b"synthetic-verify-key" not in wire, "Hue authorization must not be exported."
+    assert b"synthetic-provider-request-" not in wire
+    assert b"synthetic-provider-response" not in wire
     if not bodies:
         assert b"Synthetic message " not in wire and b"Synthetic subject " not in wire
         assert NEXT_PAGE_TOKEN.encode() not in wire
     assert acknowledgements, "The receiver must acknowledge a real OTLP export."
-    print(
-        json.dumps(
-            {
-                "mode": "offline",
-                "trace_id": trace_id,
-                "summary": summary,
-                "http_spans": len(clients),
-                "http_bodies": bodies,
-                "exported": True,
-            }
-        )
-    )
+    evidence = {
+        "mode": "model-scope" if model_scope else "offline",
+        "trace_id": trace_id,
+        "summary": summary,
+        "http_spans": len(clients),
+        "http_bodies": bodies,
+        "exported": True,
+    }
+    if fixture_name is not None:
+        evidence["fixture"] = fixture_name
+    print(json.dumps(evidence))
     for acknowledgement in acknowledgements:
         print(acknowledgement)

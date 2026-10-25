@@ -29,6 +29,30 @@ To verify an unpublished checkout, install its packed tarball in a copy of this
 example before building. See the repository's
 [examples verification recipe](../../../.agents/skills/verify-examples/features/gmail-summary-tool.md).
 
+To check model and tool nesting separately, run:
+
+```sh
+npm run offline -- --model-scope
+```
+
+This mode wraps the same Gmail helper in a synthetic model span, with loopback
+model HTTP before and after the tool. Both model HTTP calls keep identity and
+omit request and response bodies. The six Gmail children retain their bodies.
+The model metadata is unchanged. No paid model or external service is called.
+
+For a separate fixture with explicit MIME fields and distinct message dates, run:
+
+```sh
+npm run offline -- --canonical --export-dir=../../../.context/gmail-canonical-run
+```
+
+The [canonical fixture](../fixtures/README.md) contains synthetic values chosen
+before capture. The runner compares each exported JSON value with the server's
+response and saves the unchanged OTLP protobuf batches after gzip decompression.
+It refuses to overwrite an existing batch or manifest. Keep these artifacts
+separate from the original fixture's results. A downstream World replay result
+is separate evidence and may still expose a replay limit.
+
 ## Read a live mailbox
 
 Copy `.env.example` to ignored `.env` and set `HUE_API_KEY` and a short-lived OAuth
