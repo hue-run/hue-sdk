@@ -1,6 +1,6 @@
 # Compatibility
 
-This checkout covers TypeScript `0.25.1` and Python `0.13.6`. Registry availability is established by the completed [release workflow](https://github.com/hue-run/hue-sdk/blob/main/RELEASING.md). See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+This checkout covers TypeScript `0.25.1` and Python `0.14.0`. Registry availability is established by the completed [release workflow](https://github.com/hue-run/hue-sdk/blob/main/RELEASING.md). See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -13,6 +13,30 @@ This checkout covers TypeScript `0.25.1` and Python `0.13.6`. Registry availabil
 | Live spans | Placeholders for running Hue and AI spans, sent by the Hue transports from TypeScript `0.7.0` and Python `0.4.0` | Placeholders travel in their own requests, after an export's completed spans, so a completed span's rejection is never credited to a placeholder. Requires a Hue deployment that answers trace exports with `Hue-Pending-Spans: 1` (app.hue.run does). A receiver without that header, an older Hue or a generic collector, gets at most one request of placeholders: its first trace acknowledgement, whatever the request carried, makes the SDK record one warning and switch live spans off for that client. Turn `liveSpans` / `live_spans` off to send none at all. |
 
 ## Existing dependencies
+
+Since Python `0.14.0`, Hue observes outbound HTTP through `requests`, `httpx` and `httpx2` sync and async,
+`urllib.request`, `aiohttp`, `httplib2` and `urllib3`, without new runtime dependencies. Requests use
+their existing bytes and headers. `capture_http=False` disables observation, and
+`capture_http_bodies=False` retains identity without bodies. `capture_content=False` also disables
+HTTP bodies. Captured content uses the existing redactor and credential filtering. URL userinfo,
+query strings and fragments are excluded from identity attributes. Recognized credential-bearing
+path formats are masked while ordinary identifiers remain. URL identity also passes through the
+existing `redactor` as `url.full`, including metadata-only capture. Borrowed spans are sanitized
+only in Hue's export copy. Present `http.url`, `http.target` and `url.path` hooks follow the
+canonical URL hook. Full URL aliases share the final URL, path aliases share its pathname,
+`url.query` is removed and span names contain only the method.
+HTTP URL-valued `resource.name` metadata is filtered independently in Hue's copy, including parent
+resources, live announcements and log resources, while ordinary service labels remain unchanged.
+Captured values declare `application/json`; original content types are recorded as allowed HTTP
+header attributes. Body capture is limited to
+eligible text and JSON content, at most 1 MiB per side, with truncation marked. Streaming capture
+observes only application-consumed bytes. Calls made through raw sockets, gRPC, WebSockets or
+another process are outside this capture. See the [Python HTTP capture guide](./packages/sdk-python/README.md#outbound-http-capture).
+
+Configured OpenTelemetry attribute limits remain authoritative: accepted body cuts use structured
+markers, dropped keys remain absent and URI rewrites over the accepted value limit are omitted.
+
+The optional HTTPX2 family is verified with `httpx2==2.13.1`.
 
 `@hue-run/sdk` core can coexist with AI SDK 6 (installed-package validation covers 6.0.116). The `hueTelemetry` adapter still requires AI SDK 7 and a compatible `@ai-sdk/otel` peer; it explicitly rejects AI SDK 6. Keep AI SDK 6 instrumentation on its existing provider and attach Hue transport, or use a standard OTLP exporter. Do not force dependency resolution or upgrade a framework solely to add tracing.
 

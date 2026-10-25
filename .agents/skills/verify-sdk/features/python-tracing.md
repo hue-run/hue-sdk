@@ -7,6 +7,25 @@ An application opens `Hue(base_url, api_key, ...)`, records spans, model calls a
 - `py-span` records `span`, `model`, `tool` and `context` with input and output.
 - `py-subagent` records `subagent()` (a `with` block, or a decorator for functions and coroutine functions) as an `invoke_agent {name}` span under the active tool span, or under `parent_context` from `Hue.extract()` in another process. A shared helper restores each task's parent context independently, including nested and inherited scopes.
 - `py-capture` honors `capture_content` and redaction before export.
+- `py-http` observes outbound HTTP identity and eligible request and response bodies by default
+  through `requests`, `httpx` and `httpx2` sync and async, `urllib.request`, `aiohttp`, `httplib2` and `urllib3`.
+  It preserves consumer bytes and request headers, observes streams without extra reads, applies
+  content opt-outs and redaction, marks bodies over 1 MiB, keeps model HTTP identity without bodies,
+  resumes body capture in nested Hue tools and suppresses exporter traffic. Import hooks, nested
+  wrappers, independent provider contexts and multiple-client shutdown remain safe. Closed helper
+  scopes are ignored in the originating task after cleanup in another task, while detached work
+  retains its original client policy. User-redactor HTTP is suppressed without
+  suppressing the application call. A later client registration wraps replaced methods again.
+  Captured MIME fields declare JSON while allowed header attributes preserve original content types.
+  Original SDK attribute limits remain authoritative: URI expansions are omitted, accepted body
+  cuts use structured markers and dropped keys stay absent.
+- `py-http-identity` scrubs recognized credentials in URL paths, preserves ordinary identifiers,
+  applies URL and present URI-alias redactors in both content modes, removes `url.query` and
+  sanitizes aliases and method-only span names only in Hue's export copy. URL-valued `resource.name`
+  metadata on spans and their resources is filtered independently, including non-HTTP parents,
+  live announcements and log resources, while ordinary labels remain unchanged.
+- `py-http-fork` keeps ordinary HTTP working after `os.fork()`, detaches inherited capture and
+  permits a fresh Hue client in the child, including inherited requests and aiohttp responses.
 - `py-ack` returns `force_flush()` and receipt results that match the receiver.
 - `py-media` inspects bounded, nonempty media and exports exact digests and blob entries.
 - `py-file-upload` covers opt-in `record_file` uploads and name validation.
@@ -42,6 +61,26 @@ Preconditions:
 
   Expected: `trace_id <32 hex> flushed True`, and the stub logs `GET /api/v1/projects/current` and `POST /api/v1/otlp/v1/traces` with status 200.
 - **Behavior test.** `uv run --frozen --all-groups pytest tests/test_sdk.py -q -k redact`. Expected: all selected tests pass in about 2 s.
+- **Outbound HTTP (`py-http`).** Run `uv run --frozen --all-groups pytest tests/test_http_capture.py tests/test_http_markers.py tests/test_http_parent_context.py tests/test_http_context_cleanup.py`.
+  Check exported CLIENT spans against a loopback server, their scrubbed URLs, query/body input
+  values, parsed response bodies and structured OTLP truncation placeholders. Confirm the
+  application receives the same bytes and headers with capture on and off. Cover all supported clients and real Slack, Google
+  API and Pipedream transports, unread and partially consumed responses, model/export suppression,
+  metadata-only and HTTP opt-outs, existing redaction, imports after Hue creation and client
+  shutdown. Check JSON MIME declarations, redactor HTTP recursion, replacement methods and
+  later HTTP after a scope closes in another task. Repeat from the installed wheel, including
+  Python 3.10. These checks use synthetic
+  HTTP endpoints and establish no live-provider compatibility claim.
+- **HTTP identity (`py-http-identity`).** Run `uv run --frozen --all-groups pytest tests/test_http_identity.py`.
+  Check real requests and HTTPX consumer bytes, default and metadata-only policies, redacted path
+  credentials and preserved business IDs. Borrowed stable and legacy URLs use the canonical URL
+  redactor followed by present full URL and path hooks. Final aliases agree, query attributes are
+  removed, all URI aliases disappear on invalid redaction, and the other exporter keeps its
+  original attributes and span name. Path-only spans run only their present path hooks.
+- **After fork (`py-http-fork`).** Run `uv run --frozen --all-groups pytest tests/test_http_fork.py`.
+  All three cases cover ordinary child HTTP and a fresh child Hue client, with no inherited
+  response, an inherited requests response or an inherited aiohttp response. The parent continues
+  its own capture. These cases require `os.fork()` and run against the installed wheel too.
 - **Sub-agents (`py-subagent`).** `uv run --frozen --all-groups pytest tests/test_sdk.py -q -k subagent`. Expected: `6 passed` in about 2 s.
 - **Static checks** (3.5 s): `uv run --frozen --all-groups ruff check src tests && uv run --frozen --all-groups mypy`.
 - **Serving isolation.** Run `uv run --frozen --all-groups pytest tests/test_isolation.py -k "attribute or mcp"` and `uv run --frozen --all-groups pytest tests/test_async_serving.py`. The optional compatibility group supplies the real async provider client; all HTTP responses are synthetic.

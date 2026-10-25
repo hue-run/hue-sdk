@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from threading import Event, Lock, Thread
 from time import monotonic, time_ns
 from typing import Any, TypeAlias, TypeVar, cast
+from weakref import WeakMethod
 
 import requests
 from opentelemetry import trace
@@ -37,6 +38,9 @@ from ._attachment import (
     read_path,
 )
 from ._blobs import MAX_BLOB_BYTES, ExplicitFile, Tally, Uploads
+from ._http_capture import register as register_http
+from ._http_capture import unregister as unregister_http
+from ._http_scope import HttpScope, client_scope, scope_for
 from ._inline_files import (
     INLINE_FILE_TEXT_PER_RECORD,
     digest_form_size,
@@ -44,7 +48,7 @@ from ._inline_files import (
     is_media_name,
 )
 from ._limits import AdvertisedLimits, cut_utf8, over_utf8
-from ._otel_compat import encode_logs
+from ._otel_compat import encode_logs, suppress_instrumentation
 from ._provider_tools import (
     ABSENT,
     hosted_server_addresses,
@@ -740,6 +744,8 @@ class Hue:
     It governs Hue's content helpers and, at export time,
     recognized third-party content attributes; unrecognized custom attributes, span names
     and other exporters remain caller-owned.
+    ``capture_http`` defaults to True. ``capture_http_bodies`` follows ``capture_content``;
+    False keeps automatic HTTP identity without request or response content.
     ``tracer_provider`` and ``logger_provider`` attach Hue's processors to existing SDK
     providers. A provider Hue creates for the other signal shares the borrowed provider's
     resource, so spans and correlated logs report one ``service.name``; ``service_name``
@@ -751,6 +757,8 @@ class Hue:
     enabled: bool
     base_url: str
     capture_content: bool
+    capture_http: bool
+    capture_http_bodies: bool
     tracer_provider: trace.TracerProvider
     tracer: trace.Tracer
     logger_provider: ApiLoggerProvider
@@ -761,6 +769,8 @@ class Hue:
         api_key: str | None = None,
         *,
         capture_content: bool = True,
+        capture_http: bool = True,
+        capture_http_bodies: bool | None = None,
         service_name: str = "hue-python-agent",
         tracer_provider: TracerProvider | None = None,
         logger_provider: LoggerProvider | None = None,
@@ -799,7 +809,13 @@ class Hue:
         for value in (max_queue_size, max_queue_bytes):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError("Queue limits must be positive integers.")
+        if not isinstance(capture_http, bool):
+            raise TypeError("capture_http must be True or False.")
+        if capture_http_bodies is not None and not isinstance(capture_http_bodies, bool):
+            raise TypeError("capture_http_bodies must be True, False or None.")
         self.capture_content = capture_content
+        self.capture_http = capture_http
+        self.capture_http_bodies = capture_content and (capture_http_bodies is not False)
         self._issues = 0
         self._issues_lock = Lock()
         self._redactor = redactor
@@ -840,7 +856,10 @@ class Hue:
                 max_queue_bytes,
                 live_spans,
             )
+            if self.capture_http:
+                register_http(self)
         except Exception:
+            unregister_http(self)
             self._closed = True
             for name in ("_span_processor", "_log_processor"):
                 processor = getattr(self, name, None)
@@ -911,6 +930,12 @@ class Hue:
             uploads=self._uploads,
             report_uploads=self._span_exporter._report_uploads,
         )
+        http_redactor = WeakMethod(self._text_content)
+
+        def redact_http_identity(key: str, value: str) -> str | None:
+            method = http_redactor()
+            return method(key, value) if method is not None else None
+
         self._span_processor = BoundedSpanProcessor(
             self._span_exporter,
             encode_spans,
@@ -921,6 +946,7 @@ class Hue:
             limits=self._limits,
             dropped_records=dropped_records,
             uploads=self._uploads,
+            http_redactor=redact_http_identity,
         )
         self._log_processor = BoundedLogProcessor(
             self._log_exporter,
@@ -931,6 +957,7 @@ class Hue:
             limits=self._limits,
             dropped_records=dropped_records,
             uploads=self._uploads,
+            http_redactor=redact_http_identity,
         )
         if self._uploads is not None:
             # Settled uploads are counted with the span exporter's, for both signals.
@@ -980,7 +1007,9 @@ class Hue:
         ``None`` (and a counted failure) when the redactor fails or returns something else."""
         try:
             if self._redactor is not None:
-                value = snapshot_content(self._redactor(key, value))
+                with suppress_instrumentation():
+                    redacted = self._redactor(key, value)
+                value = snapshot_content(redacted)
             # Bounded in UTF-8 bytes, as content is; a lone surrogate fails to encode.
             cap = self._limits.current.value_bytes
             if not isinstance(value, str) or len(value) > cap or len(value.encode("utf-8")) > cap:
@@ -1129,9 +1158,9 @@ class Hue:
             if self._redactor is not None:
                 # Bound the returned tree too, before JSONEncoder can allocate
                 # an arbitrarily large nested string or invoke custom hooks.
-                value = snapshot_content(
-                    self._redactor(key, value), whole=whole, attachments=placed
-                )
+                with suppress_instrumentation():
+                    redacted = self._redactor(key, value)
+                value = snapshot_content(redacted, whole=whole, attachments=placed)
             if final is not None:
                 final.append(value)
             # A direct string past the cap is cut before JSON creates an escaped copy: its text
@@ -1236,6 +1265,13 @@ class Hue:
             except Exception:
                 self._record_issue()
                 scope = None
+        http_frame = HttpScope(
+            self,
+            otel_span,
+            _category == "model" if _category in {"model", "tool"} else None,
+            scope_for(),
+        )
+        http_scope = client_scope.set(http_frame)
         helper = HueSpan(self, otel_span, _category, record_attributes)
         if placed:
 
@@ -1256,6 +1292,14 @@ class Hue:
                 self._record_issue()
             raise
         finally:
+            http_frame.active = False
+            try:
+                client_scope.reset(http_scope)
+            except ValueError:
+                # A disconnect may close an async generator in another task's context.
+                pass
+            except Exception:
+                self._record_issue()
             # Cleanup failures must not mask an application exception or result.
             if scope is not None:
                 try:
@@ -1648,6 +1692,7 @@ class Hue:
         deadline = monotonic() + timeout_millis / 1000
         with self._shutdown_lock:
             if not self._closed:
+                unregister_http(self)
                 self._closed = True
                 self._span_processor.stop_accepting()
                 self._log_processor.stop_accepting()

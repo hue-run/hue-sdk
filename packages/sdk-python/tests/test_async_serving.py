@@ -111,6 +111,7 @@ def test_async_provider_stream_preserves_work_cleanup_and_context(
                                 model="synthetic-model",
                                 messages=[{"role": "user", "content": "private-prompt"}],
                                 stream=True,
+                                extra_query={"private": "private-http-query"},
                             )
                             async with stream:
                                 async for chunk in stream:
@@ -174,14 +175,25 @@ def test_async_provider_stream_preserves_work_cleanup_and_context(
     if enabled:
         spans = receiver.spans()
         assert sorted(span.name for span in spans) == [
+            "POST",
             "chat synthetic-model",
             "execute_tool lookup",
             "parent",
             "request",
         ]
+        http = next(span for span in spans if span.name == "POST")
+        model = next(span for span in spans if span.name == "chat synthetic-model")
+        fields = {item.key: item.value for item in http.attributes}
+        assert http.kind == 3
+        assert http.parent_span_id == model.span_id
+        assert fields["http.request.method"].string_value == "POST"
+        assert fields["url.full"].string_value == streaming_provider.url + "/chat/completions"
+        assert fields["http.response.status_code"].int_value == 200
+        assert "input.value" not in fields and "output.value" not in fields
         exported = b"".join(body for path, _, body in receiver.requests if path.endswith("/traces"))
         assert (b"private-prompt" in exported) is capture_content
         assert b"synthetic-provider-key" not in exported
+        assert b"private-http-query" not in exported
         assert b"synthetic-disconnect" not in exported
     else:
         assert not receiver.requests

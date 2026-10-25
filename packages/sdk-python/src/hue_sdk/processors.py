@@ -25,6 +25,7 @@ from opentelemetry.sdk._logs import LogRecordProcessor, ReadWriteLogRecord
 from opentelemetry.sdk.trace import SpanProcessor
 
 from ._blobs import Tally, Uploads, held_of
+from ._http_bounds import remember_span
 from ._limits import AdvertisedLimits
 from ._otel_compat import export_context, instrumentation_suppressed
 from .snapshots import Hold, snapshot_log, snapshot_pending_span, snapshot_span
@@ -68,9 +69,11 @@ class _BoundedProcessor:
         *,
         limits: AdvertisedLimits | None = None,
         dropped_records: DroppedRecords | None = None,
+        http_redactor: Callable[[str, str], str | None] | None = None,
     ) -> None:
         self._pid = os.getpid()
         self._capture_content = capture_content
+        self._http_redactor = http_redactor
         self._exporter = exporter
         self._encode = encode
         self._max_records = max_records
@@ -106,6 +109,7 @@ class _BoundedProcessor:
             record_bytes=self._max_bytes,
             value_bytes=value_bytes,
             hold=self._hold(value_bytes),
+            http_redactor=self._http_redactor,
         )
 
     def _hold(self, value_bytes: int) -> Hold | None:
@@ -385,6 +389,7 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         limits: AdvertisedLimits | None = None,
         dropped_records: DroppedRecords | None = None,
         uploads: Uploads | None = None,
+        http_redactor: Callable[[str, str], str | None] | None = None,
     ) -> None:
         # Set before the worker starts; it reads these on every loop.
         self._live_spans = live_spans
@@ -403,6 +408,7 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
             capture_content,
             limits=limits,
             dropped_records=dropped_records,
+            http_redactor=http_redactor,
         )
 
     def _hold(self, value_bytes: int) -> Hold | None:
@@ -465,7 +471,10 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         )
 
     def on_start(self, span: Any, parent_context: Any = None) -> None:
-        if self._pid != os.getpid() or not self._live_spans:
+        if self._pid != os.getpid():
+            return
+        remember_span(span)
+        if not self._live_spans:
             return
         try:
             if not self._live_active:
@@ -540,7 +549,9 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         # Copy, trim and size on this worker, never in the application's on_start.
         for span in due:
             try:
-                placeholder = snapshot_pending_span(span, self._capture_content)
+                placeholder = snapshot_pending_span(
+                    span, self._capture_content, http_redactor=self._http_redactor
+                )
                 if span.end_time is None:
                     self._admit_advisory(placeholder)
             except Exception:
@@ -578,6 +589,7 @@ class BoundedLogProcessor(_BoundedProcessor, LogRecordProcessor):
         limits: AdvertisedLimits | None = None,
         dropped_records: DroppedRecords | None = None,
         uploads: Uploads | None = None,
+        http_redactor: Callable[[str, str], str | None] | None = None,
     ) -> None:
         # Set before the worker starts; admission reads it.
         self._uploads = uploads
@@ -589,6 +601,7 @@ class BoundedLogProcessor(_BoundedProcessor, LogRecordProcessor):
             capture_content,
             limits=limits,
             dropped_records=dropped_records,
+            http_redactor=http_redactor,
         )
 
     def _hold(self, value_bytes: int) -> Hold | None:

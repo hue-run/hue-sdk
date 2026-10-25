@@ -81,7 +81,7 @@ The SDK uses `https://app.hue.run` by default. Set `base_url` only for a differe
 
 ## Content and semantic fields
 
-Starting with Python 0.8.0, `capture_content` defaults to `True`. Earlier releases require an explicit choice. Set it to `True` for full traces: prompts and messages, responses and tool inputs/outputs, alongside model, usage, timing and errors. Trace inspection, evaluations and judges read that content, and your redactor and the credential filtering below apply to it. Choose `False`, metadata-only mode, when your users decline or an application or data policy forbids sending that content to another service.
+Starting with Python 0.8.0, `capture_content` defaults to `True`. Earlier releases require an explicit choice. Set it to `True` for full traces: prompts and messages, responses and tool inputs/outputs, alongside model, usage, timing and errors. Since Python 0.14.0 it also covers [outbound HTTP request and response bodies](#outbound-http-capture). Trace inspection, evaluations and judges read that content, and your redactor and the credential filtering below apply to it. Choose `False`, metadata-only mode, when your users decline or an application or data policy forbids sending that content to another service.
 
 `False` makes `set_input` and `set_output` omit content before it reaches an OTel queue and makes `log_inference` emit no record. Explicit JSON null, empty strings and absent content stay distinct when capture is enabled. Exception recording includes the exception type and ERROR status; exception messages and stacks are always excluded by these helpers.
 
@@ -327,6 +327,103 @@ with hue.context(session_id=body["session_id"]):
 ```
 
 The `invoke_agent researcher` span then belongs to the caller's trace, with the caller's `execute_tool research` span as its parent. Only `traceparent` crosses the boundary, never the API key, baggage or the session, so set the session identifier yourself as above. Accept `traceparent` only from your own services: whoever sets it chooses the trace the sub-agent's spans join. On an endpoint that also serves other callers, extract it only from authenticated internal requests and start a new trace otherwise.
+
+## Outbound HTTP capture
+
+Since Python 0.14.0, enabled Hue clients observe outbound requests through `requests`, `httpx`
+and `httpx2` sync and async, `urllib.request`, `aiohttp`, `httplib2` and `urllib3`. Capture starts when the Hue
+client is created, including clients imported later. It adds no runtime dependencies. Each exchange
+records an OpenTelemetry CLIENT span through Hue's owned or borrowed tracer provider. Hue does not
+inject `traceparent` or change request headers. Explicit [`Hue.inject`](#content-and-semantic-fields)
+remains available for propagation between your own services.
+
+With an owned provider, HTTP spans stay in the active Hue helper's trace when the application
+temporarily activates an independent trace. The application's current context remains active
+inside its transport. Borrowed providers honor the application's active parent, including
+application spans within the same trace. Closed Hue scopes stop affecting later HTTP capture in
+the originating task, including cleanup performed in another task. Detached work retains its
+original client policy and does not move to a newer client after shutdown.
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `capture_http` | `True` | `False` disables Hue's HTTP observation. |
+| `capture_http_bodies` | Follows `capture_content` | `False` keeps HTTP identity spans without captured request or response content. |
+| `capture_content` | `True` | `False` always disables HTTP bodies, even with `capture_http_bodies=True`. |
+
+For example, retain HTTP identity while leaving other content capture enabled:
+
+```python
+import os
+from hue_sdk import Hue
+
+hue = Hue(api_key=os.environ["HUE_API_KEY"], capture_http_bodies=False)
+```
+
+These options are constructor arguments. The SDK does not read them from environment variables.
+`enabled=False` disables all Hue tracing. Requests to the configured `base_url` origin, including
+Hue's export and control requests, are excluded. Requests inside model spans keep HTTP identity
+without request or response bodies. A nested Hue `tool()` scope resumes HTTP body capture, then
+restores the enclosing model's policy on exit. Requests nested through supported clients produce
+one Hue HTTP span for an exchange.
+An existing matching HTTP CLIENT parent can receive the observed content instead. Third-party
+instrumentors that create their spans inside a Hue wrapper can still produce duplicate spans.
+
+Identity includes method, scheme, host, port, path and response status. `url.full` omits URL userinfo,
+query strings and fragments. Recognized credential-bearing path formats are masked, including
+prefixed keys, explicit credential/value segments and bot or webhook capability tokens. Ordinary
+business identifiers and unchanged encoded path segments retain their spelling. The existing
+`redactor` receives `url.full` when a full URL is present, including metadata-only capture.
+Present `http.url`, `http.target` and `url.path` hooks follow in that order. Path hooks receive the
+pathname. Hue sanitizes each answer and omits all URI attributes if an answer is invalid or fails.
+In Hue's export copy, full URL aliases share the final URL, path aliases share its pathname and
+`url.query` is removed. The copy's name is the HTTP method. Other exporters retain their original
+span, including when Hue borrows their provider.
+
+HTTP URL-valued `resource.name` metadata is filtered independently through `url.full` and
+`resource.name` hooks, on spans, logs and their resources, including parent spans and live
+announcements. Ordinary labels and other exporters' original records remain unchanged.
+
+Captured content passes through Hue's credential filtering and the
+existing `redactor`, called with `input.value` or `output.value`. Authorization and cookie headers
+are never captured. HTTP requests made by the redactor itself are excluded from capture.
+Ordinary header containers and known pagination cursors remain available,
+with credential fields inside them redacted. Query values are content: `input.value` holds query
+parameters, with repeated names as arrays, merged with a JSON-object or form body. Other text
+bodies appear under `body`.
+An empty request records `{}`. `output.value` is the parsed JSON response body, or its text for
+other eligible content types. Status and allowed response headers are separate span attributes.
+Captured headers include supported API behavior headers such as `notion-version`, recorded as
+`http.request.header.notion_version` and `http.response.header.notion_version`. Content types use
+`http.request.header.content_type` and `http.response.header.content_type`. Captured values are
+JSON-encoded, including parsed text and form values, so `input.mime_type` and `output.mime_type`
+declare `application/json`. Eligible content types are JSON, text, XML and URL-encoded
+forms. Text uses its declared charset, or UTF-8 when none is declared. Unknown charsets and invalid
+text omit the body. Binary and unrecognized content types record size only. HTTP 5xx responses
+mark the span as an error. Network failures record the exception type without its message.
+
+Each body is bounded to 1 MiB. A body over the cap records a structured OTLP `hue.truncated`
+placeholder and its observed byte count rather than body text. The span also lists the affected
+content key in its `hue.truncated` attribute. The span remains present. HTTP bodies are not uploaded
+as oversized span values.
+
+OpenTelemetry's configured attribute limits still apply. Accepted body values shortened by those
+limits carry structured cut markers, while dropped attributes remain missing. URL rewrites that
+exceed the source attribute limit are omitted rather than expanded or restored.
+
+Unbuffered request streams remain unread and record no request body. Request body-size attributes
+require a known byte count. Capture never reads a response stream ahead of its consumer.
+`requests`, `httpx` and `httpx2` capture
+already-buffered responses, and `httplib2` captures the returned bytes. `urllib3` captures preloaded
+content. Streaming capture is limited to bytes the application reads through supported response
+methods. A complete output is recorded at EOF. An unread response has no captured response body,
+and an early close marks partial content as truncated. The HTTP span ends at EOF, close or client
+shutdown. Raw compressed reads record size without decoded content. Finish or close responses
+before flushing and shutting Hue down. Raw `http.client`, custom socket transports, gRPC,
+WebSockets and requests made by other processes are
+outside this capture.
+
+After `os.fork()`, child HTTP continues with inherited capture detached. Create a fresh Hue client
+in the child to enable its capture and exporter lifecycle.
 
 ## Existing instrumentation
 

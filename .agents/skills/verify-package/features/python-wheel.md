@@ -27,7 +27,7 @@ Preconditions:
   python3 scripts/release-artifacts.py inspect python "$VER" "$V"/python
   ```
 
-  Expected: `Inspected hue_run-<VER>-py3-none-any.whl: 33 files` and `Inspected hue_run-<VER>.tar.gz: 38 files` (counts change only when you add or remove files).
+  Expected: `Inspected hue_run-<VER>-py3-none-any.whl: 47 files` and `Inspected hue_run-<VER>.tar.gz: 52 files` (counts change only when you add or remove files).
 - **Installed consumer.** The python-agent drive in [verify-examples](../../verify-examples/features/python-agent.md) installs this wheel into a fresh venv and exports to the loopback stub (a fake Hue API) in a few seconds.
 - **Standalone wheel acceptance** (about 3 min, CI): `cd packages/sdk-python && uv run --frozen --all-groups pytest tests/test_wheel.py -q`.
 
@@ -39,6 +39,6 @@ Preconditions:
 
 ## Media release contract
 
-For Python 0.13.6, compare `pyproject.toml`, `src/hue_sdk/_version.py`, the editable project in `uv.lock`, wheel and sdist metadata, and `docs-contract.json`. Run `python3 scripts/check-doc-versions.py` and `python3 scripts/generate-docs-contract.py --check` from the repository root. Confirm the frozen lock retains every resolved dependency version.
+For Python 0.14.0, compare `pyproject.toml`, `src/hue_sdk/_version.py`, the editable project in `uv.lock`, wheel and sdist metadata, and `docs-contract.json`. Run `python3 scripts/check-doc-versions.py` and `python3 scripts/generate-docs-contract.py --check` from the repository root. Confirm the frozen lock retains every resolved dependency version.
 
 From an installed wheel, send binary media and text over 64 KiB to a loopback blob receiver. Check decoded bytes, the binary part's digest and size, and the text prefix and content-field entry. Exercise `record_file` with upload omitted and enabled, a Unicode name, an upload failure, content capture disabled and setup credentials. Supplied helper data is limited to 25 MiB; whole string attributes retain their separate 1,000,000,000-byte limit. Inspect the same-span `event:hue.file:<sha256>` entry and the unchanged `hue.file` event. Place an `Attachment` in a `span()` input and in a `log_inference` body next to an inline image, and check that each file is reserved once, the span lists `input.value#<pointer>` and the log record lists `body#<pointer>` entries in its own `hue.blobs`, under the span's trace. The shared corpus must remain byte-identical to the TypeScript copy; fixtures must not enter the wheel.
