@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { HueWorldError, WorldClient, WorldModelClient } from "../src/world.js";
 
@@ -77,16 +77,15 @@ test("ordinary and terminal failures retain maxAttempts and unrelated reads do n
   }
 });
 
-test("preparation has a fixed monotonic deadline across later responses", async () => {
-  const now = performance.now.bind(performance);
-  let offset = 0;
-  const clock = spyOn(performance, "now").mockImplementation(() => now() + offset);
+test("preparation keeps waiting while Hue says to retry, and a caller that stops sees Hue's refusal", async () => {
+  const controller = new AbortController();
   let calls = 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     fetch() {
-      if (++calls === 2) offset = 120_001;
+      // Well past any fixed attempt count: only the caller's signal ends the wait.
+      if (++calls === 6) controller.abort();
       return preparing();
     },
   });
@@ -96,27 +95,23 @@ test("preparation has a fixed monotonic deadline across later responses", async 
       baseUrl: server.url.origin,
       maxAttempts: 1,
     });
-    await expect(client.materialize(randomUUID(), { at })).rejects.toBeInstanceOf(HueWorldError);
-    expect(calls).toBe(2);
+    const failure = await client
+      .materialize(randomUUID(), { at }, { signal: controller.signal })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(failure).toBeInstanceOf(HueWorldError);
+    expect((failure as HueWorldError).status).toBe(503);
+    expect((failure as HueWorldError).diagnostic).toBe("world_preparing");
+    expect(calls).toBe(6);
   } finally {
-    clock.mockRestore();
     server.stop(true);
   }
 });
 
-test("preparation deadline aborts an active response without caller cancellation", async () => {
-  const schedule = globalThis.setTimeout;
-  let deadlineTimers = 0;
-  const accelerated = new Proxy(schedule, {
-    apply(target, receiver, args) {
-      if (args[1] === 120_000) {
-        deadlineTimers++;
-        return Reflect.apply(target, receiver, [args[0], 220, ...args.slice(2)]);
-      }
-      return Reflect.apply(target, receiver, args);
-    },
-  });
-  const timer = spyOn(globalThis, "setTimeout").mockImplementation(accelerated);
+test("caller cancellation aborts an active response after preparation and reports the preparing refusal", async () => {
+  const controller = new AbortController();
   let calls = 0;
   let interval: ReturnType<typeof setInterval> | undefined;
   const server = Bun.serve({
@@ -124,6 +119,7 @@ test("preparation deadline aborts an active response without caller cancellation
     port: 0,
     fetch() {
       if (++calls === 1) return preparing();
+      setTimeout(() => controller.abort(), 200);
       return new Response(
         new ReadableStream({
           start(controller) {
@@ -144,14 +140,19 @@ test("preparation deadline aborts an active response without caller cancellation
       baseUrl: server.url.origin,
       maxAttempts: 1,
     });
-    await expect(client.materialize(randomUUID(), { at })).rejects.toBeInstanceOf(HueWorldError);
+    const failure = await client
+      .materialize(randomUUID(), { at }, { signal: controller.signal })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(failure).toBeInstanceOf(HueWorldError);
+    expect((failure as HueWorldError).diagnostic).toBe("world_preparing");
     expect(calls).toBe(2);
-    expect(deadlineTimers).toBe(1);
     expect(performance.now() - started).toBeLessThan(1000);
   } finally {
     clearInterval(interval);
     server.stop(true);
-    timer.mockRestore();
   }
 }, 2000);
 
