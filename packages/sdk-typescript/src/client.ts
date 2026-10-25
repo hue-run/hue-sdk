@@ -22,6 +22,7 @@ import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider, type ReadableSpan } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
 import { HUE_SCOPE } from "./config.js";
+import { runHttpCaptureScope, suppressHttpCapture } from "./http-capture.js";
 import {
   hostedServerAddresses,
   hostedToolActivity,
@@ -88,6 +89,8 @@ interface LocalContext {
   workspaceId?: string;
   /** Request metadata of the enclosing `model()` call, copied onto message records. */
   model?: { operation: string; provider: string; requestModel: string };
+  /** HTTP content suppression is independent of inherited inference-log metadata. */
+  httpModel?: boolean;
 }
 /**
  * Attach mode: the application owns its OpenTelemetry providers and passes the transport whose
@@ -176,12 +179,18 @@ function errorType(error: unknown): string {
   return error instanceof Error && error.name ? String(error.name) : "Error";
 }
 
+function runHttpScope<T>(scope: object, capture: boolean, work: () => T): T {
+  return runHttpCaptureScope(scope, () => (capture ? work() : suppressHttpCapture(work)));
+}
+
 /** Local async context preserves nesting without registering or replacing global OTel providers. */
 class ContextualTracer implements Tracer {
   constructor(
     private source: Tracer,
     private storage: AsyncLocalStorage<LocalContext>,
+    private scope: object,
     private enabled: () => boolean,
+    private captureHttp: boolean,
     private failed: () => void,
   ) {}
   startSpan(name: string, options: OtelSpanOptions = {}, parent?: Context): Span {
@@ -255,10 +264,12 @@ class ContextualTracer implements Tracer {
         this.failed();
         active = trace.setSpan(ROOT_CONTEXT, span);
       }
-    return this.storage.run({ ...this.storage.getStore(), context: active }, () =>
-      created
-        ? runInContext(active, () => callback(span) as ReturnType<F>, this.failed)
-        : (callback(span) as ReturnType<F>),
+    return runHttpScope(this.scope, this.enabled() && this.captureHttp, () =>
+      this.storage.run({ ...this.storage.getStore(), context: active }, () =>
+        created
+          ? runInContext(active, () => callback(span) as ReturnType<F>, this.failed)
+          : (callback(span) as ReturnType<F>),
+      ),
     );
   }
 }
@@ -309,6 +320,7 @@ export class HueClient {
   readonly enabled: boolean;
   private logger: Logger;
   private storage = new AsyncLocalStorage<LocalContext>();
+  private httpScope = {};
   /** Reports a contained capture or instrumentation failure, named to the trace active where
    * it happened when there is one. */
   private instrumentationFailed(signal: Signal = "traces", count = 1): void {
@@ -327,6 +339,7 @@ export class HueClient {
   private ownedProviders?: { tracer: TracerProvider; logger: LoggerProvider };
   private closed = false;
   private shutdownPromise?: Promise<ExportReport>;
+  private detachHttpCapture?: () => void;
   /** The latest flush while it still sends its records (`sent`, which the next flush's send
    * follows), and the safe result that joined it. */
   private sending?: {
@@ -382,10 +395,19 @@ export class HueClient {
     this.tracer = new ContextualTracer(
       this.tracerProvider.getTracer(HUE_SCOPE, sdkVersion),
       this.storage,
+      this.httpScope,
       () => this.enabled && !this.closed,
+      this.transport.options.captureHttp,
       () => this.instrumentationFailed(),
     );
     this.logger = this.loggerProvider.getLogger(HUE_SCOPE, sdkVersion);
+    this.detachHttpCapture = this.transport.attachHttpCapture({
+      tracer: this.tracer,
+      context: () => this.getContext(),
+      active: () => this.storage.getStore() !== undefined,
+      scope: this.httpScope,
+      model: () => this.storage.getStore()?.httpModel === true,
+    });
   }
 
   /**
@@ -435,6 +457,7 @@ export class HueClient {
           userId: identifier(options.userId ?? inherited?.userId),
           workspaceId: identifier(options.workspaceId ?? inherited?.workspaceId),
           model: inherited?.model,
+          httpModel: inherited?.httpModel,
         };
         const { attributes, placed } = this.attributeValues(options.attributes);
         span = this.storage.run(active, () =>
@@ -490,8 +513,15 @@ export class HueClient {
     // The span is also OpenTelemetry's active span while the callback runs, so spans from other
     // instrumentations (HTTP clients, provider SDKs) join this trace when the application has
     // registered a context manager. Hue still registers none itself.
-    return this.storage.run({ ...active, context: spanContext }, () =>
-      created ? runInContext(spanContext, execute, () => this.instrumentationFailed()) : execute(),
+    return runHttpScope(
+      this.httpScope,
+      this.enabled && !this.closed && this.transport.options.captureHttp,
+      () =>
+        this.storage.run({ ...active, context: spanContext }, () =>
+          created
+            ? runInContext(spanContext, execute, () => this.instrumentationFailed())
+            : execute(),
+        ),
     );
   }
 
@@ -545,7 +575,11 @@ export class HueClient {
       `execute_tool ${name}`,
       async ({ span }) => {
         this.setContent(span, "gen_ai.tool.call.arguments", input);
-        const result = await execute();
+        // A tool is application work even when a model callback invokes it.
+        const scope = this.storage.getStore();
+        const result = await (scope?.httpModel
+          ? this.storage.run({ ...scope, httpModel: false }, execute)
+          : execute());
         if (result !== undefined) this.setContent(span, "gen_ai.tool.call.result", result);
         return result;
       },
@@ -672,7 +706,9 @@ export class HueClient {
         if (tools !== undefined) this.setContent(span.span, "gen_ai.tool.definitions", tools);
         // recordMessages inside the callback copies this request metadata onto its log record.
         const store = this.storage.getStore() ?? { context: span.context };
-        return this.storage.run({ ...store, model: metadata }, () => callback(handle));
+        return this.storage.run({ ...store, model: metadata, httpModel: true }, () =>
+          callback(handle),
+        );
       },
       {
         sessionId,
@@ -1471,6 +1507,8 @@ export class HueClient {
    */
   shutdown(): Promise<ExportReport> {
     this.shutdownPromise ??= (async () => {
+      this.detachHttpCapture?.();
+      this.detachHttpCapture = undefined;
       this.closed = true;
       try {
         return await this.flush();
@@ -1492,7 +1530,7 @@ export class HueClient {
  * Creates a client that owns its providers ({@link HueOptions}) or attaches to the application's
  * ({@link ExistingHueProviders}). Strict: use it for setup and CI, `createHueSafe` in serving code.
  *
- * @throws TypeError for invalid options, including a missing `captureContent` choice, an invalid
+ * @throws TypeError for invalid options, including invalid capture flags, an invalid
  * key or `serviceName`, a non-origin or insecure `baseUrl`, or out-of-range budgets.
  */
 export function createHue(options: HueOptions | ExistingHueProviders): HueClient {

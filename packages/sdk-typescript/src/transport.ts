@@ -2,8 +2,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { Agent, ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { gzip } from "node:zlib";
 import { waitUntil } from "@vercel/functions";
-import type { Attributes, Span as ApiSpan } from "@opentelemetry/api";
-import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
+import { context, type Attributes, type Span as ApiSpan } from "@opentelemetry/api";
+import { ExportResultCode, suppressTracing, type ExportResult } from "@opentelemetry/core";
 import {
   createOtlpNetworkExportDelegate,
   OTLPExporterBase,
@@ -88,6 +88,12 @@ import {
   type ResourceCache,
 } from "./privacy.js";
 import { otlpExporterVersion, sdkVersion } from "./version.js";
+import {
+  startHttpCapture,
+  suppressHttpCapture,
+  type HttpCaptureSource,
+  type ObservedHttpIdentity,
+} from "./http-capture.js";
 import type { ExportIssue, ExportReport, HueOptions, Signal } from "./types.js";
 
 type Response = {
@@ -361,6 +367,11 @@ export class HueTransport {
   private logExporter: ReportingExporter<ReadableLogRecord>;
   private closed = false;
   private shutdownPromise?: Promise<ExportReport>;
+  private httpCapture?: ReturnType<typeof startHttpCapture>;
+  private httpIdentities = new WeakMap<ReadableSpan, ObservedHttpIdentity>();
+  // Ended application spans awaiting bytes already flowing through the consumer's response.
+  // Each owns an admitted queue snapshot; an explicit drain seals it without reading the body.
+  private deferredHttp = new Map<ReadableSpan, () => void>();
   /** The latest flush's send of its records; the next flush's send starts after it. */
   private sendPromise?: Promise<unknown>;
   /** Set while a flush sends its records: the processors leave the uploads to that flush, which
@@ -446,6 +457,14 @@ export class HueTransport {
           valueBytes: this.limits.valueBytes,
           cut: this.admissionCuts.get(span),
           digested: this.admissionDigests.get(span),
+          httpIdentity: this.httpIdentities.get(span),
+          onHttpIdentityFailure: () =>
+            this.instrumentationFailure(
+              "traces",
+              "HTTP URL redaction failed; identity omitted",
+              1,
+              span.spanContext().traceId,
+            ),
           ...(offload ? { offload } : {}),
         });
       },
@@ -495,6 +514,7 @@ export class HueTransport {
     this.spanProcessor = {
       onStart: (span, parent) => {
         try {
+          this.httpCapture?.spanStarted(span, parent);
           spans.onStart(span, parent);
         } catch {
           this.instrumentationFailure();
@@ -502,6 +522,7 @@ export class HueTransport {
         this.track(span);
       },
       onEnd: (span) => {
+        const httpIdentity = this.httpCapture?.spanEnded(span);
         if (this.live.delete(span) && !this.live.size) this.stopLiveTimer();
         let admitted: ReadableSpan | undefined;
         try {
@@ -519,8 +540,20 @@ export class HueTransport {
             return;
           }
           admitted = queued as ReadableSpan;
+          if (httpIdentity) this.httpIdentities.set(admitted, httpIdentity);
           this.protectMedia(admitted);
           this.countEnded(admitted);
+          const snapshot = admitted;
+          const deferred = this.httpCapture?.defer(span, snapshot.attributes, () => {
+            this.deferredHttp.delete(snapshot);
+            this.publishDeferredHttp(snapshot, spans);
+          });
+          if (deferred) {
+            this.httpIdentities.set(snapshot, deferred.identity);
+            this.deferredHttp.set(snapshot, deferred.seal);
+            this.protectDelivery(snapshot);
+            return;
+          }
           spans.onEnd(admitted);
           this.protectDelivery(admitted);
         } catch {
@@ -539,6 +572,7 @@ export class HueTransport {
       // The spans are sent first, then the uploads queued so far are waited for, unless a
       // flush sends them: that flush waits for the uploads after its send.
       forceFlush: async () => {
+        this.sealDeferredHttp();
         const finish = this.beginSpanDrain();
         try {
           await spans.forceFlush();
@@ -551,6 +585,8 @@ export class HueTransport {
         }
       },
       shutdown: async () => {
+        this.sealDeferredHttp();
+        this.httpCapture?.stop();
         this.stopLiveSpans();
         try {
           await spans.shutdown();
@@ -613,6 +649,19 @@ export class HueTransport {
         }
       },
     };
+    if (this.options.captureHttp)
+      this.httpCapture = startHttpCapture({
+        baseUrl: this.options.baseUrl,
+        bodies: this.options.captureHttpBodies,
+        valueBytes: () => this.limits.valueBytes,
+        failed: () => this.instrumentationFailure(),
+      });
+  }
+
+  /** @internal Use the client's local context without changing global OpenTelemetry ownership. */
+  attachHttpCapture(source: HttpCaptureSource): () => void {
+    if (this.closed) return () => {};
+    return this.httpCapture?.use(source) ?? (() => {});
   }
 
   /**
@@ -715,6 +764,72 @@ export class HueTransport {
     }
   }
 
+  private sealDeferredHttp(): void {
+    for (const seal of this.deferredHttp.values()) seal();
+  }
+
+  /** Re-admit a completed HTTP snapshot so late attributes are charged to the same queue budget. */
+  private publishDeferredHttp(record: ReadableSpan, processor: BatchSpanProcessor): void {
+    const cohort = this.deliveries.get(record);
+    this.deliveries.delete(record);
+    this.pendingBytes -= this.spans.get(record) ?? 0;
+    this.spans.delete(record);
+    const held = this.held.get(record);
+    if (held) {
+      this.heldBytes -= held;
+      this.held.delete(record);
+    }
+    let admitted: ReadableSpan | undefined;
+    let transferred = false;
+    try {
+      admitted = this.enqueue("traces", record) as ReadableSpan | undefined;
+      if (!admitted) {
+        this.releaseMedia(record);
+        return;
+      }
+      if (cohort) {
+        const replacementCohort = this.deliveries.get(admitted);
+        this.deliveries.set(admitted, cohort);
+        transferred = true;
+        if (replacementCohort) this.finishDelivery(replacementCohort);
+      }
+      const identity = this.httpIdentities.get(record);
+      if (identity) this.httpIdentities.set(admitted, identity);
+      const cuts = this.admissionCuts.get(record);
+      if (cuts)
+        this.admissionCuts.set(
+          admitted,
+          new Set([...cuts, ...(this.admissionCuts.get(admitted) ?? [])]),
+        );
+      const digests = this.admissionDigests.get(record);
+      if (digests)
+        this.admissionDigests.set(
+          admitted,
+          new Map([...digests, ...(this.admissionDigests.get(admitted) ?? [])]),
+        );
+      for (const map of [this.admissionInspected, this.admissionLarge]) {
+        const previous = map.get(record);
+        if (previous) map.set(admitted, new Set([...previous, ...(map.get(admitted) ?? [])]));
+      }
+      processor.onEnd(admitted);
+      this.protectDelivery(admitted);
+    } catch {
+      if (admitted) this.finish("traces", [admitted]);
+      else this.releaseMedia(record);
+      this.issue(
+        "traces",
+        "invalid",
+        1,
+        "Telemetry processor could not accept a completed HTTP record",
+        undefined,
+        traceIdsOf([record]),
+      );
+    } finally {
+      // Successful replacement inherits the original slot, even after an export sealed its cohort.
+      if (cohort && !transferred) this.finishDelivery(cohort);
+    }
+  }
+
   /** Register in the caller's request before it can return; outside Vercel this is a no-op. */
   private protectDelivery(record: RecordValue): void {
     const cohort = this.deliveries.get(record);
@@ -775,6 +890,8 @@ export class HueTransport {
         const { record, markers } = pendingPlaceholder(span);
         const admitted = this.enqueue("traces", record, true) as ReadableSpan | undefined;
         if (!admitted) continue;
+        const identity = this.httpCapture?.identity(span);
+        if (identity) this.httpIdentities.set(admitted, identity);
         this.placeholders.set(admitted, markers);
         this.placeholderSources.set(admitted, span);
         try {
@@ -1608,6 +1725,8 @@ export class HueTransport {
    */
   shutdown(): Promise<ExportReport> {
     this.shutdownPromise ??= (async () => {
+      this.sealDeferredHttp();
+      this.httpCapture?.stop();
       this.closed = true;
       try {
         return await this.flush();
@@ -2659,80 +2778,89 @@ class OtlpHttpTransport implements IExporterTransport {
       if (this.aborted) throw new Error("Hue export deadline exceeded");
       // Never kept alive: each attempt's socket closes with its response or at the deadline.
       this.agent ??= new ConnectionAgent({ keepAlive: false }) as Agent;
-      return await new Promise<ExportResponse>((resolve) => {
-        const req: ClientRequest = request(
-          url,
-          {
-            method: "POST",
-            agent: this.agent,
-            headers: {
-              ...this.headers,
-              "Content-Encoding": "gzip",
-              "Content-Length": body.byteLength,
-            },
-          },
-          (res: IncomingMessage) => {
-            const chunks: Buffer[] = [];
-            let size = 0;
-            const status = res.statusCode ?? 0;
-            const success = status >= 200 && status <= 299;
-            this.lastStatus = status;
-            try {
-              this.onResponse(res.headers);
-            } catch {
-              // Reading advertised limits never fails the request.
-            }
-            res.on("data", (chunk: Buffer) => {
-              size += chunk.length;
-              if (size > MAX_RESPONSE_BYTES) {
-                // Oversized responses fail regardless of status; resolve before tearing down.
-                resolve({ status: "failure", error: new Error("OTLP response exceeded 4 MiB") });
-                res.destroy();
-                return;
-              }
-              chunks.push(chunk);
-            });
-            res.on("end", () => {
-              if (success) {
-                this.onSuccess(res.headers);
-                resolve({ status: "success", data: Buffer.concat(chunks) });
-              } else if (RETRYABLE_STATUS.has(status))
-                resolve({
-                  status: "retryable",
-                  retryInMillis: retryAfterMillis(res.headers["retry-after"]),
-                });
-              else
-                resolve({
-                  status: "failure",
-                  error: new OTLPExporterError(
-                    res.statusMessage,
-                    status,
-                    Buffer.concat(chunks).toString(),
-                  ),
-                });
-            });
-            res.on("error", (error: Error) => {
-              // Sent, but the acknowledgement was not read: success without a body to decode.
-              if (success) resolve({ status: "success" });
-              else if (RETRYABLE_STATUS.has(status))
-                resolve({
-                  status: "retryable",
-                  error,
-                  retryInMillis: retryAfterMillis(res.headers["retry-after"]),
-                });
-              else resolve({ status: "failure", error });
-            });
-          },
-        );
-        this.requests.set(req, resolve);
-        req.on("close", () => this.requests.delete(req));
-        req.setTimeout(timeoutMillis, () => {
-          req.destroy();
-          resolve({ status: "retryable", error: new Error("Request timed out") });
-        });
-        req.on("error", (error: Error) => resolve(networkFailure(error)));
-        req.end(body);
-      });
+      return await suppressHttpCapture(() =>
+        context.with(
+          suppressTracing(context.active()),
+          () =>
+            new Promise<ExportResponse>((resolve) => {
+              const req: ClientRequest = request(
+                url,
+                {
+                  method: "POST",
+                  agent: this.agent,
+                  headers: {
+                    ...this.headers,
+                    "Content-Encoding": "gzip",
+                    "Content-Length": body.byteLength,
+                  },
+                },
+                (res: IncomingMessage) => {
+                  const chunks: Buffer[] = [];
+                  let size = 0;
+                  const status = res.statusCode ?? 0;
+                  const success = status >= 200 && status <= 299;
+                  this.lastStatus = status;
+                  try {
+                    this.onResponse(res.headers);
+                  } catch {
+                    // Reading advertised limits never fails the request.
+                  }
+                  res.on("data", (chunk: Buffer) => {
+                    size += chunk.length;
+                    if (size > MAX_RESPONSE_BYTES) {
+                      // Oversized responses fail regardless of status; resolve before tearing down.
+                      resolve({
+                        status: "failure",
+                        error: new Error("OTLP response exceeded 4 MiB"),
+                      });
+                      res.destroy();
+                      return;
+                    }
+                    chunks.push(chunk);
+                  });
+                  res.on("end", () => {
+                    if (success) {
+                      this.onSuccess(res.headers);
+                      resolve({ status: "success", data: Buffer.concat(chunks) });
+                    } else if (RETRYABLE_STATUS.has(status))
+                      resolve({
+                        status: "retryable",
+                        retryInMillis: retryAfterMillis(res.headers["retry-after"]),
+                      });
+                    else
+                      resolve({
+                        status: "failure",
+                        error: new OTLPExporterError(
+                          res.statusMessage,
+                          status,
+                          Buffer.concat(chunks).toString(),
+                        ),
+                      });
+                  });
+                  res.on("error", (error: Error) => {
+                    // Sent, but the acknowledgement was not read: success without a body to decode.
+                    if (success) resolve({ status: "success" });
+                    else if (RETRYABLE_STATUS.has(status))
+                      resolve({
+                        status: "retryable",
+                        error,
+                        retryInMillis: retryAfterMillis(res.headers["retry-after"]),
+                      });
+                    else resolve({ status: "failure", error });
+                  });
+                },
+              );
+              this.requests.set(req, resolve);
+              req.on("close", () => this.requests.delete(req));
+              req.setTimeout(timeoutMillis, () => {
+                req.destroy();
+                resolve({ status: "retryable", error: new Error("Request timed out") });
+              });
+              req.on("error", (error: Error) => resolve(networkFailure(error)));
+              req.end(body);
+            }),
+        ),
+      );
     } catch (error) {
       return {
         status: "failure",

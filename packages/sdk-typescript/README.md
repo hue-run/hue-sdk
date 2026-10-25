@@ -552,8 +552,8 @@ the Langfuse project's own keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, a
 `HUE_API_KEY`:
 
 ```sh
-npx -y @hue-run/sdk@0.25.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.25.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.26.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.26.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 - It reads Langfuse Cloud and self-hosted v4 through the Observations API v2, and self-hosted v3
@@ -843,22 +843,124 @@ the error. `ToolOptions.integration` (`{ platform, toolkit?, version? }`) record
 follow Composio's [Executing tools directly](https://docs.composio.dev/docs/tools-direct/executing-tools)
 and Pipedream's [Run action](https://pipedream.com/docs/connect/api-reference/run-action).
 
+## Outbound HTTP calls
+
+Since TypeScript 0.26.0, `createHue()` and `createHueTransport()` start outbound HTTP capture
+by default. Captured calls produce OpenTelemetry CLIENT spans under the active Hue or
+OpenTelemetry span. Hue keeps your application's existing providers and context manager.
+
+```ts
+const hue = createHue({
+	apiKey: process.env.HUE_API_KEY!,
+	serviceName: "my-agent",
+	captureHttp: true,
+	captureHttpBodies: true,
+});
+```
+
+`captureHttp: false` disables this instrumentation. `captureHttpBodies: false` keeps HTTP
+identity without query arguments or bodies. `captureContent: false` also disables HTTP content,
+even when `captureHttpBodies` is `true`. `enabled: false` records nothing. The SDK does not read
+environment variables for these options.
+
+Subject to the provider's attribute limits, a captured span records `http.request.method`,
+`url.full`, `url.scheme`, `server.address`,
+`server.port`, and the observed `http.response.status_code`. `url.full` excludes userinfo,
+query parameters and fragments. With HTTP content capture, `input.value` holds query arguments
+as strings, with repeated keys as arrays, merged with a JSON object or form body. Other body
+values go under `body`. A bare GET records `{}`. For a complete text response, `output.value`
+holds the response body, parsing JSON and form fields. An empty successful response records `null`,
+including a 204 response without a content type. JSON, `+json`, `text/*`, XML and form-encoded
+content are text formats. These content values pass through your `redact` callback before export.
+Hue's export traffic is excluded. HTTP requests within model spans retain identity and omit
+content, because model adapters record that content. A `hue.tool()` nested inside a model span
+resumes HTTP content capture for its own calls.
+
+Hue can enrich an application's existing HTTP CLIENT span instead of creating a second span.
+It uses an active matching span or one matching span started synchronously under the same
+provider and parent. Each span is used once, so concurrent requests and retries keep separate
+exchanges. Ambiguous matches receive a Hue HTTP span.
+
+If the application ends a reused span before its response completes, Hue keeps a private copy
+within its queue budget. Other exporters receive the original span with its original end time.
+Hue publishes its copy when the exchange completes. An explicit flush, processor `forceFlush()`
+or shutdown publishes available evidence without reading an unfinished response. Incomplete
+response content is omitted. Read the response before flushing to capture its full body.
+When transports share a provider, flushing or shutting down one seals only its own copy.
+The remaining transports continue capturing the response.
+
+Each body is bounded by the receiver's value cap, 1 MiB by default. A body over the cap records
+Hue's existing truncation marker instead of a partial JSON value. The span's `hue.truncated`
+array names the affected `input.value` or `output.value`; a cut body is incomplete evidence,
+and trace reconstruction can refuse it. Observed byte counts use `http.request.body.size` and
+`http.response.body.size`. Binary and compressed bodies keep size only. Hue does not add
+`traceparent` or change application request headers.
+
+Borrowed providers keep their attribute value and count policies. Captured content that a
+provider accepts and then clips is exported as a structured truncation marker. Attributes
+dropped by the provider's count limit remain absent. Live placeholders follow the same policy.
+
+Captured behavior headers are `notion-version`, `slack-api-version`, `stripe-version`,
+`linear-api-version` and `x-github-api-version`. They use `http.request.header.<name>` and
+`http.response.header.<name>` span attributes, with hyphens changed to underscores, such as
+`http.request.header.notion_version`. Observed content types use
+`http.request.header.content_type` and `http.response.header.content_type`. `input.mime_type`
+and `output.mime_type` are `application/json` because captured values, including text, are
+JSON-encoded. Authorization and cookie headers are never recorded. HTTP content filters
+authorization, cookies, API keys, exact token fields and secret/password fields, while keeping
+pagination fields such as `nextPageToken`.
+
+Recorded URLs also redact recognized credential path segments, including credential-labeled
+slots such as `/token/<value>`, bot-token segments and Slack incoming-webhook secrets. Ordinary
+resource IDs keep their spelling. For a borrowed span, Hue sanitizes its export snapshot's name,
+URL, legacy URL aliases and HTTP URL-valued span attribute `resource.name`. Custom resource
+labels remain unchanged. For unmatched CLIENT spans, Hue scrubs HTTP URLs in names and
+sanitizes URI aliases already present. Those aliases are filtered before and after redaction
+within their stored lengths; missing attributes remain absent. Other exporters keep the
+application's existing naming and URL policy. Live HTTP placeholders use the same sanitization.
+
+HTTP URL redaction runs in both content modes. The canonical hooks are `attributes.url.full`
+and any present `attributes.http.url`, `attributes.http.target` or `attributes.url.path` alias.
+An HTTP URL-valued `resource.name` uses `attributes.resource.name` once and shares the final
+canonical URL. A path hook can return a pathname or an absolute HTTP URL. Hue sanitizes the
+callback's answer again. URI replacements over the provider's attribute policy are omitted
+without a capture failure. A callback that throws, returns an invalid URI or exceeds the
+receiver's URI cap causes URI attributes to be omitted and an instrumentation failure to be
+reported.
+
+On Node.js 22 and 24, Hue observes per-request diagnostics and copies bytes as the client sends
+or receives them. Node.js 26's `onResponseData` callback is also verified in CI. Bun's `node:http`
+and `node:https` use the same diagnostics path. Bun's native
+`fetch` uses a wrapper, so create Hue before API clients that save a reference to `fetch`.
+Capture adds no response clone or independent reader and does not drain an unread response.
+An unread or aborted stream can leave its content incomplete. Bun native fetch records request
+content supplied directly as a string, `URLSearchParams`, `ArrayBuffer` or `Uint8Array`. Other
+request-body forms, including body-bearing `Request` objects, `Blob`, `FormData` and streams,
+omit `input.value` rather than consume the body. Options with getters or a custom prototype
+bypass the Bun fallback rather than evaluate them an extra time. Bun native fetch cannot
+observe intermediate redirect requests; a redirected response omits `output.value`.
+
+Bun 1.4.2's `node-fetch` compatibility shim bypasses the global fetch wrapper. The default
+gaxios 7 and googleapis clients use that shim and are not captured on Bun. After creating Hue,
+pass `fetchImplementation: globalThis.fetch` in their request options to use the observed fetch.
+Their Node.js HTTP paths are captured without that option.
+
 ## Privacy and content
 
-Set `captureContent: true` for full traces: prompts and messages, responses and tool inputs/outputs,
-alongside model, usage, timing and errors. Trace inspection, evaluations and judges read that
-content. Choose `false`, metadata-only mode, when your users decline or an application or data
+Set `captureContent: true` for full traces: prompts and messages, responses, tool inputs/outputs,
+and captured HTTP query arguments and bodies, alongside model, usage, timing and errors.
+Trace inspection, evaluations and judges read that content. Choose `false`, metadata-only mode, when your users decline or an application or data
 policy forbids sending that content to another service. `redact` and the credential filtering
 described below apply in both modes.
 
-`captureContent: false` disables manual input/output/messages/tool content and
-removes recognized GenAI, Vercel, OpenInference, OpenLLMetry and Langfuse content attributes,
+`captureContent: false` disables manual input/output/messages/tool content and captured HTTP content.
+It also removes recognized GenAI, Vercel, OpenInference, OpenLLMetry and Langfuse content attributes,
 legacy GenAI content events, log bodies, status messages and exception text before
 export. The exported `contentPrefixes` array lists the attribute keys (and their dotted
 children) that are removed. Model/provider/token metadata remains available. Generic custom attribute
 names cannot be classified automatically; use them deliberately.
 
-`captureContent: true` captures supplied content. Accepted content is stored by Hue;
+`captureContent: true` captures supplied content and supported HTTP content. Accepted content is stored by Hue;
 there is no SDK retention timer or automatic content expiry. To redact strings
 before export, supply `redact(value, path)`; it applies to supported strings in
 attributes, resources, event/link attributes and log bodies. Return a string.
@@ -872,7 +974,8 @@ bytes or a structured log body are replaced by the receiver's own marker
 (`{ "hue.truncated": true, "hue.truncated_bytes": <size> }`), and the value's key is listed in
 the record's `hue.truncated` attribute, where Hue's receiver lists the values it cuts itself,
 so the span still carries the call, the recorded part of its value and the rest of its evidence.
-`redact` sees text past the cap, so it can recognize a secret that crosses it. A string longer
+For supplied helper content, `redact` sees text past the cap, so it can recognize a secret that
+crosses it. HTTP capture stops retaining bytes at the cap and records the truncation marker. A string longer
 than the cap and 64 Ki code units that is not held whole for upload is cut to that length when
 its record is queued, so a value of millions of characters cannot drop its record for the queue
 budget; for such a text the last 64 Ki code units of the redactor's answer are never exported,

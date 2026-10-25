@@ -7,6 +7,7 @@ import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BlobUploader, uploadBudgetMillis, type UploadContext } from "../blobs.js";
 import { createHue, HueConnectionError, type HueClient } from "../client.js";
 import { isLoopbackHost } from "../config.js";
+import { suppressHttpCapture } from "../http-capture.js";
 import { HueExportError } from "../transport.js";
 import { sdkVersion } from "../version.js";
 import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
@@ -279,6 +280,11 @@ function plural(count: number, one: string, many = `${one}s`): string {
 
 /** Runs `hue import langfuse`; resolves to the exit code. */
 export async function runImportCommand(argv: string[], io: ImportCommandIo = {}): Promise<number> {
+  // Import traffic moves existing telemetry; tracing it would inflate its own acknowledgements.
+  return suppressHttpCapture(() => runLangfuseImport(argv, io));
+}
+
+async function runLangfuseImport(argv: string[], io: ImportCommandIo): Promise<number> {
   const stdout = io.stdout ?? process.stdout;
   const stderr = io.stderr ?? process.stderr;
   const stdin = io.stdin ?? process.stdin;

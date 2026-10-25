@@ -1,4 +1,4 @@
-import { SpanStatusCode, type Attributes } from "@opentelemetry/api";
+import { SpanKind, SpanStatusCode, type Attributes } from "@opentelemetry/api";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import type { ReadableLogRecord } from "@opentelemetry/sdk-logs";
 import { resourceFromAttributes, type Resource } from "@opentelemetry/resources";
@@ -9,6 +9,8 @@ import { hashInlineFiles, isMediaKey, mayInlineFiles } from "./inline-files.js";
 import { truncateUtf8 } from "./safety.js";
 import type { OffloadCollector } from "./blobs.js";
 import type { DigestedMessage } from "./snapshot.js";
+import type { ObservedHttpIdentity } from "./http-capture.js";
+import { scrubHttpSpanName, scrubHttpUrl } from "./http-url.js";
 
 export { truncateUtf8 };
 
@@ -137,6 +139,10 @@ interface RedactionBudget {
 
 /** How one record is redacted: the receiver's value cap, and the value strings the queue cut. */
 export interface RedactionLimits {
+  /** Observed HTTP identity, normalized only on Hue's export snapshot. */
+  httpIdentity?: ObservedHttpIdentity;
+  /** Reports an identity omitted after a failed URL redactor. */
+  onHttpIdentityFailure?: () => void;
   /** The value cap in UTF-8 bytes. Default 1 MiB, the receiver's limit before it advertises one. */
   valueBytes?: number;
   /** The record's value strings cut when it was queued. */
@@ -381,6 +387,45 @@ function attributes<T extends Record<string, unknown>>(
   return Object.fromEntries(
     Object.entries(summarized).flatMap(([key, value]) => {
       if (!options.captureContent && isContentKey(key)) return [];
+      // The Span API admits no object attributes. Restore our explicitly cut HTTP marker as
+      // OTLP's structured placeholder, so a reader cannot mistake its JSON text for app data.
+      if (
+        own === true &&
+        typeof source["http.request.method"] === "string" &&
+        (key === "input.value" || key === "output.value") &&
+        Array.isArray(source[TRUNCATED_KEY]) &&
+        source[TRUNCATED_KEY].includes(key) &&
+        typeof value === "string" &&
+        value.length < 256
+      ) {
+        try {
+          const marker: unknown = JSON.parse(value);
+          if (
+            isTruncatedMarker(marker) &&
+            marker &&
+            typeof marker === "object" &&
+            TRUNCATED_BYTES_KEY in marker &&
+            typeof marker[TRUNCATED_BYTES_KEY] === "number" &&
+            Number.isSafeInteger(marker[TRUNCATED_BYTES_KEY]) &&
+            marker[TRUNCATED_BYTES_KEY] >= 0
+          )
+            return [
+              [
+                key,
+                redactValue(
+                  truncatedMarker(marker[TRUNCATED_BYTES_KEY]),
+                  `${path}.${key}`,
+                  options,
+                  budget,
+                  0,
+                  key,
+                ),
+              ],
+            ];
+        } catch {
+          // Other cut content keeps the existing string-prefix representation.
+        }
+      }
       // A span's own value that may be uploaded is placed by the upload step.
       if (own && budget.offload) {
         const held = offloadValue(key, value, `${path}.${key}`, options, budget);
@@ -477,6 +522,145 @@ export function redactSpan(
     ...(hosted.failed ? { "error.type": "mcp_error" } : {}),
     ...span.attributes,
   };
+  // A provider can clip URL attributes before correlation. Sanitize only the surviving copy;
+  // never reconstruct identity or grow a replacement beyond the provider-accepted value.
+  const unmatchedUris = new Map<string, number>();
+  if (span.kind === SpanKind.CLIENT && !limits.httpIdentity) {
+    const http =
+      typeof source["http.request.method"] === "string" ||
+      typeof source["http.method"] === "string" ||
+      ["url.full", "http.url", "resource.name"].some(
+        (key) => typeof source[key] === "string" && /^https?:/i.test(source[key]),
+      );
+    if (http) {
+      for (const key of ["url.full", "http.url", "http.target", "url.path", "resource.name"])
+        if (
+          typeof source[key] === "string" &&
+          (key !== "resource.name" || /^https?:/i.test(source[key]))
+        )
+          unmatchedUris.set(key, source[key].length);
+      delete source["url.query"];
+    }
+  }
+  const scrubUnmatchedUris = (values: Attributes): void => {
+    for (const [key, cap] of unmatchedUris) {
+      const value = values[key];
+      if (typeof value !== "string") continue;
+      try {
+        const path = key === "http.target" || key === "url.path";
+        const parsed = scrubHttpUrl(path ? new URL(value, "http://http-capture.invalid") : value);
+        const safe = path ? parsed.pathname : parsed.href;
+        if (safe.length <= cap) values[key] = safe;
+        else delete values[key];
+      } catch {
+        delete values[key];
+      }
+    }
+  };
+  scrubUnmatchedUris(source);
+  if (limits.httpIdentity) {
+    const { contentCuts, attributeValueLengthLimit } = limits.httpIdentity;
+    const keys: string[] = [];
+    for (const [key, bytes] of contentCuts) {
+      if (!Object.hasOwn(source, key)) continue;
+      // Structured cut metadata carries no captured content and survives Span API string caps.
+      Object.assign(source, { [key]: truncatedMarker(bytes) });
+      keys.push(key);
+    }
+    if (keys.length && Array.isArray(source[TRUNCATED_KEY])) {
+      const retained = source[TRUNCATED_KEY].filter(
+        (value) =>
+          typeof value === "string" &&
+          !keys.some(
+            (key) =>
+              attributeValueLengthLimit !== undefined &&
+              value !== key &&
+              !Object.hasOwn(source, value) &&
+              value === key.slice(0, attributeValueLengthLimit),
+          ),
+      );
+      source[TRUNCATED_KEY] = withTruncatedKeys(retained, keys);
+    }
+  }
+  let httpUrls: Attributes = {};
+  if (limits.httpIdentity) {
+    const { method, url } = limits.httpIdentity;
+    const base = scrubHttpUrl(url);
+    source["http.request.method"] = method;
+    const legacy = typeof source["http.url"] === "string";
+    const target = typeof source["http.target"] === "string";
+    const path = typeof source["url.path"] === "string";
+    let resourceUrl = false;
+    if (typeof source["resource.name"] === "string") {
+      try {
+        const resource = new URL(source["resource.name"]);
+        resourceUrl = resource.protocol === "http:" || resource.protocol === "https:";
+      } catch {
+        // Custom resource labels keep their existing value.
+      }
+    }
+    for (const key of [
+      "url.full",
+      "http.url",
+      "http.target",
+      "url.path",
+      "url.query",
+      ...(resourceUrl ? ["resource.name"] : []),
+    ])
+      delete source[key];
+    let parsed = base;
+    try {
+      // One canonical callback protects every alias; its answer must remain a safe HTTP URL.
+      for (const key of [
+        "url.full",
+        ...(legacy ? ["http.url"] : []),
+        ...(resourceUrl ? ["resource.name"] : []),
+      ])
+        parsed = scrubHttpUrl(
+          redactedText(parsed.href, `attributes.${key}`, options, budget.valueBytes),
+        );
+      for (const key of [target ? "http.target" : undefined, path ? "url.path" : undefined]) {
+        if (!key) continue;
+        const value = redactedText(
+          parsed.pathname,
+          `attributes.${key}`,
+          options,
+          budget.valueBytes,
+        );
+        if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) parsed = scrubHttpUrl(value);
+        else {
+          parsed.pathname = value.split("?", 1)[0]!.split("#", 1)[0] || "/";
+          parsed = scrubHttpUrl(parsed);
+        }
+      }
+      // URL serialization can expand a permitted Unicode callback result beyond the receiver cap.
+      if (Buffer.byteLength(parsed.href) > budget.valueBytes)
+        throw new Error("HTTP URL exceeds receiver value cap");
+      if (
+        limits.httpIdentity.attributeValueLengthLimit === undefined ||
+        parsed.href.length <= limits.httpIdentity.attributeValueLengthLimit
+      )
+        httpUrls = {
+          "url.full": parsed.href,
+          ...(legacy ? { "http.url": parsed.href } : {}),
+          ...(resourceUrl ? { "resource.name": parsed.href } : {}),
+          ...(target ? { "http.target": parsed.pathname } : {}),
+          ...(path ? { "url.path": parsed.pathname } : {}),
+        };
+      for (const value of Object.values(httpUrls))
+        if (typeof value === "string") budget.bytes += Buffer.byteLength(value);
+    } catch {
+      // A failed URL redactor leaves identity unavailable, never the unredacted aliases.
+      try {
+        limits.onHttpIdentityFailure?.();
+      } catch {
+        /* Reporting cannot restore unsafe identity. */
+      }
+    }
+    source["url.scheme"] = parsed.protocol.slice(0, -1);
+    source["server.address"] = parsed.hostname;
+    source["server.port"] = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+  }
   const status = {
     code:
       hosted.failed && span.status.code === SpanStatusCode.UNSET
@@ -510,12 +694,68 @@ export function redactSpan(
   }));
   const resource = redactResource(span.resource, options, cache, budget);
   // Last, so every cut of the record, its events', links' and resource's included, is listed.
-  const redactedAttributes = withTruncated(
+  let redactedAttributes = withTruncated(
     attributes(source, options, "attributes", budget, "", true),
     budget,
   );
+  scrubUnmatchedUris(redactedAttributes);
+  Object.assign(redactedAttributes, httpUrls);
+  if (limits.httpIdentity) {
+    const { attributeValueLengthLimit, attributeCountLimit, contentCuts } = limits.httpIdentity;
+    const cutKeys: string[] = [];
+    for (const key of ["input.value", "output.value"] as const) {
+      const value = redactedAttributes[key];
+      if (
+        typeof value === "string" &&
+        attributeValueLengthLimit !== undefined &&
+        value.length > attributeValueLengthLimit
+      ) {
+        Object.assign(redactedAttributes, {
+          [key]: truncatedMarker(contentCuts.get(key) ?? Buffer.byteLength(value)),
+        });
+        cutKeys.push(key);
+      }
+    }
+    if (cutKeys.length)
+      redactedAttributes[TRUNCATED_KEY] = withTruncatedKeys(
+        redactedAttributes[TRUNCATED_KEY],
+        cutKeys,
+      );
+    // Derived identity must fit the provider's policy just like its original attributes.
+    for (const key of ["http.request.method", "http.method", "url.scheme", "server.address"])
+      if (
+        typeof redactedAttributes[key] === "string" &&
+        attributeValueLengthLimit !== undefined &&
+        redactedAttributes[key].length > attributeValueLengthLimit
+      )
+        delete redactedAttributes[key];
+    if (attributeCountLimit !== undefined) {
+      const original = new Set(Object.keys(span.attributes));
+      const bounded: Attributes = {};
+      let count = 0;
+      for (const key of original)
+        if (Object.hasOwn(redactedAttributes, key)) {
+          bounded[key] = redactedAttributes[key];
+          count++;
+        }
+      for (const key of [TRUNCATED_KEY, ...Object.keys(redactedAttributes)]) {
+        if (
+          !Object.hasOwn(redactedAttributes, key) ||
+          Object.hasOwn(bounded, key) ||
+          original.has(key) ||
+          count >= attributeCountLimit
+        )
+          continue;
+        bounded[key] = redactedAttributes[key];
+        count++;
+      }
+      redactedAttributes = bounded;
+    }
+  }
   return {
-    name: span.name,
+    name:
+      limits.httpIdentity?.method ??
+      (span.kind === SpanKind.CLIENT ? scrubHttpSpanName(span.name) : span.name),
     kind: span.kind,
     spanContext: () => span.spanContext(),
     parentSpanContext: span.parentSpanContext,

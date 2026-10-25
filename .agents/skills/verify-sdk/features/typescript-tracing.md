@@ -9,6 +9,8 @@ An application creates a client with `createHue`, records spans and tools, and r
 - `ts-span` records `withSpan`, `tool` and `model` spans with input and output.
 - `ts-subagent` records `subagent()` as an `invoke_agent {name}` span (`gen_ai.agent.name`, `hue.agent.role` `subagent`) under the active tool span, or under `parentContext` from `extract()` in another process.
 - `ts-capture` honors `captureContent` and redaction before export.
+- `ts-http` records outbound HTTP identity and bounded text bodies by default from `createHue()`
+  and `createHueTransport()`, with explicit identity-only and disabled modes.
 - `ts-ack` reports accepted, rejected and failed records truthfully from the receiver's acknowledgement.
 - `ts-lifecycle` covers `flush`, `shutdown` and the fail-open `*Safe` variants.
   Tool, subagent, model and usage helpers isolate throwing metadata getters from application
@@ -125,3 +127,85 @@ Expected: `14 pass` and `3 pass`, `0 fail`. `verify-package.mjs` runs `blobs.tes
 ## Opt-in tool endpoint evidence
 
 Use `bun test tests/tool-endpoint.test.ts` against the loopback receiver. Check actual URL/source/method, query allowlisting without deduplication, credentials and fragment removal, metadata-only omission, existing redaction, invalid evidence and unchanged single execution/result/error. Repeat the file against the installed archive before shipping a new endpoint API. These checks make no live provider requests.
+
+## Outbound HTTP capture
+
+Run `bun test tests/http-capture.test.ts` from `packages/sdk-typescript`, then repeat the file
+against the installed tarball. From the repository root, run the native driver against that same
+consumer with Node.js 22, Node.js 24, the CI-tested Node.js 26, and Bun 1.4.2:
+
+```sh
+node packages/sdk-typescript/scripts/verify-http-capture.mjs <installed-consumer> --clients
+```
+
+`verify-package.mjs` runs this driver for Node and Bun. `--clients` exercises installed axios,
+node-fetch, got, gaxios, googleapis, Slack, undici, Linear and Notion clients against synthetic
+loopback services. It requires their test dependencies in the consumer; no live provider is used.
+
+The installed consumer for the provider integration also needs `@vercel/otel@2.1.3`:
+
+```sh
+node packages/sdk-typescript/scripts/verify-http-capture-vercel.mjs <installed-consumer>
+```
+
+This driver uses the real instrumentor. Check one bodyful span per physical fetch or HTTP
+request, delayed bodies, concurrent identical URLs with distinct inputs and reversed responses,
+retries, metadata-only mode and restart. Its generic reservation cases check creation context,
+pending-span privacy, single-use claims, ambiguous and expired candidates, and overflow fallback.
+The reservation child also ends a borrowed span at response headers, then checks full capture
+after a body delayed over one second. Explicit flush and shutdown must return with incomplete
+output omitted and leave the response unread for the caller. Check one final Hue copy with the
+original span ID and no later mutation of the ended vendor span. Existing providers, other
+exporters' naming and URL policy, and the request's headers must remain unchanged.
+
+The Vercel driver automatically runs `verify-http-capture-limits.mjs` in 17 isolated policy
+cases: value limits 4, 16 and 64, count limits 8, 1 and 0, value limit 0 as unlimited, and the
+receiver's 256 KiB cap. Check final and live structured cuts, absent dropped attributes, URL
+redactor/count policy, and unmatched Vercel CLIENT names and URI aliases under value limits
+4, 16 and 64. Four cases repeat early-ended capture under short value limits and count limits,
+including count 0.
+The shared-provider case checks direct transport and processor shutdown: the stopped
+transport delivers its incomplete copy while the remaining transport captures the full body,
+with the original span ID and vendor lifecycle preserved.
+
+Inspect exported CLIENT spans for scrubbed HTTP identity, query arguments in `input.value`,
+request bodies merged with those arguments, parsed JSON or text response bodies in `output.value`,
+response status and normalized behavior-header attributes, observed wire content types in
+`http.request.header.content_type` and `http.response.header.content_type`, and body sizes.
+Both content MIME attributes must be `application/json`, including text captured as a JSON string.
+Empty successful responses record `null`, including 204 responses without a content type. Compare
+consumer bytes with capture enabled and disabled.
+Check `captureHttp: false`, `captureHttpBodies: false`, `captureContent: false` and `enabled: false`.
+Verify credential filtering and custom redaction while preserving pagination fields such as
+`nextPageToken`, truncation markers and the `hue.truncated` key array, exporter suppression,
+model identity without content, nested tools resuming HTTP content, borrowed providers and
+multiple-client shutdown. Request headers, including an
+existing `traceparent`, must reach the server unchanged.
+
+Verify URL/name/legacy-alias and HTTP URL-valued `resource.name` sanitization on Hue's
+borrowed-span export snapshot in both content modes, including live placeholders. Also check
+unmatched CLIENT names containing HTTP URLs. Recognized credential path segments are redacted
+while ordinary resource IDs retain their spelling. Canonical URL redaction hooks must run,
+their answers must be sanitized again, and invalid or receiver-over-limit answers must omit
+URI fields and report an instrumentation failure, including Unicode answers whose serialized
+URL exceeds the receiver cap. Provider-policy URI omissions do not report
+a capture failure. Confirm delayed `setHeader` and `flushHeaders` capture the headers
+actually sent, with creator parent, model-content policy, session and user metadata preserved
+when another scope writes later. No SDK `data` or `readable` listener may be added.
+
+Exercise late, paused, piped, async-iterated, unread and aborted responses, chunked and fixed
+lengths, and gzip. Compressed wire bytes must not be parsed as JSON. The instrumentation must
+not introduce a response clone reader or an unbounded body buffer.
+
+Node.js 22 lacks undici body-chunk diagnostics. Node.js 22 and 24 expose per-request `onData`
+and `onBodySent` callbacks; Node.js 26's response observer uses `onResponseData`. Hue observes
+these callbacks without cloning a response. Bun 1.4.2
+publishes `http.client.*` for `node:http`, but no undici channels for native `fetch`; its fetch
+path is a pull-driven response wrapper. Body-bearing `Request` objects, `Blob`, `FormData` and
+stream request bodies in that fallback omit `input.value`, preserving application consumption.
+Accessor-backed or custom-prototype request options bypass fallback capture. Redirected native
+fetch responses omit `output.value`, because their intermediate requests cannot be observed.
+The real-client driver asserts that Bun's default gaxios/googleapis node-fetch shim produces no
+spans, then verifies those clients with `fetchImplementation: globalThis.fetch`. Initializing Hue
+before importing that shim does not change its path. Recheck these probes when runtime versions
+change.

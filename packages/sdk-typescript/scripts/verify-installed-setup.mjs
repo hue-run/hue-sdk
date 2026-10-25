@@ -51,6 +51,7 @@ const traceType = protobuf.Root.fromJSON(
 const secrets = new Set();
 const installations = new Map();
 const counters = { provisions: 0, exports: 0, receipts: 0, revoked: 0, rewrittenRefused: 0 };
+const exportedSpans = { server: 0, unrelated: 0, httpClient: 0 };
 const rejectedRoots = [];
 let serverFailure;
 let origin;
@@ -457,8 +458,34 @@ const server = createServer((request, response) => {
       const spans = (decoded.resourceSpans ?? []).flatMap((resource) =>
         (resource.scopeSpans ?? []).flatMap((scope) => scope.spans ?? []),
       );
-      requireThat(spans.length === 1, "one real application boundary span per export");
+      requireThat(spans.length === 1, "one synthetic span per export");
       for (const span of spans) {
+        if (span.kind === 3) {
+          const attribute = (key) =>
+            (span.attributes ?? []).find((item) => item.key === key)?.value;
+          const fullUrl = attribute("url.full")?.stringValue;
+          requireThat(
+            typeof fullUrl === "string" && URL.canParse(fullUrl),
+            "parseable synthetic HTTP client URL",
+          );
+          const url = new URL(fullUrl);
+          const status = Number(attribute("http.response.status_code")?.intValue);
+          requireThat(
+            attribute("http.request.method")?.stringValue === "GET" &&
+              url.hostname === "127.0.0.1" &&
+              url.pathname === "/" &&
+              [404, 503].includes(status),
+            "HTTP client spans describe only the synthetic failed-response middleware probes",
+          );
+          exportedSpans.httpClient++;
+        } else {
+          requireThat(
+            span.name === "hue.metadata" && [1, 2].includes(span.kind),
+            "expected application or unrelated probe span",
+          );
+          if (span.kind === 2) exportedSpans.server++;
+          else exportedSpans.unrelated++;
+        }
         const traceId = Buffer.from(span.traceId, "base64").toString("hex");
         const spanId = Buffer.from(span.spanId, "base64").toString("hex");
         requireThat(
@@ -1715,15 +1742,18 @@ print(json.dumps({"cases": 5, "responsesPreserved": preserved, "normalServingWit
     "bounded synthetic matrix admissions",
   );
   requireThat(
-    counters.exports === 10,
-    "three application exports, three unrelated probes and four isolated failed-response middleware checks",
+    counters.exports === 14 &&
+      exportedSpans.server === 7 &&
+      exportedSpans.unrelated === 3 &&
+      exportedSpans.httpClient === 4,
+    "three application spans, three unrelated probes and four failed-response middleware server/client pairs",
   );
   requireThat(
     counters.revoked === 6 && counters.rewrittenRefused === 6,
     "all installed fixtures check anonymous/reforged refusal",
   );
   process.stdout.write(
-    `${JSON.stringify({ kind: "synthetic-loopback-installed-setup", archiveSha256, pythonWheelEvidence, typescriptRuntimeEvidence, applicationServerSpansVerified: true, typescriptRuntimePinsVerified: true, fixtureKinds, ...counters, hostedAcceptance: false })}\n`,
+    `${JSON.stringify({ kind: "synthetic-loopback-installed-setup", archiveSha256, pythonWheelEvidence, typescriptRuntimeEvidence, applicationServerSpansVerified: true, typescriptRuntimePinsVerified: true, fixtureKinds, ...counters, exportedSpans, hostedAcceptance: false })}\n`,
   );
 } finally {
   // Never retain credentials, claim capabilities or checkpoint contents as test artifacts.

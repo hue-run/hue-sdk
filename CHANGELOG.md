@@ -8,6 +8,53 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.26.0] - 2026-10-25
+
+#### Breaking
+
+- Outbound HTTP capture starts by default with `createHue()` and `createHueTransport()`.
+  `captureContent` now also controls captured HTTP query arguments and text request/response
+  bodies. Migration: set `captureHttp: false` to keep the previous HTTP capture behavior, or
+  `captureHttpBodies: false` to record HTTP identity without content. `captureContent: false`
+  also disables HTTP content, even when `captureHttpBodies` is `true`.
+
+#### Added
+
+- **Wire.** Captured requests emit CLIENT spans with `http.request.method`, a scrubbed `url.full`,
+  `url.scheme`, `server.address`, `server.port`, and the observed `http.response.status_code`.
+  With HTTP content capture, `input.value` holds query arguments merged with an object body,
+  or a non-object body under `body`. `output.value` holds parsed JSON or text responses.
+  Empty successful responses record `null`, including 204 responses without a content type.
+  Allowlisted behavior headers use `http.request.header.<name>` and
+  `http.response.header.<name>`, with hyphens normalized to underscores. Captured values use
+  JSON MIME types; observed HTTP media types use `http.request.header.content_type` and
+  `http.response.header.content_type`.
+  Observed body sizes use
+  `http.request.body.size` and `http.response.body.size`. Bodies over the receiver's value cap
+  use Hue's structured OTLP truncation placeholder, with the affected content attribute named in the
+  span's `hue.truncated` array. A cut body is incomplete evidence and can cause trace
+  reconstruction to refuse it. Export traffic is excluded. Model-provider requests keep
+  HTTP identity without content; application tools nested inside model callbacks resume content capture.
+- Existing HTTP CLIENT spans can receive capture without duplication, including spans created
+  beside the active context. Correlation uses the same provider, creation context and one physical
+  request per span. Concurrent identical requests keep their own bodies. Other exporters retain
+  their span names, URLs, status and lifecycle. If an application ends its span before the body
+  completes, Hue keeps a bounded private copy for late body capture. An explicit flush or shutdown
+  seals only that transport's incomplete copy without draining the response. Other transports
+  sharing the provider continue capturing.
+- HTTP identity on Hue's export path removes recognized credentials in URL paths, including
+  capability URLs, and applies the URL redactor to stable and legacy aliases in both content
+  modes, including an HTTP URL-valued span `resource.name`. Unmatched CLIENT spans have HTTP
+  URLs in names and present URI aliases filtered too. Alias filtering runs before and after
+  redaction within stored lengths, leaving missing attributes absent.
+  Invalid or receiver-over-limit URL redactor answers omit URI
+  attributes and report a capture failure. Running placeholders use the same filtering.
+  Node 26's renamed undici response callback is supported.
+- Borrowed provider value and count policies remain effective. Captured content accepted and
+  then clipped by the provider exports a structured truncation marker; attributes dropped by
+  its count limit remain absent. URI replacements over the provider's attribute policy are
+  omitted without a capture failure. Final spans and live placeholders follow the same policy.
+
 ### [0.25.1] - 2026-10-25
 
 #### Fixed

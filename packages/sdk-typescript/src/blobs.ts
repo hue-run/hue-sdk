@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { context, type HrTime } from "@opentelemetry/api";
 import { suppressTracing } from "@opentelemetry/core";
+import { suppressHttpCapture } from "./http-capture.js";
 import { isLoopbackHost } from "./config.js";
 import {
   digestPart,
@@ -960,100 +961,104 @@ export class BlobUploader {
       return undefined;
     }
     if (this.closed) return undefined;
-    return new Promise<Reply | undefined>((resolve) => {
-      let settled = false;
-      // Whether the whole body was handed to the request.
-      let ended = false;
-      let request: ClientRequest | undefined;
-      const finish = (reply?: Reply) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (request) {
-          this.requests.delete(request);
-          // An answer before the whole body was handed over ends the request: a store that
-          // neither reads nor closes would otherwise hold it, and its source, open.
-          if (!reply || !ended) request.destroy();
-        }
-        resolve(reply);
-      };
-      const timer = setTimeout(() => finish(), Math.max(1, deadline - Date.now()));
-      // The bytes handed to the request: its body is complete once they are its length.
-      let sentBytes = 0;
-      const written = () => length === undefined || sentBytes === length;
-      const requestHeaders: Record<string, string | number> = { ...headers };
-      if (length === undefined) requestHeaders["Content-Length"] = sizeOf(body);
-      try {
-        // Uploads are the SDK's own export traffic: an http instrumentation must not trace them.
-        request = context.with(suppressTracing(context.active()), () =>
-          http.request(
-            url,
-            { method, headers: requestHeaders, agent: false },
-            (response: IncomingMessage) => {
-              const chunks: Buffer[] = [];
-              let size = 0;
-              const reply = () => ({
-                status: response.statusCode ?? 0,
-                headers: response.headers,
-                body: Buffer.concat(chunks),
-                complete: written(),
-              });
-              response.on("data", (chunk: Buffer) => {
-                size += chunk.byteLength;
-                if (size <= maxResponseBytes) {
-                  chunks.push(chunk);
-                  return;
-                }
-                // Hue's answers and the store's errors are small: what follows is not read.
-                finish(reply());
-                response.destroy();
-              });
-              response.on("end", () => finish(reply()));
-              response.on("error", () => finish());
-            },
-          ),
-        );
-      } catch {
-        finish();
-        return;
-      }
-      const sent = request;
-      this.requests.add(sent);
-      sent.on("error", () => finish());
-      sent.setTimeout(this.options.timeoutMillis, () => finish());
-      void (async () => {
-        if (length === undefined && !isByteSource(body)) {
-          ended = true;
-          sent.end(body);
-          return;
-        }
-        // A source or a text may reuse a slice's memory for the next: each slice is written out
-        // before the next is read. Bytes are views of memory that does not change.
-        const reused = !(body instanceof Uint8Array);
-        for await (const chunk of uploadChunks(body)) {
-          if (settled) return;
-          sentBytes += chunk.byteLength;
-          await new Promise<void>((proceed) => {
-            const done = () => {
-              sent.off("drain", done);
-              sent.off("close", done);
-              proceed();
+    return suppressHttpCapture(() =>
+      context.with(
+        suppressTracing(context.active()),
+        () =>
+          new Promise<Reply | undefined>((resolve) => {
+            let settled = false;
+            // Whether the whole body was handed to the request.
+            let ended = false;
+            let request: ClientRequest | undefined;
+            const finish = (reply?: Reply) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              if (request) {
+                this.requests.delete(request);
+                // An answer before the whole body was handed over ends the request: a store that
+                // neither reads nor closes would otherwise hold it, and its source, open.
+                if (!reply || !ended) request.destroy();
+              }
+              resolve(reply);
             };
-            sent.on("close", done);
-            if (reused) {
-              sent.write(chunk, () => done());
+            const timer = setTimeout(() => finish(), Math.max(1, deadline - Date.now()));
+            // The bytes handed to the request: its body is complete once they are its length.
+            let sentBytes = 0;
+            const written = () => length === undefined || sentBytes === length;
+            const requestHeaders: Record<string, string | number> = { ...headers };
+            if (length === undefined) requestHeaders["Content-Length"] = sizeOf(body);
+            try {
+              // Uploads are the SDK's own export traffic: an http instrumentation must not trace them.
+              request = http.request(
+                url,
+                { method, headers: requestHeaders, agent: false },
+                (response: IncomingMessage) => {
+                  const chunks: Buffer[] = [];
+                  let size = 0;
+                  const reply = () => ({
+                    status: response.statusCode ?? 0,
+                    headers: response.headers,
+                    body: Buffer.concat(chunks),
+                    complete: written(),
+                  });
+                  response.on("data", (chunk: Buffer) => {
+                    size += chunk.byteLength;
+                    if (size <= maxResponseBytes) {
+                      chunks.push(chunk);
+                      return;
+                    }
+                    // Hue's answers and the store's errors are small: what follows is not read.
+                    finish(reply());
+                    response.destroy();
+                  });
+                  response.on("end", () => finish(reply()));
+                  response.on("error", () => finish());
+                },
+              );
+            } catch {
+              finish();
               return;
             }
-            if (sent.write(chunk)) done();
-            else sent.on("drain", done);
-          });
-          if (settled) return;
-        }
-        if (settled) return;
-        ended = true;
-        sent.end();
-      })().catch(() => finish());
-    });
+            const sent = request;
+            this.requests.add(sent);
+            sent.on("error", () => finish());
+            sent.setTimeout(this.options.timeoutMillis, () => finish());
+            void (async () => {
+              if (length === undefined && !isByteSource(body)) {
+                ended = true;
+                sent.end(body);
+                return;
+              }
+              // A source or a text may reuse a slice's memory for the next: each slice is written out
+              // before the next is read. Bytes are views of memory that does not change.
+              const reused = !(body instanceof Uint8Array);
+              for await (const chunk of uploadChunks(body)) {
+                if (settled) return;
+                sentBytes += chunk.byteLength;
+                await new Promise<void>((proceed) => {
+                  const done = () => {
+                    sent.off("drain", done);
+                    sent.off("close", done);
+                    proceed();
+                  };
+                  sent.on("close", done);
+                  if (reused) {
+                    sent.write(chunk, () => done());
+                    return;
+                  }
+                  if (sent.write(chunk)) done();
+                  else sent.on("drain", done);
+                });
+                if (settled) return;
+              }
+              if (settled) return;
+              ended = true;
+              sent.end();
+            })().catch(() => finish());
+          }),
+      ),
+    );
   }
 }
 

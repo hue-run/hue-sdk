@@ -44,7 +44,13 @@ export function validateOptions(options: HueOptions): HueOptions &
   Required<
     Pick<
       SharedHueOptions,
-      "captureContent" | "baseUrl" | "timeoutMillis" | "maxQueueBytes" | "liveSpans"
+      | "captureContent"
+      | "captureHttp"
+      | "captureHttpBodies"
+      | "baseUrl"
+      | "timeoutMillis"
+      | "maxQueueBytes"
+      | "liveSpans"
     >
   > & {
     /** Project key after validation; empty for a disabled client. */
@@ -54,6 +60,10 @@ export function validateOptions(options: HueOptions): HueOptions &
   } {
   if (options.enabled !== undefined && typeof options.enabled !== "boolean")
     throw new TypeError("enabled must be a boolean");
+  if (options.captureHttp !== undefined && typeof options.captureHttp !== "boolean")
+    throw new TypeError("captureHttp must be a boolean");
+  if (options.captureHttpBodies !== undefined && typeof options.captureHttpBodies !== "boolean")
+    throw new TypeError("captureHttpBodies must be a boolean");
   if (options.enabled === false) {
     // The kill switch exports nothing, so the content decision defaults to metadata-only. The
     // diagnostics hook stays attached so a disabled client can still report why it is off.
@@ -64,6 +74,8 @@ export function validateOptions(options: HueOptions): HueOptions &
         ? { onExportIssue: options.onExportIssue }
         : {}),
       captureContent: options.captureContent ?? false,
+      captureHttp: false,
+      captureHttpBodies: false,
       enabled: false,
       apiKey: "",
       serviceName: "hue-disabled",
@@ -135,6 +147,8 @@ export function validateOptions(options: HueOptions): HueOptions &
   return {
     ...options,
     captureContent: options.captureContent ?? true,
+    captureHttp: options.captureHttp ?? true,
+    captureHttpBodies: options.captureContent !== false && options.captureHttpBodies !== false,
     baseUrl: url.origin,
     timeoutMillis,
     maxQueueBytes,

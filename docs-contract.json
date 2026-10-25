@@ -38,6 +38,7 @@
       }
     ],
     "sections": [
+      "TypeScript outbound HTTP capture",
       "Existing dependencies",
       "Content and delivery",
       "Evaluation coverage",
@@ -46,7 +47,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:fbf152319e62f633847f6d94b23b23f7be65555d5ba87200e78c9d2800360635",
+    "sha256": "sha256:4bb801e648c7421ff3a207431ea6de1b6f31a66ac499adfdeece79e55160b793",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -748,7 +749,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.25.1"
+      "version": "0.26.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -760,7 +761,7 @@
       "version": "0.8.23"
     },
     "name": "hue",
-    "sha256": "sha256:694cfa6651c4ed3002360a24ed00b1655273838021270ab68d2eab0184b60bcd",
+    "sha256": "sha256:0eed8b336c90ab1e5f3ceb3441bace6f17637edf82e0ad293fcf46a6d848372e",
     "source": "skills/hue/SKILL.md"
   }
 }

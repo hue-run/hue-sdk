@@ -1177,6 +1177,7 @@ run(
   ai6,
 );
 const installedPackageTests = [
+  "http-capture.test.ts",
   "sdk.test.ts",
   "ai-sdk.test.ts",
   "failure.test.ts",
@@ -1238,6 +1239,7 @@ async function verifyConsumer(patch) {
           ai: `7.0.${patch}`,
           "@ai-sdk/otel": `1.0.${patch}`,
           "@hue-run/sdk": packageSpec,
+          ...(patch === 139 ? { "@vercel/otel": "2.1.3" } : {}),
         },
       },
       null,
@@ -1389,6 +1391,16 @@ void [transition, event, options, backend];
       await runAsync(
         runtime,
         [join(source, "scripts/verify-file-cases.mjs"), consumer],
+        destination,
+      );
+      await runAsync(
+        runtime,
+        [join(source, "scripts/verify-http-capture.mjs"), consumer],
+        destination,
+      );
+      await runAsync(
+        runtime,
+        [join(source, "scripts/verify-http-capture-vercel.mjs"), consumer],
         destination,
       );
     }

@@ -240,7 +240,13 @@ test("request evidence describes the same local HTTP call executed once", async 
     expect(returned).toEqual(result);
     expect(calls).toBe(1);
     await hue.flush();
-    expect(attr(collector.spans[0]!, "url.full")?.stringValue).toBe(request.url);
+    const tool = collector.spans.find((span) => span.name === "execute_tool mcp_read")!;
+    const http = collector.spans.find((span) => span.name === "POST")!;
+    expect(attr(tool, "url.full")?.stringValue).toBe(request.url);
+    expect(attr(http, "url.full")?.stringValue).toBe(`${upstream.url.origin}/mcp`);
+    expect(JSON.parse(attr(http, "input.value")!.stringValue!)).toEqual({
+      user_id: "synthetic-local-user",
+    });
   } finally {
     await hue.shutdownSafe();
     collector.stop();
