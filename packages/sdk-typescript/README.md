@@ -871,7 +871,9 @@ values go under `body`. A bare GET records `{}`. For a complete text response, `
 holds the response body, parsing JSON and form fields. An empty successful response records `null`,
 including a 204 response without a content type. JSON, `+json`, `text/*`, XML and form-encoded
 content are text formats. These content values pass through your `redact` callback before export.
-Hue's own HTTP traffic and requests within model spans are excluded.
+Hue's export traffic is excluded. HTTP requests within model spans retain identity and omit
+content, because model adapters record that content. A `hue.tool()` nested inside a model span
+resumes HTTP content capture for its own calls.
 
 Each body is bounded by the receiver's value cap, 1 MiB by default. A body over the cap records
 Hue's existing truncation marker instead of a partial JSON value. The span's `hue.truncated`

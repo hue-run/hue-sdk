@@ -27,6 +27,8 @@ const root = protobuf.Root.fromJSON(schema);
 const traceType = root.lookupType(
   "opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest",
 );
+const logsType = root.lookupType("opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest");
+const logs = [];
 const spans = [];
 const services = new WeakMap();
 let exports = 0;
@@ -35,6 +37,8 @@ const payload = Buffer.from(
   JSON.stringify({ message: "synthetic-response", repeated: "x".repeat(220000) }),
 );
 const gzip = gzipSync(payload);
+const encodingSecret = "synthetic-private-reference-12345";
+const encodingExpanded = "\x01".repeat(Math.floor((1024 * 1024 - 1 - 16) / 6)) + encodingSecret;
 const gmail = {
   payload: {
     headers: [
@@ -75,6 +79,14 @@ const receiver = http.createServer(async (request, response) => {
         }
     }
   }
+  if (request.url.endsWith("/logs")) {
+    const data = logsType.toObject(logsType.decode(bytes), { longs: String, bytes: String });
+    logs.push(
+      ...(data.resourceLogs ?? []).flatMap((group) =>
+        group.scopeLogs.flatMap((scope) => scope.logRecords),
+      ),
+    );
+  }
   response.writeHead(200, { "content-type": "application/x-protobuf" });
   response.end();
 });
@@ -84,7 +96,10 @@ const target = http.createServer(async (request, response) => {
   response.setHeader("content-type", "application/json");
   response.setHeader("notion-version", "2022-06-28");
   if (request.method === "HEAD") response.removeHeader("content-type");
-  if (request.url.startsWith("/gmail-response")) {
+  if (request.url.startsWith("/encoding-expanded")) {
+    response.setHeader("content-type", "text/plain");
+    response.end(encodingExpanded);
+  } else if (request.url.startsWith("/gmail-response")) {
     response.end(
       JSON.stringify({
         ...gmail,
@@ -461,6 +476,77 @@ try {
     }
   });
 
+  await check("forged truncation marker extra fields cannot bypass redaction", async () => {
+    const hue = createHue({
+      ...options,
+      captureHttp: false,
+      redact: (value) => value.replaceAll("synthetic-marker-sensitive", "filtered"),
+    });
+    const from = spans.length;
+    try {
+      hue.tracer
+        .startSpan("manual HTTP marker", {
+          kind: SpanKind.CLIENT,
+          attributes: {
+            "http.request.method": "GET",
+            "url.full": `${targetUrl}/manual-marker`,
+            "hue.truncated": ["input.value"],
+            "input.value": JSON.stringify({
+              "hue.truncated": true,
+              "hue.truncated_bytes": 20,
+              message: "synthetic-marker-sensitive",
+            }),
+          },
+        })
+        .end();
+      await flush(hue);
+      const records = httpSpans(from);
+      assert.equal(records.length, 1);
+      assert.ok(!JSON.stringify(records).includes("synthetic-marker-sensitive"));
+      const marker = records[0].attributes.find(
+        (attribute) => attribute.key === "input.value",
+      ).value;
+      assert.deepEqual(marker.kvlistValue.values.map((attribute) => attribute.key).sort(), [
+        "hue.truncated",
+        "hue.truncated_bytes",
+      ]);
+    } finally {
+      await hue.shutdownSafe();
+    }
+  });
+
+  await check(
+    "JSON encoding expansion cannot expose a partial secret before redaction",
+    async () => {
+      const hue = createHue({
+        ...options,
+        redact: (value) => value.replaceAll(encodingSecret, "filtered"),
+      });
+      const from = spans.length;
+      try {
+        assert.equal(
+          await fetch(`${targetUrl}/encoding-expanded`).then((response) => response.text()),
+          encodingExpanded,
+        );
+        await flush(hue);
+        const records = httpSpans(from);
+        assert.equal(records.length, 1);
+        assert.ok(!JSON.stringify(records).includes("synthetic-priv"));
+        const marker = records[0].attributes.find(
+          (attribute) => attribute.key === "output.value",
+        ).value;
+        assert.equal(marker.stringValue, undefined);
+        assert.equal(
+          marker.kvlistValue.values.find((attribute) => attribute.key === "hue.truncated").value
+            .boolValue,
+          true,
+        );
+      } finally {
+        await hue.shutdownSafe();
+      }
+    },
+  );
+
   await check("request truncation retains HTTP identity and structured marker", async () => {
     const hue = createHue(options);
     const from = spans.length;
@@ -598,7 +684,36 @@ try {
           };
           try {
             await fetch(`${targetUrl}/getter`, init).then((response) => response.text());
-            observations.push({ counts, body: incoming.at(-1).body.toString() });
+            const top = { counts, body: incoming.at(-1).body.toString() };
+            let headerReads = 0;
+            const headers = {
+              "content-type": "application/json",
+              get "notion-version"() {
+                headerReads++;
+                return `synthetic-version-${headerReads}`;
+              },
+            };
+            await fetch(`${targetUrl}/nested-header-getter`, {
+              method: "POST",
+              headers,
+              body: "{}",
+            }).then((response) => response.text());
+            const nested = {
+              reads: headerReads,
+              header: incoming.at(-1).headers["notion-version"],
+            };
+            let urlReads = 0;
+            const url = new URL(`${targetUrl}/custom-url`);
+            url.toString = () => {
+              urlReads++;
+              return `${targetUrl}/custom-url-${urlReads}`;
+            };
+            await fetch(url).then((response) => response.text());
+            observations.push({
+              top,
+              nested,
+              url: { reads: urlReads, path: incoming.at(-1).path },
+            });
           } finally {
             await hue.shutdownSafe();
           }
@@ -645,13 +760,23 @@ try {
         method: "post",
         body: new URLSearchParams({ name: "Ada", password: "synthetic-form-password" }),
       }).then((response) => response.text());
+      await fetch(`${targetUrl}/header-pairs`, {
+        method: "POST",
+        headers: [
+          ["content-type", "application/json"],
+          ["notion-version", "2022-06-28"],
+        ],
+        body: JSON.stringify({ paired: true }),
+      }).then((response) => response.text());
       await flush(hue);
       const records = httpSpans(from);
-      assert.equal(records.length, 2);
+      assert.equal(records.length, 3);
       for (const span of records) assert.equal(attributes(span)["http.request.method"], "POST");
       assert.equal(JSON.parse(attributes(records[0])["input.value"]).body, "synthetic-text");
       assert.equal(JSON.parse(attributes(records[1])["input.value"]).name, "Ada");
       assert.equal(JSON.parse(attributes(records[1])["input.value"]).q, "top");
+      assert.deepEqual(JSON.parse(attributes(records[2])["input.value"]), { paired: true });
+      assert.equal(attributes(records[2])["http.request.header.notion_version"], "2022-06-28");
       assert.ok(!JSON.stringify(records).includes("synthetic-form-password"));
     } finally {
       await hue.shutdownSafe();
@@ -750,23 +875,81 @@ try {
     }
   });
 
-  await check("model exclusion", async () => {
+  await check("model HTTP retains identity and excludes provider bodies", async () => {
     const hue = createHue(options);
     const from = spans.length;
     try {
       await hue.model(
         "synthetic-model",
         async () => {
-          await fetch(`${targetUrl}/model`).then((response) => response.text());
+          await fetch(`${targetUrl}/model`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ message: "synthetic-provider-input" }),
+          }).then((response) => response.text());
         },
         { provider: "synthetic" },
       );
       await flush(hue);
-      assert.equal(httpSpans(from).length, 0);
+      const records = httpSpans(from);
+      assert.equal(records.length, 1);
+      assert.equal(attributes(records[0])["url.full"], `${targetUrl}/model`);
+      assert.equal(attributes(records[0])["input.value"], undefined);
+      assert.equal(attributes(records[0])["output.value"], undefined);
+      assert.ok(!JSON.stringify(records).includes("synthetic-provider-input"));
     } finally {
       await hue.shutdownSafe();
     }
   });
+
+  await check(
+    "a tool inside model scope captures HTTP bodies and preserves inherited model log metadata",
+    async () => {
+      const hue = createHue(options);
+      const from = spans.length;
+      const logFrom = logs.length;
+      try {
+        await hue.model(
+          "synthetic-model",
+          async () => {
+            await hue.tool("ordinary-tool", {}, async () => {
+              hue.recordMessages({
+                input: [{ role: "user", parts: [{ type: "text", content: "synthetic-tool-log" }] }],
+              });
+              return fetch(`${targetUrl}/model-tool`).then((response) => response.json());
+            });
+            await fetch(`${targetUrl}/model-provider-after-tool`).then((response) =>
+              response.text(),
+            );
+          },
+          { provider: "synthetic" },
+        );
+        await flush(hue);
+        const records = httpSpans(from);
+        assert.equal(records.length, 2);
+        const toolHttp = records.find(
+          (span) => attributes(span)["url.full"] === `${targetUrl}/model-tool`,
+        );
+        const providerHttp = records.find(
+          (span) => attributes(span)["url.full"] === `${targetUrl}/model-provider-after-tool`,
+        );
+        assert.ok(attributes(toolHttp)["input.value"]);
+        assert.ok(attributes(toolHttp)["output.value"]);
+        assert.equal(attributes(providerHttp)["input.value"], undefined);
+        assert.equal(attributes(providerHttp)["output.value"], undefined);
+        const tool = spans.slice(from).find((span) => span.name === "execute_tool ordinary-tool");
+        assert.equal(toolHttp.parentSpanId, tool.spanId);
+        const message = logs
+          .slice(logFrom)
+          .find((log) => attributes(log)["gen_ai.request.model"] === "synthetic-model");
+        assert.equal(message.spanId, tool.spanId);
+        assert.equal(attributes(message)["gen_ai.operation.name"], "chat");
+        assert.equal(attributes(message)["gen_ai.provider.name"], "synthetic");
+      } finally {
+        await hue.shutdownSafe();
+      }
+    },
+  );
 
   await check(
     "read-only HTTP methods cannot change application bytes or crash the process",
@@ -1066,160 +1249,180 @@ try {
   });
 
   if (process.argv.includes("--clients")) {
-    const loaderClient = createHue(options);
-    try {
-      const load = async (name) =>
-        import(
-          pathToFileURL(
-            require.resolve(
-              name === "node-fetch"
-                ? "node-fetch/lib/index.js"
-                : name === "undici"
-                  ? "undici/index.js"
-                  : name,
-            ),
-          )
-        );
-      const undici = await load("undici");
-      const [
-        { default: axios },
-        { default: nodeFetch },
-        { default: got },
-        gaxios,
-        { google },
-        { WebClient },
-        linearModule,
-        { Client: NotionClient },
-      ] = await Promise.all([
-        load("axios"),
-        load("node-fetch"),
-        load("got"),
-        load("gaxios"),
-        load("googleapis"),
-        load("@slack/web-api"),
-        load("@linear/sdk"),
-        load("@notionhq/client"),
-      ]);
-      const LinearClient = linearModule.LinearClient ?? linearModule.default.LinearClient;
-      const calls = [
-        ["axios", () => axios.post(`${targetUrl}/axios`, { message: "axios" })],
-        [
-          "node-fetch v2",
-          () =>
-            nodeFetch(`${targetUrl}/node-fetch`, {
+    const load = async (name) =>
+      import(
+        pathToFileURL(
+          require.resolve(
+            name === "node-fetch"
+              ? "node-fetch/lib/index.js"
+              : name === "undici"
+                ? "undici/index.js"
+                : name,
+          ),
+        )
+      );
+    const undici = await load("undici");
+    const { default: warmAxios } = await load("axios");
+    await check(
+      "cold-imported undici observes first use and repeated complete client restarts",
+      async () => {
+        for (let cycle = 0; cycle < 3; cycle++) {
+          const warm = createHue(options);
+          try {
+            await warmAxios.get(`${targetUrl}/axios-before-undici-${cycle}`);
+          } finally {
+            await warm.shutdownSafe();
+          }
+          const hue = createHue(options);
+          const from = spans.length;
+          try {
+            await undici
+              .fetch(`${targetUrl}/undici-cold-${cycle}`)
+              .then((response) => response.text());
+            await flush(hue);
+            assert.equal(httpSpans(from).length, 1, `restart ${cycle}`);
+          } finally {
+            await hue.shutdownSafe();
+          }
+        }
+      },
+    );
+    const [
+      { default: axios },
+      { default: nodeFetch },
+      { default: got },
+      gaxios,
+      { google },
+      { WebClient },
+      linearModule,
+      { Client: NotionClient },
+    ] = await Promise.all([
+      load("axios"),
+      load("node-fetch"),
+      load("got"),
+      load("gaxios"),
+      load("googleapis"),
+      load("@slack/web-api"),
+      load("@linear/sdk"),
+      load("@notionhq/client"),
+    ]);
+    const LinearClient = linearModule.LinearClient ?? linearModule.default.LinearClient;
+    const calls = [
+      ["axios", () => axios.post(`${targetUrl}/axios`, { message: "axios" })],
+      [
+        "node-fetch v2",
+        () =>
+          nodeFetch(`${targetUrl}/node-fetch`, {
+            method: "POST",
+            body: JSON.stringify({ message: "node-fetch" }),
+            headers: { "content-type": "application/json" },
+          }).then((response) => response.json()),
+      ],
+      [
+        "got",
+        () =>
+          got.post(`${targetUrl}/got`, { json: { message: "got" }, retry: { limit: 0 } }).json(),
+      ],
+      [
+        "gaxios",
+        () =>
+          gaxios.request({
+            url: `${targetUrl}/gaxios`,
+            method: "POST",
+            data: { message: "gaxios" },
+            retry: false,
+          }),
+      ],
+      [
+        "googleapis",
+        () =>
+          google
+            .gmail({ version: "v1" })
+            .users.messages.list({ userId: "me", maxResults: 5 }, { rootUrl: `${targetUrl}/` }),
+      ],
+      [
+        "@slack/web-api",
+        () =>
+          new WebClient("synthetic-slack-token", {
+            slackApiUrl: `${targetUrl}/slack/`,
+            retryConfig: { retries: 0 },
+          }).apiCall("auth.test"),
+      ],
+      [
+        "undici fetch",
+        () =>
+          undici
+            .fetch(`${targetUrl}/undici`, {
               method: "POST",
-              body: JSON.stringify({ message: "node-fetch" }),
+              body: JSON.stringify({ message: "undici" }),
               headers: { "content-type": "application/json" },
-            }).then((response) => response.json()),
-        ],
-        [
-          "got",
-          () =>
-            got.post(`${targetUrl}/got`, { json: { message: "got" }, retry: { limit: 0 } }).json(),
-        ],
-        [
-          "gaxios",
-          () =>
-            gaxios.request({
-              url: `${targetUrl}/gaxios`,
-              method: "POST",
-              data: { message: "gaxios" },
-              retry: false,
-            }),
-        ],
-        [
-          "googleapis",
-          () =>
-            google
-              .gmail({ version: "v1" })
-              .users.messages.list({ userId: "me", maxResults: 5 }, { rootUrl: `${targetUrl}/` }),
-        ],
-        [
-          "@slack/web-api",
-          () =>
-            new WebClient("synthetic-slack-token", {
-              slackApiUrl: `${targetUrl}/slack/`,
-              retryConfig: { retries: 0 },
-            }).apiCall("auth.test"),
-        ],
-        [
-          "undici fetch",
-          () =>
-            undici
-              .fetch(`${targetUrl}/undici`, {
+            })
+            .then((response) => response.json()),
+      ],
+      [
+        "@linear/sdk",
+        () =>
+          new LinearClient({ apiKey: "synthetic-linear-token", apiUrl: `${targetUrl}/linear` })
+            .viewer,
+      ],
+      [
+        "@notionhq/client",
+        () =>
+          new NotionClient({
+            auth: "synthetic-notion-token",
+            baseUrl: `${targetUrl}/notion`,
+          }).users.me({}),
+      ],
+    ];
+    for (const [name, call] of calls) {
+      const unsupported = globalThis.Bun && ["gaxios", "googleapis"].includes(name);
+      await check(
+        `real client ${name}${unsupported ? " default unsupported on Bun (node-fetch built-in alias)" : ""}`,
+        async () => {
+          const hue = createHue(options);
+          const from = spans.length;
+          try {
+            await call();
+            await flush(hue);
+            const records = httpSpans(from);
+            assert.equal(records.length, unsupported ? 0 : 1, name);
+            if (unsupported) return;
+            assert.ok(attributes(records[0])["input.value"], `${name} request content`);
+            assert.ok(attributes(records[0])["output.value"], `${name} response content`);
+            assert.equal(Number(attributes(records[0])["http.response.status_code"]), 200);
+          } finally {
+            await hue.shutdownSafe();
+          }
+        },
+      );
+      if (unsupported)
+        await check(`real client ${name} with explicit fetchImplementation on Bun`, async () => {
+          const hue = createHue(options);
+          const from = spans.length;
+          try {
+            if (name === "gaxios")
+              await gaxios.request({
+                url: `${targetUrl}/gaxios-explicit`,
                 method: "POST",
-                body: JSON.stringify({ message: "undici" }),
-                headers: { "content-type": "application/json" },
-              })
-              .then((response) => response.json()),
-        ],
-        [
-          "@linear/sdk",
-          () =>
-            new LinearClient({ apiKey: "synthetic-linear-token", apiUrl: `${targetUrl}/linear` })
-              .viewer,
-        ],
-        [
-          "@notionhq/client",
-          () =>
-            new NotionClient({
-              auth: "synthetic-notion-token",
-              baseUrl: `${targetUrl}/notion`,
-            }).users.me({}),
-        ],
-      ];
-      for (const [name, call] of calls) {
-        const unsupported = globalThis.Bun && ["gaxios", "googleapis"].includes(name);
-        await check(
-          `real client ${name}${unsupported ? " default unsupported on Bun (node-fetch built-in alias)" : ""}`,
-          async () => {
-            const hue = createHue(options);
-            const from = spans.length;
-            try {
-              await call();
-              await flush(hue);
-              const records = httpSpans(from);
-              assert.equal(records.length, unsupported ? 0 : 1, name);
-              if (unsupported) return;
-              assert.ok(attributes(records[0])["input.value"], `${name} request content`);
-              assert.ok(attributes(records[0])["output.value"], `${name} response content`);
-              assert.equal(Number(attributes(records[0])["http.response.status_code"]), 200);
-            } finally {
-              await hue.shutdownSafe();
-            }
-          },
-        );
-        if (unsupported)
-          await check(`real client ${name} with explicit fetchImplementation on Bun`, async () => {
-            const hue = createHue(options);
-            const from = spans.length;
-            try {
-              if (name === "gaxios")
-                await gaxios.request({
-                  url: `${targetUrl}/gaxios-explicit`,
-                  method: "POST",
-                  data: { message: "gaxios" },
-                  fetchImplementation: globalThis.fetch,
-                });
-              else
-                await google
-                  .gmail({ version: "v1" })
-                  .users.messages.list(
-                    { userId: "me", maxResults: 5 },
-                    { rootUrl: `${targetUrl}/`, fetchImplementation: globalThis.fetch },
-                  );
-              await flush(hue);
-              const records = httpSpans(from);
-              assert.equal(records.length, 1);
-              assert.ok(attributes(records[0])["input.value"]);
-              assert.ok(attributes(records[0])["output.value"]);
-            } finally {
-              await hue.shutdownSafe();
-            }
-          });
-      }
-    } finally {
-      await loaderClient.shutdownSafe();
+                data: { message: "gaxios" },
+                fetchImplementation: globalThis.fetch,
+              });
+            else
+              await google
+                .gmail({ version: "v1" })
+                .users.messages.list(
+                  { userId: "me", maxResults: 5 },
+                  { rootUrl: `${targetUrl}/`, fetchImplementation: globalThis.fetch },
+                );
+            await flush(hue);
+            const records = httpSpans(from);
+            assert.equal(records.length, 1);
+            assert.ok(attributes(records[0])["input.value"]);
+            assert.ok(attributes(records[0])["output.value"]);
+          } finally {
+            await hue.shutdownSafe();
+          }
+        });
     }
   }
 
@@ -1251,6 +1454,21 @@ try {
         });
         await flush(transport);
         assert.equal(httpSpans(from).length, 1);
+        for (const [name, modelAttributes] of [
+          ["foreign-model", { "gen_ai.operation.name": "chat" }],
+          ["ai.languageModel.doGenerate", {}],
+        ]) {
+          const modelFrom = spans.length;
+          await tracer.startActiveSpan(name, { attributes: modelAttributes }, async (span) => {
+            await fetch(`${targetUrl}/foreign-model`).then((response) => response.text());
+            span.end();
+          });
+          await flush(transport);
+          const providerRecords = httpSpans(modelFrom);
+          assert.equal(providerRecords.length, 1);
+          assert.equal(attributes(providerRecords[0])["input.value"], undefined);
+          assert.equal(attributes(providerRecords[0])["output.value"], undefined);
+        }
         const existing = tracer.startSpan("GET", {
           kind: SpanKind.CLIENT,
           attributes: { "http.request.method": "GET", "url.full": `${targetUrl}/existing` },
@@ -1331,7 +1549,7 @@ try {
     );
   assert.equal(failures.length, 0, failures.map(({ label }) => label).join(", "));
   console.log(
-    `http-capture runtime ${process.version}${globalThis.Bun ? ` Bun ${globalThis.Bun.version}` : ""}: ${exports} OTLP exports, all supported checks passed`,
+    `http-capture runtime ${process.version}${globalThis.Bun ? ` Bun ${globalThis.Bun.version}` : ""}: ${exports} OTLP trace exports, all supported checks passed`,
   );
 } finally {
   await stop(target);

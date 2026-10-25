@@ -152,7 +152,8 @@ consumer bytes with capture enabled and disabled.
 Check `captureHttp: false`, `captureHttpBodies: false`, `captureContent: false` and `enabled: false`.
 Verify credential filtering and custom redaction while preserving pagination fields such as
 `nextPageToken`, truncation markers and the `hue.truncated` key array, exporter suppression,
-model exclusion, borrowed providers and multiple-client shutdown. Request headers, including an
+model identity without content, nested tools resuming HTTP content, borrowed providers and
+multiple-client shutdown. Request headers, including an
 existing `traceparent`, must reach the server unchanged.
 
 Exercise late, paused, piped, async-iterated, unread and aborted responses, chunked and fixed

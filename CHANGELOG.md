@@ -33,7 +33,8 @@ refuses to publish a version without a matching entry below.
   `http.request.body.size` and `http.response.body.size`. Bodies over the receiver's value cap
   use Hue's structured OTLP truncation placeholder, with the affected content attribute named in the
   span's `hue.truncated` array. A cut body is incomplete evidence and can cause trace
-  reconstruction to refuse it. Export traffic and model calls are excluded.
+  reconstruction to refuse it. Export traffic is excluded. Model-provider requests keep
+  HTTP identity without content; application tools nested inside model callbacks resume content capture.
 
 ### [0.25.1] - 2026-10-25
 

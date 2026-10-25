@@ -89,6 +89,8 @@ interface LocalContext {
   workspaceId?: string;
   /** Request metadata of the enclosing `model()` call, copied onto message records. */
   model?: { operation: string; provider: string; requestModel: string };
+  /** HTTP content suppression is independent of inherited inference-log metadata. */
+  httpModel?: boolean;
 }
 /**
  * Attach mode: the application owns its OpenTelemetry providers and passes the transport whose
@@ -404,7 +406,7 @@ export class HueClient {
       context: () => this.getContext(),
       active: () => this.storage.getStore() !== undefined,
       scope: this.httpScope,
-      model: () => this.storage.getStore()?.model !== undefined,
+      model: () => this.storage.getStore()?.httpModel === true,
     });
   }
 
@@ -455,6 +457,7 @@ export class HueClient {
           userId: identifier(options.userId ?? inherited?.userId),
           workspaceId: identifier(options.workspaceId ?? inherited?.workspaceId),
           model: inherited?.model,
+          httpModel: inherited?.httpModel,
         };
         const { attributes, placed } = this.attributeValues(options.attributes);
         span = this.storage.run(active, () =>
@@ -572,7 +575,11 @@ export class HueClient {
       `execute_tool ${name}`,
       async ({ span }) => {
         this.setContent(span, "gen_ai.tool.call.arguments", input);
-        const result = await execute();
+        // A tool is application work even when a model callback invokes it.
+        const scope = this.storage.getStore();
+        const result = await (scope?.httpModel
+          ? this.storage.run({ ...scope, httpModel: false }, execute)
+          : execute());
         if (result !== undefined) this.setContent(span, "gen_ai.tool.call.result", result);
         return result;
       },
@@ -699,7 +706,9 @@ export class HueClient {
         if (tools !== undefined) this.setContent(span.span, "gen_ai.tool.definitions", tools);
         // recordMessages inside the callback copies this request metadata onto its log record.
         const store = this.storage.getStore() ?? { context: span.context };
-        return this.storage.run({ ...store, model: metadata }, () => callback(handle));
+        return this.storage.run({ ...store, model: metadata, httpModel: true }, () =>
+          callback(handle),
+        );
       },
       {
         sessionId,

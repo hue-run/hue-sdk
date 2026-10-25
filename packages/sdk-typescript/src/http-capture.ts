@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/unbound-method -- Observers forward methods with Reflect.apply and the original receiver. */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { subscribe, unsubscribe } from "node:diagnostics_channel";
+import { channel } from "node:diagnostics_channel";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import { types as utilTypes } from "node:util";
 import {
@@ -306,6 +306,7 @@ class Exchange {
     readonly ownsSpan: boolean,
     readonly url: URL,
     readonly requestHeaders: Headers,
+    readonly bodies: boolean,
   ) {
     this.input = new Body(owner.options.valueBytes());
     this.output = new Body(owner.options.valueBytes());
@@ -319,7 +320,7 @@ class Exchange {
     else this.restorers.push(restore);
   }
   observe(body: Body, chunk: unknown, encoding?: unknown): void {
-    if (!this.ended && this.owner.options.bodies) this.safe(() => body.add(chunk, encoding));
+    if (!this.ended && this.bodies) this.safe(() => body.add(chunk, encoding));
   }
   private safe(work: () => void): void {
     safely(this.owner, work);
@@ -355,7 +356,7 @@ class Exchange {
           this.span.setStatus({ code: SpanStatusCode.ERROR });
         } else if (this.status !== undefined && this.status >= 400)
           this.span.setStatus({ code: SpanStatusCode.ERROR });
-        if (this.owner.options.bodies) {
+        if (this.bodies) {
           if (this.requestComplete)
             this.span.setAttribute("http.request.body.size", this.input.size);
           if (this.responseComplete)
@@ -441,8 +442,8 @@ function begin(
     return;
   const local = trace.getSpan(parent);
   const global = trace.getSpan(context.active());
-  if (source.model() || modelSpan(local) || modelSpan(global) || isTracingSuppressed(parent))
-    return;
+  if (isTracingSuppressed(parent)) return;
+  const bodies = owner.options.bodies && !source.model() && !modelSpan(local) && !modelSpan(global);
   const existing = sameHttpSpan(global, method, url)
     ? global
     : sameHttpSpan(local, method, url)
@@ -473,7 +474,7 @@ function begin(
   );
   // Existing instrumentation can keep a credential-bearing URL; Hue's copy has the same policy.
   span.setAttribute("url.full", safeUrl.href);
-  return new Exchange(owner, source, span, !existing, url, headersOf(headers));
+  return new Exchange(owner, source, span, !existing, url, headersOf(headers), bodies);
 }
 
 function safely(owner: Owner | undefined, work: () => void): void {
@@ -519,7 +520,7 @@ function undiciCreated(message: unknown): void {
       exchange.registerRestorer(() => {
         undiciExchanges.delete(request);
       });
-      if (!owner.options.bodies) return;
+      if (!exchange.bodies) return;
       if (!("onData" in request) || typeof request.onData !== "function")
         exchange.responseComplete = false;
       if (!("onBodySent" in request) || typeof request.onBodySent !== "function")
@@ -725,16 +726,19 @@ const channelListeners: [string, (message: unknown) => void][] = [
   ["http.client.request.start", nodeCreated],
 ];
 
-const channels = channelListeners.map(([name, listener]): [string, (message: unknown) => void] => [
-  name,
-  (message) => {
-    try {
-      listener(message);
-    } catch {
-      for (const owner of owners) safely(undefined, owner.options.failed);
-    }
-  },
-]);
+// Keep native channel instances alive across subscribe/unsubscribe cycles on Bun.
+const channels = channelListeners.map(
+  ([name, listener]): [ReturnType<typeof channel>, (message: unknown) => void] => [
+    channel(name),
+    (message) => {
+      try {
+        listener(message);
+      } catch {
+        for (const owner of owners) safely(undefined, owner.options.failed);
+      }
+    },
+  ],
+);
 
 function decorateResponse(
   response: Response,
@@ -896,7 +900,7 @@ function installFetch(): void {
           // Bun exposes only the logical fetch, so a followed redirect's body has no proven hop.
           if (response.redirected) captured.responseComplete = false;
           const body = response.body;
-          if (!owner.options.bodies || !body) {
+          if (!captured.bodies || !body) {
             captured.finish(true);
             return response;
           }
@@ -970,7 +974,7 @@ export function startHttpCapture(options: CaptureOptions): {
     observers: new Map(),
   };
   if (!owners.size) {
-    for (const [name, listener] of channels) subscribe(name, listener);
+    for (const [captureChannel, listener] of channels) captureChannel.subscribe(listener);
     safely(owner, installFetch);
   }
   owners.add(owner);
@@ -994,7 +998,7 @@ export function startHttpCapture(options: CaptureOptions): {
       finish();
       owner.sources.clear();
       if (!owners.size) {
-        for (const [name, listener] of channels) unsubscribe(name, listener);
+        for (const [captureChannel, listener] of channels) captureChannel.unsubscribe(listener);
         safely(owner, () => {
           if (originalFetch && globalThis.fetch === wrappedFetch) globalThis.fetch = originalFetch;
           originalFetch = undefined;
