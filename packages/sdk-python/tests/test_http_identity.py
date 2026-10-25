@@ -19,6 +19,68 @@ from test_http_capture import app as app
 from hue_sdk import Hue
 
 POLICIES = ({}, {"capture_content": False}, {"capture_http_bodies": False})
+
+
+@pytest.mark.parametrize(
+    "value_length,count,mode",
+    (
+        (16, 0, "missing"),
+        (4, 0, "missing"),
+        (16, 8, "missing"),
+        (4, 8, "missing"),
+        (64, 8, "evicted"),
+        (64, 8, "ordinary"),
+        (64, 8, "invalid"),
+        (16, 0, "ordinary"),
+    ),
+)
+def test_provider_dropped_method_keeps_client_names_and_uri_copies_safe(
+    receiver, app, value_length, count, mode
+):
+    limits = SpanLimits(max_attribute_length=value_length, max_attributes=count)
+    provider = TracerProvider(shutdown_on_exit=False, span_limits=limits)
+    vendor = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(vendor))
+    secret = "synthetic_name_secret"
+    raw = app.url + "/token/" + secret + "/items"
+    name = "ordinary-client-operation" if mode == "ordinary" else "GET " + raw
+    values = {"url.full": raw}
+    if mode == "evicted":
+        values = {"http.request.method": "GET"}
+        values.update({f"filler.{index}": "value" for index in range(count)})
+        values["url.full"] = raw
+    elif mode == "invalid":
+        values["http.request.method"] = "/bad"
+    try:
+        with Hue(
+            receiver.url,
+            "synthetic-name-gate-key",
+            tracer_provider=provider,
+            capture_http=False,
+            live_spans=False,
+        ) as hue:
+            with provider.get_tracer("application").start_as_current_span(
+                name, kind=SpanKind.CLIENT, attributes=values
+            ) as original:
+                expected_id = original.get_span_context().span_id.to_bytes(8, "big")
+                accepted = dict(original.attributes)
+                assert get("requests", raw) == BODY
+            assert hue.force_flush()
+        (stored,) = [span for span in receiver.spans() if span.span_id == expected_id]
+        assert stored.name == (name if mode == "ordinary" else "HTTP")
+        assert secret.encode() not in exported_bytes(receiver)
+        fields = attributes(stored)
+        assert set(fields) <= set(accepted)
+        assert len(fields) <= count
+        assert "http.request.method" not in fields or mode == "invalid"
+        (vendor_span,) = vendor.get_finished_spans()
+        assert vendor_span.name == name
+        assert dict(vendor_span.attributes) == accepted
+        assert len(app.requests) == 1
+    finally:
+        provider.shutdown()
+
+
 PATHS = (
     ("bot", "/bot123456789:synthetic_bot_secret/sendMessage"),
     ("bot", "/bot123456789%3Asynthetic_bot_secret/sendMessage"),

@@ -34,6 +34,7 @@ _TENANT_ID = re.compile(r"T[A-Za-z0-9]+\Z", re.ASCII)
 _HOOK_ID = re.compile(r"B[A-Za-z0-9]+\Z", re.ASCII)
 _OPAQUE_CAPABILITY = re.compile(r"[A-Za-z0-9_-]+\Z", re.ASCII)
 _METHOD = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,32}\Z", re.ASCII)
+_HTTP_URL_NAME = re.compile(r"https?://", re.IGNORECASE | re.ASCII)
 _URL_KEYS = ("url.full", "http.url")
 _PATH_KEYS = ("http.target", "url.path")
 _URI_KEYS = (*_URL_KEYS, *_PATH_KEYS, "url.query")
@@ -201,13 +202,20 @@ def safe_http_span(
         attributes = span.attributes or {}
     method = attributes.get("http.request.method", attributes.get("http.method"))
     keys = [key for key in _URL_KEYS if key in attributes]
-    if span.kind != SpanKind.CLIENT or not isinstance(method, str):
-        return span
-    valid_method = _METHOD.fullmatch(method)
-    name = method.upper() if valid_method else "HTTP"
     paths = [key for key in _PATH_KEYS if key in attributes]
+    url_in_name = bool(_HTTP_URL_NAME.search(span.name))
+    if span.kind != SpanKind.CLIENT:
+        return span
+    valid_method = _METHOD.fullmatch(method) if isinstance(method, str) else None
+    name = (
+        method.upper()
+        if isinstance(method, str) and valid_method
+        else "HTTP"
+        if url_in_name
+        else span.name
+    )
     if not keys and not paths and "url.query" not in attributes:
-        return replace_span(span, name=name) if valid_method else span
+        return replace_span(span, name=name) if valid_method or url_in_name else span
     copied = dict(attributes)
     copied.pop("url.query", None)
     url_length = _accepted_length(attributes, keys, bounds)
