@@ -393,7 +393,8 @@ Run your agent in it: hue world run <world version id> -- <command>
 
 The report is Hue's by app account: what it stored, normalized, stood in for, assumed, does not
 simulate and excluded. Each section prints its total, then a line per app (with its account
-when it has one) and collection, code, field or kind, with its count. A refused request or a failed World prints Hue's error code and its first
+when it has one) and collection, code, field or kind, with its count. A section Hue adds later
+prints only when it has entries. A refused request or a failed World prints Hue's error code and its first
 faults (a code, a record kind, its id and a field, never a value). The signed URLs are never
 printed.
 

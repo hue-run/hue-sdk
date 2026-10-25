@@ -50,6 +50,8 @@ function hue(
     pollRateLimited?: boolean;
     /** Every instance start answers that the World is still being prepared. */
     preparing?: boolean;
+    /** Runs when Hue receives the World creation, before it answers. */
+    onCreate?: () => Promise<unknown>;
   } = {},
 ) {
   const creations: Record<string, unknown>[] = [];
@@ -81,6 +83,9 @@ function hue(
             assumptions: [{ app: "linear", collection: "issues", field: "priority", count: 2 }],
             notSimulated: [{ app: "slack", account: "T01", kind: "webhooks", count: 1 }],
             excluded: [],
+            // Sections Hue adds later: an empty one prints nothing, one with entries prints them.
+            readings: [],
+            samples: [{ app: "linear", instanceKey: "linear", kind: "issue", count: 2 }],
             truncated: true,
           },
         }
@@ -110,6 +115,7 @@ function hue(
       if (url.pathname === "/api/v1/world-creations" && request.method === "POST") {
         const body = (await request.json()) as Record<string, unknown>;
         creations.push(body);
+        await options.onCreate?.();
         if (options.createStatus)
           return Response.json(options.createBody ?? {}, { status: options.createStatus });
         if (body.dryRun)
@@ -386,6 +392,8 @@ describe("hue world create", () => {
         "Not simulated: 1",
         "  slack (T01) webhooks: 1",
         "Excluded: none",
+        "samples: 2",
+        "  linear issue: 2",
         "The report lists its first rows only.",
         `Run your agent in it: hue world run ${VERSION} -- <command>`,
         "",
@@ -464,6 +472,20 @@ describe("hue world create", () => {
     expect(result.sleeps).toContain(1000);
     expect(result.stderr).toContain("World creation failed: records_invalid.");
     expect(result.stderr).toContain("  code missing_field, kind Issue, id issue-9, field title");
+  });
+
+  test("names a file removed between hashing and upload instead of crashing", async () => {
+    const dir = await scratch();
+    await mkdir(join(dir, "data"));
+    await writeFile(join(dir, "data", "issues.json"), "[]");
+    const stand = hue({ onCreate: () => rm(join(dir, "data", "issues.json")) });
+    const result = await world(
+      ["create", "--apps", "linear", "--files", "data", "--origin", stand.origin],
+      { cwd: dir },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`Error: Unable to read ${join("data", "issues.json")}: ENOENT`);
+    expect(stand.stored.size).toBe(0);
   });
 
   test("stops waiting at --wait and names where to follow the World", async () => {
