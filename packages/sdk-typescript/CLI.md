@@ -194,13 +194,14 @@ for staging). Hue's Settings page does not show these snippets; this command kee
   approve the connection; no key is involved. A new sign-in connection has **Read and
   write** access to every active project in the organization the consent page names, within your
   role, so an agent first calls `list_projects` and passes the chosen project's id as `project_id`.
-  The approval lasts 30 days; then sign in again. Sign-in covers the MCP server only: tracing and
-  `hue eval` still use a project key as `HUE_API_KEY`. It is available for `claude-code`, `codex`,
+  The approval has no fixed expiration; it lasts until the connection is disconnected in
+  **Settings → Connected apps**. Sign-in covers the MCP server only: tracing and `hue eval` still
+  use a project key as `HUE_API_KEY`. It is available for `claude-code`, `codex`,
   `conductor` and `cursor`; the other clients use a key.
 - `key` references the `HUE_MCP_KEY` environment variable, which `hue login` stores in
   `.env.hue`. A key value is never written. Use a key for read-only access (a **Read** key, which
-  only `hue login --keys coding-agent` accepts), for a run that cannot complete a browser sign-in
-  (CI, `claude -p`), or for access that must outlast 30 days.
+  only `hue login --keys coding-agent` accepts) or for a run that cannot complete a browser
+  sign-in (CI, `claude -p`).
 
 Without `--auth`, `claude-code`, `codex`, `conductor` and `cursor` sign in and the other clients
 use a key. `--read-only` (or `read_only=true` in `--url`) selects a key. Otherwise `claude-code`,
@@ -392,7 +393,8 @@ Run your agent in it: hue world run <world version id> -- <command>
 
 The report is Hue's by app account: what it stored, normalized, stood in for, assumed, does not
 simulate and excluded. Each section prints its total, then a line per app (with its account
-when it has one) and collection, code, field or kind, with its count. A refused request or a failed World prints Hue's error code and its first
+when it has one) and collection, code, field or kind, with its count. A section Hue adds later
+prints only when it has entries. A refused request or a failed World prints Hue's error code and its first
 faults (a code, a record kind, its id and a field, never a value). The signed URLs are never
 printed.
 
