@@ -1,9 +1,10 @@
-import { randomBytes, randomInt, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readdir, realpath, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:net";
 import { connectOwnedApplication, requestOwnedApplication } from "./socket.js";
 import { sdkVersion } from "../version.js";
 import { inspectExpressSource, inspectFlaskSource, type ApplicationSyntax } from "./source.js";
@@ -848,6 +849,24 @@ function validEvidence(value: unknown, version: 0 | 1): SetupStoredApplicationEv
   };
 }
 
+async function availableApplicationPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolvePromise, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolvePromise);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string")
+      throw new Error("Unable to select an application port");
+    return address.port;
+  } finally {
+    await new Promise<void>((resolvePromise, reject) => {
+      server.close((error) => (error ? reject(error) : resolvePromise()));
+    });
+  }
+}
+
 /** Starts the existing entrypoint without a shell and exercises one existing HTTP GET route. */
 export async function exerciseSetupApplication(
   store: FileSetupInstallationStore,
@@ -858,7 +877,7 @@ export async function exerciseSetupApplication(
     readinessMillis: number;
     requestMillis: number;
     evidenceMillis: number;
-    /** Internal loopback test seam; the public CLI always chooses a random port. */
+    /** Internal loopback test seam; the public CLI selects an available loopback port. */
     port?: number;
   } = { readinessMillis: 10_000, requestMillis: 10_000, evidenceMillis: 10_000 },
 ): Promise<SetupStoredApplicationEvidence> {
@@ -879,7 +898,7 @@ export async function exerciseSetupApplication(
   };
   await store.save(record);
   await store.removeApplicationEvidence();
-  const port = deadlines.port ?? randomInt(20_000, 60_000);
+  const port = deadlines.port ?? (await availableApplicationPort());
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error("Invalid application port");
   const socketProof = randomBytes(32).toString("base64url");
