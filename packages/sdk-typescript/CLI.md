@@ -9,6 +9,8 @@ npx --yes @hue-run/sdk@latest setup --agent
 npx @hue-run/sdk@latest setup
 ```
 
+Always use the scoped package name: `npx -y hue` installs an unrelated npm package.
+
 These public commands are not working onboarding promises until candidate publication, Fern
 activation, production acceptance and `latest` promotion all pass. The automatic matrix is limited
 to Express with npm, Express with Bun, and Flask with uv in a single application package with one recognizable
@@ -1156,7 +1158,8 @@ case or of the case conversion that published it, among the project's first 1,00
 `--set` by name, ID or URL with explicit `--scorer-version` pins; or `--dataset-version` with `--scorer-version`),
 creates a fresh run from those immutable pins named `<agent key> @ <revision>` (a commit hash is
 shortened to 7 characters)
-(`--name` overrides), prints `Run: <url>` and `Experiment: <id>` as soon as the experiment exists,
+(`--name` overrides), prints `Run: <url>` and `Run id: <id> (MCP get_run, list_run_items)` as
+soon as the run exists,
 one line per case event (world created, agent started, world sealed), then
 `Waiting for Hue checks...` and a table with one row per case: boolean metrics as `PASS`/`FAIL`,
 numbers as values, text and category metrics as-is, an overall result per case and a pass count.
@@ -1179,7 +1182,9 @@ its evidence says. A metric name that
 several evaluators report, such as two judges' `verdict`, gets a column per evaluator, labelled
 with the version's first eight characters. `--baseline <run id|url>` adds improvement,
 regression and unchanged counts with per-case deltas. `--json` prints one JSON document
-(`experimentId`, `runId`, `runUrl`, `complete`, `cases`, `totals`, optional `baseline`) on stdout
+(`experimentId`, `runId`, `runUrl`, `complete`, `cases`, `totals`, optional `baseline`) on stdout;
+`experimentId` is the run id that the MCP `get_run` and `list_run_items` tools take, `runId`
+the scoring run that produced the verdicts, and
 and sends progress to stderr; each case lists its not-applicable evaluator versions in
 `notApplicable` and its advisory ones in `advisory`, and `totals.notApplicable` counts the
 former; a case failed for its telemetry has `state: "error"`,
@@ -1352,8 +1357,10 @@ hue eval --set gia-d1-citation --set-version 1 --scorer gia-d1-citation ./hue-ag
 ```
 
 For each case the command is spawned once **inside a private case directory** with
-`HUE_CASE_DIR`, `HUE_CASE_INPUTS`, `HUE_CASE_OUTPUT_DIR`, `HUE_CASE_ID`, `HUE_CASE_KEY` and
-`HUE_EXECUTION_ID` in its environment (`{"inputs","config"}` is also written to stdin):
+`HUE_CASE_DIR`, `HUE_CASE_INPUTS`, `HUE_CASE_OUTPUT_DIR`, `HUE_CASE_ID`, `HUE_CASE_KEY`,
+`HUE_EXECUTION_ID` and `TRACEPARENT` (the execution's trace context, so an agent that
+honors W3C trace context joins its own spans to the execution) in its environment
+(`{"inputs","config"}` is also written to stdin):
 
 ```text
 <case dir>/inputs.json            the case inputs (for example {"query": "...", "tipo_diligencia": "Virtual"})

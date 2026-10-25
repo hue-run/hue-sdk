@@ -707,15 +707,14 @@ try {
       await flush(hue);
       const records = httpSpans(from);
       assert.equal(records.length, 4);
-      for (const span of records.filter((span) => attributes(span)["url.full"].endsWith("/gzip"))) {
-        const value = attributes(span)["output.value"];
-        if (value !== undefined)
-          assert.deepEqual(
-            JSON.parse(value),
-            JSON.parse(payload),
-            "wire gzip cannot be interpreted as JSON text",
-          );
-      }
+      const gzipSpans = records.filter((span) => attributes(span)["url.full"].endsWith("/gzip"));
+      assert.equal(gzipSpans.length, 2);
+      for (const span of gzipSpans)
+        assert.deepEqual(
+          JSON.parse(attributes(span)["output.value"]),
+          JSON.parse(payload),
+          "a gzip response is decoded for capture",
+        );
       assert.equal(
         attributes(records.find((span) => attributes(span)["url.full"].endsWith("/binary")))[
           "output.value"

@@ -1115,7 +1115,8 @@ process.stdout.write(JSON.stringify({ inputs, config, cwd: process.cwd(),
   staleMirror: process.env.HUE_SIM_NOTION_MCP_URL ?? null,
   environmentRunId: process.env.HUE_ENVIRONMENT_RUN_ID ?? null,
   hueKey: process.env.HUE_API_KEY ?? null,
-  mcpKey: process.env.HUE_MCP_KEY ?? null }));
+  mcpKey: process.env.HUE_MCP_KEY ?? null,
+  traceparent: /^00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]$/u.test(process.env.TRACEPARENT ?? "") }));
 `;
 
 async function workerWorkspace() {
@@ -1945,6 +1946,7 @@ describe("hue eval command workers", () => {
               staleMirror: null,
               hueKey: null,
               mcpKey: null,
+              traceparent: kind === "direct",
               descriptorKeys: [
                 "config",
                 "executionId",
@@ -2100,7 +2102,16 @@ describe("hue eval command workers", () => {
           output: {
             mode: "direct",
             itemKeys: ["externalKey", "id"],
-            keys: ["config", "executionId", "files", "item", "mode", "outputDirectory", "signal"],
+            keys: [
+              "config",
+              "executionId",
+              "files",
+              "item",
+              "mode",
+              "outputDirectory",
+              "signal",
+              "trace",
+            ],
           },
         });
         expect(standIn.worlds.size).toBe(0);
