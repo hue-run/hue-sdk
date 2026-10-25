@@ -9,6 +9,8 @@ import { hashInlineFiles, isMediaKey, mayInlineFiles } from "./inline-files.js";
 import { truncateUtf8 } from "./safety.js";
 import type { OffloadCollector } from "./blobs.js";
 import type { DigestedMessage } from "./snapshot.js";
+import type { ObservedHttpIdentity } from "./http-capture.js";
+import { scrubHttpUrl } from "./http-url.js";
 
 export { truncateUtf8 };
 
@@ -137,6 +139,10 @@ interface RedactionBudget {
 
 /** How one record is redacted: the receiver's value cap, and the value strings the queue cut. */
 export interface RedactionLimits {
+  /** Observed HTTP identity, normalized only on Hue's export snapshot. */
+  httpIdentity?: ObservedHttpIdentity;
+  /** Reports an identity omitted after a failed URL redactor. */
+  onHttpIdentityFailure?: () => void;
   /** The value cap in UTF-8 bytes. Default 1 MiB, the receiver's limit before it advertises one. */
   valueBytes?: number;
   /** The record's value strings cut when it was queued. */
@@ -516,6 +522,59 @@ export function redactSpan(
     ...(hosted.failed ? { "error.type": "mcp_error" } : {}),
     ...span.attributes,
   };
+  let httpUrls: Attributes = {};
+  if (limits.httpIdentity) {
+    const { method, url } = limits.httpIdentity;
+    const base = scrubHttpUrl(url);
+    source["http.request.method"] = method;
+    const legacy = typeof source["http.url"] === "string";
+    const target = typeof source["http.target"] === "string";
+    const path = typeof source["url.path"] === "string";
+    for (const key of ["url.full", "http.url", "http.target", "url.path", "url.query"])
+      delete source[key];
+    let parsed = base;
+    try {
+      // One canonical callback protects every alias; its answer must remain a safe HTTP URL.
+      parsed = scrubHttpUrl(
+        redactedText(base.href, "attributes.url.full", options, budget.valueBytes),
+      );
+      if (legacy)
+        parsed = scrubHttpUrl(
+          redactedText(parsed.href, "attributes.http.url", options, budget.valueBytes),
+        );
+      for (const key of [target ? "http.target" : undefined, path ? "url.path" : undefined]) {
+        if (!key) continue;
+        const value = redactedText(
+          parsed.pathname,
+          `attributes.${key}`,
+          options,
+          budget.valueBytes,
+        );
+        parsed.pathname = value;
+        parsed = scrubHttpUrl(parsed);
+      }
+      if (Buffer.byteLength(parsed.href) > budget.valueBytes)
+        throw new Error("HTTP URL exceeds its value cap");
+      httpUrls = {
+        "url.full": parsed.href,
+        ...(legacy ? { "http.url": parsed.href } : {}),
+        ...(target ? { "http.target": parsed.pathname } : {}),
+        ...(path ? { "url.path": parsed.pathname } : {}),
+      };
+      for (const value of Object.values(httpUrls))
+        if (typeof value === "string") budget.bytes += Buffer.byteLength(value);
+    } catch {
+      // A failed URL redactor leaves identity unavailable, never the unredacted aliases.
+      try {
+        limits.onHttpIdentityFailure?.();
+      } catch {
+        /* Reporting cannot restore unsafe identity. */
+      }
+    }
+    source["url.scheme"] = parsed.protocol.slice(0, -1);
+    source["server.address"] = parsed.hostname;
+    source["server.port"] = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+  }
   const status = {
     code:
       hosted.failed && span.status.code === SpanStatusCode.UNSET
@@ -553,8 +612,9 @@ export function redactSpan(
     attributes(source, options, "attributes", budget, "", true),
     budget,
   );
+  Object.assign(redactedAttributes, httpUrls);
   return {
-    name: span.name,
+    name: limits.httpIdentity?.method ?? span.name,
     kind: span.kind,
     spanContext: () => span.spanContext(),
     parentSpanContext: span.parentSpanContext,

@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/unbound-method -- Observers forward methods with Reflect.apply and the original receiver. */
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage, executionAsyncId } from "node:async_hooks";
 import { channel } from "node:diagnostics_channel";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import { types as utilTypes } from "node:util";
@@ -17,6 +17,12 @@ import { HUE_SCOPE } from "./config.js";
 import { contentLimitsOf, encodeBoundedContent, safeSpan, spanSource } from "./safety.js";
 import { TRUNCATED_KEY, truncatedMarker, withTruncatedKeys } from "./privacy.js";
 import { scrubCredentialTextUnbounded } from "./tool-definitions.js";
+import { scrubHttpUrl } from "./http-url.js";
+
+export interface ObservedHttpIdentity {
+  method: string;
+  url: string;
+}
 
 export interface HttpCaptureSource {
   tracer: Tracer;
@@ -34,7 +40,8 @@ interface CaptureOptions {
   source?: HttpCaptureSource;
 }
 
-const suppressed = new AsyncLocalStorage<boolean>();
+const suppressed = new AsyncLocalStorage<"export" | "fetch">();
+const startingHttpSpan = new AsyncLocalStorage<boolean>();
 const scopes = new AsyncLocalStorage<object>();
 /** Scope identity survives shutdown so a resumed callback cannot use another client's capture. */
 export function runHttpCaptureScope<T>(scope: object, work: () => T): T {
@@ -42,7 +49,7 @@ export function runHttpCaptureScope<T>(scope: object, work: () => T): T {
 }
 /** Export suppression also works when the application has no global OTel context manager. */
 export function suppressHttpCapture<T>(work: () => T): T {
-  return suppressed.run(true, work);
+  return suppressed.run("export", work);
 }
 
 const behaviorHeaders = new Set([
@@ -104,6 +111,13 @@ function scrubHttpText(text: string, depth = 0): string {
       return JSON.stringify(parseHttpJson(text, depth));
     } catch {
       /* Text can resemble JSON. */
+    }
+  }
+  if (/^https?:\/\//i.test(text)) {
+    try {
+      return scrubHttpUrl(text).href;
+    } catch {
+      /* Other text keeps the free-text filter. */
     }
   }
   return scrubCredentialTextUnbounded(text);
@@ -260,34 +274,95 @@ function modelSpan(span: Span | undefined): boolean {
   );
 }
 
-function sameHttpSpan(span: Span | undefined, method: string, url: URL): span is Span {
-  if (!span?.isRecording()) return false;
+function httpSpanIdentity(span: Span): { method: string; url: URL } | undefined {
+  if (!span.isRecording() || !(span.spanContext().traceFlags & 1)) return;
   const raw = spanSource(span);
-  if (!("kind" in raw) || raw.kind !== SpanKind.CLIENT) return false;
+  if (!("kind" in raw) || raw.kind !== SpanKind.CLIENT) return;
   const attrs = spanAttributes(span);
-  if ((attrs?.["http.request.method"] ?? attrs?.["http.method"]) !== method) return false;
+  if (
+    typeof attrs?.["gen_ai.tool.name"] === "string" ||
+    attrs?.["gen_ai.operation.name"] === "execute_tool" ||
+    typeof attrs?.["hue.tool.endpoint.source"] === "string"
+  )
+    return;
+  const method = attrs?.["http.request.method"] ?? attrs?.["http.method"];
   const recorded = attrs?.["url.full"] ?? attrs?.["http.url"];
-  if (typeof recorded !== "string") return false;
+  if (typeof method !== "string" || typeof recorded !== "string") return;
   try {
-    const candidate = new URL(recorded);
-    return (
-      candidate.origin === url.origin &&
-      candidate.pathname === url.pathname &&
-      (!candidate.search || candidate.search === url.search)
-    );
+    const url = new URL(recorded);
+    if (url.protocol === "http:" || url.protocol === "https:") return { method, url };
   } catch {
-    return false;
+    /* Non-HTTP client spans cannot match a network request. */
   }
 }
 
+function sameHttpSpan(span: Span | undefined, method: string, url: URL): span is Span {
+  if (!span) return false;
+  const identity = httpSpanIdentity(span);
+  return identity?.method === method && identity.url.href === url.href;
+}
+
+interface HttpCandidate {
+  span: Span;
+  method: string;
+  url: URL;
+  parent: Context;
+  parentId: string;
+  asyncId: number;
+  source: HttpCaptureSource;
+}
 interface Owner {
   options: CaptureOptions;
   readonly source: HttpCaptureSource;
   sources: Set<HttpCaptureSource>;
   pending: Set<Exchange>;
   observers: Map<() => void, HttpCaptureSource>;
+  candidates: Map<object, HttpCandidate>;
+  spans: WeakSet<object>;
+  candidatesOverflowed: boolean;
 }
 const owners = new Set<Owner>();
+const claimedHttpSpans = new WeakSet<object>();
+const observedHttpIdentities = new WeakMap<object, ObservedHttpIdentity>();
+const MAX_HTTP_CANDIDATES = 2048;
+
+function parentIdentity(parent: Context): string {
+  const ids = trace.getSpanContext(parent);
+  return ids ? `${ids.traceId}:${ids.spanId}` : "";
+}
+function claimHttpSpan(span: Span): boolean {
+  const raw = spanSource(span);
+  if (claimedHttpSpans.has(raw)) return false;
+  claimedHttpSpans.add(raw);
+  for (const owner of owners) owner.candidates.delete(raw);
+  return true;
+}
+/** Only one span begun in this execution and parent may own this physical request. */
+function reserveCandidate(
+  owner: Owner,
+  parent: Context,
+  method?: string,
+  url?: URL,
+): Span | undefined {
+  if (owner.candidatesOverflowed) return;
+  const asyncId = executionAsyncId();
+  const parentId = parentIdentity(parent);
+  let selected: HttpCandidate | undefined;
+  for (const candidate of owner.candidates.values()) {
+    if (
+      candidate.parent !== parent ||
+      candidate.parentId !== parentId ||
+      candidate.asyncId !== asyncId ||
+      claimedHttpSpans.has(spanSource(candidate.span)) ||
+      !candidate.span.isRecording() ||
+      (method !== undefined && (candidate.method !== method || candidate.url.href !== url?.href))
+    )
+      continue;
+    if (selected) return;
+    selected = candidate;
+  }
+  if (selected && claimHttpSpan(selected.span)) return selected.span;
+}
 
 class Exchange {
   readonly input: Body;
@@ -348,13 +423,13 @@ class Exchange {
         for (const [name, value] of this.responseHeaders)
           if (behaviorHeaders.has(name) || name === "content-type")
             this.span.setAttribute(`http.response.header.${name.replaceAll("-", "_")}`, value);
-        if (error !== undefined || !complete) {
+        if (this.ownsSpan && (error !== undefined || !complete)) {
           this.span.setAttribute(
             "error.type",
             error instanceof Error ? error.name : "incomplete_response",
           );
           this.span.setStatus({ code: SpanStatusCode.ERROR });
-        } else if (this.status !== undefined && this.status >= 400)
+        } else if (this.ownsSpan && this.status !== undefined && this.status >= 400)
           this.span.setStatus({ code: SpanStatusCode.ERROR });
         if (this.bodies) {
           if (this.requestComplete)
@@ -433,6 +508,7 @@ function begin(
   method: string,
   rawUrl: string,
   headers: unknown,
+  reserved?: { span: Span | undefined; active: Span | undefined },
 ): Exchange | undefined {
   const url = new URL(rawUrl);
   if (
@@ -441,39 +517,47 @@ function begin(
   )
     return;
   const local = trace.getSpan(parent);
-  const global = trace.getSpan(context.active());
+  const global = reserved ? reserved.active : trace.getSpan(context.active());
   if (isTracingSuppressed(parent)) return;
   const bodies = owner.options.bodies && !source.model() && !modelSpan(local) && !modelSpan(global);
-  const existing = sameHttpSpan(global, method, url)
-    ? global
-    : sameHttpSpan(local, method, url)
-      ? local
-      : undefined;
-  const safeUrl = new URL(url);
-  safeUrl.username = "";
-  safeUrl.password = "";
-  safeUrl.search = "";
-  safeUrl.hash = "";
+  const active =
+    sameHttpSpan(global, method, url) &&
+    owner.spans.has(spanSource(global)) &&
+    claimHttpSpan(global)
+      ? global
+      : sameHttpSpan(local, method, url) &&
+          owner.spans.has(spanSource(local)) &&
+          claimHttpSpan(local)
+        ? local
+        : undefined;
+  const candidate = reserved
+    ? reserved.span
+    : active
+      ? undefined
+      : reserveCandidate(owner, parent, method, url);
+  const existing = active ?? (sameHttpSpan(candidate, method, url) ? candidate : undefined);
+  const safeUrl = scrubHttpUrl(url);
   const span = safeSpan(
     existing ??
-      source.tracer.startSpan(
-        method,
-        {
-          kind: SpanKind.CLIENT,
-          attributes: {
-            "http.request.method": method,
-            "url.full": safeUrl.href,
-            "url.scheme": url.protocol.slice(0, -1),
-            "server.address": url.hostname,
-            "server.port": Number(url.port || (url.protocol === "https:" ? 443 : 80)),
+      startingHttpSpan.run(true, () =>
+        source.tracer.startSpan(
+          method,
+          {
+            kind: SpanKind.CLIENT,
+            attributes: {
+              "http.request.method": method,
+              "url.full": safeUrl.href,
+              "url.scheme": url.protocol.slice(0, -1),
+              "server.address": url.hostname,
+              "server.port": Number(url.port || (url.protocol === "https:" ? 443 : 80)),
+            },
           },
-        },
-        parent,
+          parent,
+        ),
       ),
     owner.options.failed,
   );
-  // Existing instrumentation can keep a credential-bearing URL; Hue's copy has the same policy.
-  span.setAttribute("url.full", safeUrl.href);
+  observedHttpIdentities.set(spanSource(span), { method, url: safeUrl.href });
   return new Exchange(owner, source, span, !existing, url, headersOf(headers), bodies);
 }
 
@@ -521,19 +605,25 @@ function undiciCreated(message: unknown): void {
         undiciExchanges.delete(request);
       });
       if (!exchange.bodies) return;
-      if (!("onData" in request) || typeof request.onData !== "function")
-        exchange.responseComplete = false;
+      const responseMethod =
+        "onData" in request && typeof request.onData === "function"
+          ? { key: "onData", original: request.onData }
+          : "onResponseData" in request && typeof request.onResponseData === "function"
+            ? { key: "onResponseData", original: request.onResponseData }
+            : undefined;
+      if (!responseMethod) exchange.responseComplete = false;
       if (!("onBodySent" in request) || typeof request.onBodySent !== "function")
         exchange.requestComplete = false;
-      if ("onData" in request && typeof request.onData === "function") {
-        const original = request.onData;
+      if (responseMethod) {
+        const original = responseMethod.original;
         const observer = function (this: unknown, ...args: unknown[]) {
           exchange.observe(exchange.output, args[0]);
           return Reflect.apply(original, this, args);
         };
-        const restore = observerRestorer(request, "onData", observer);
+        const restore = observerRestorer(request, responseMethod.key, observer);
         exchange.registerRestorer(restore);
-        request.onData = observer;
+        if (!Reflect.set(request, responseMethod.key, observer))
+          throw new TypeError("HTTP response observer is unavailable");
       }
       if ("onBodySent" in request && typeof request.onBodySent === "function") {
         const original = request.onBodySent;
@@ -589,10 +679,12 @@ function nodeCreated(message: unknown): void {
     typeof candidate !== "object" ||
     !("write" in candidate) ||
     !("end" in candidate) ||
+    !("flushHeaders" in candidate) ||
     !("emit" in candidate) ||
     !("getHeaders" in candidate) ||
     typeof candidate.write !== "function" ||
     typeof candidate.end !== "function" ||
+    typeof candidate.flushHeaders !== "function" ||
     typeof candidate.emit !== "function" ||
     typeof candidate.getHeaders !== "function"
   )
@@ -604,6 +696,12 @@ function nodeCreated(message: unknown): void {
   const request = candidate as ClientRequest;
   const source = owner.source;
   const parent = source.context();
+  // A later writer can have a different model scope and metadata from the request's creator.
+  const inCreationContext = AsyncLocalStorage.snapshot();
+  const reserved = {
+    span: reserveCandidate(owner, parent),
+    active: trace.getSpan(context.active()),
+  };
   let exchange: Exchange | undefined;
   let starting = false;
   let restoreRequest = () => {};
@@ -614,16 +712,26 @@ function nodeCreated(message: unknown): void {
       return;
     }
     starting = true;
-    safely(owner, () => {
-      const host = request.getHeader("host");
-      if (typeof host !== "string" || !host || !request.path) return;
-      const url = /^https?:\/\//.test(request.path)
-        ? request.path
-        : `${request.protocol ?? "http:"}//${host}${request.path}`;
-      exchange = begin(owner, source, parent, request.method, url, request.getHeaders());
-      if (exchange) exchange.registerRestorer(restoreRequest);
-      else restoreRequest();
-    });
+    safely(owner, () =>
+      inCreationContext(() => {
+        const host = request.getHeader("host");
+        if (typeof host !== "string" || !host || !request.path) return;
+        const url = /^https?:\/\//.test(request.path)
+          ? request.path
+          : `${request.protocol ?? "http:"}//${host}${request.path}`;
+        exchange = begin(
+          owner,
+          source,
+          parent,
+          request.method,
+          url,
+          request.getHeaders(),
+          reserved,
+        );
+        if (exchange) exchange.registerRestorer(restoreRequest);
+        else restoreRequest();
+      }),
+    );
     starting = false;
   };
   let writing = false;
@@ -644,13 +752,20 @@ function nodeCreated(message: unknown): void {
       writing = false;
     }
   };
+  const originalFlushHeaders = request.flushHeaders;
+  const flushHeaders = function (this: ClientRequest, ...args: unknown[]): void {
+    start();
+    return Reflect.apply(originalFlushHeaders, this, args);
+  };
   const originalEmit = request.emit;
   // A response listener would disable Node's automatic drain for unconsumed responses.
   const emit = function (this: ClientRequest, event: string | symbol, ...args: unknown[]): boolean {
     safely(owner, () => {
-      start();
-      if (event === "response" && exchange) observeResponse(args[0] as IncomingMessage, exchange);
-      else if (event === "error" || event === "abort" || event === "close") {
+      if (event === "response") {
+        start();
+        if (exchange) observeResponse(args[0] as IncomingMessage, exchange);
+      } else if (event === "error" || event === "abort" || event === "close") {
+        start();
         if (exchange) exchange.finish(false, event === "error" ? args[0] : undefined);
         else restoreRequest();
       }
@@ -660,6 +775,7 @@ function nodeCreated(message: unknown): void {
   const restorers = [
     observerRestorer(request, "write", write),
     observerRestorer(request, "end", end),
+    observerRestorer(request, "flushHeaders", flushHeaders),
     observerRestorer(request, "emit", emit),
   ];
   restoreRequest = () => {
@@ -671,6 +787,7 @@ function nodeCreated(message: unknown): void {
     try {
       request.write = write;
       request.end = end;
+      request.flushHeaders = flushHeaders;
       request.emit = emit;
     } catch (error) {
       restoreRequest();
@@ -849,25 +966,41 @@ function installFetch(): void {
     ...args: Parameters<typeof fetch>
   ): Promise<Response> {
     const [input, init] = args;
-    const send = () => suppressHttpCapture(() => Reflect.apply(fetcher, this, args));
+    const send = () =>
+      suppressed.run(suppressed.getStore() ?? "fetch", () => Reflect.apply(fetcher, this, args));
     const owner = selectOwner();
     if (!owner) return send();
-    let exchange: Exchange | undefined;
+    let observed:
+      | { method: string; url: string; headers: unknown; body: unknown; requestBody: boolean }
+      | undefined;
     safely(owner, () => {
       const observedOptions = fetchOptions(init);
       if (!observedOptions) return;
       if (!observableFetchHeaders(observedOptions.headers) || !observableFetchInput(input)) return;
       const request = input instanceof Request ? input : undefined;
+      observed = {
+        method: fetchMethod(observedOptions.method ?? request?.method ?? "GET"),
+        url: request?.url ?? String(input),
+        headers: observedOptions.headers ?? request?.headers,
+        body: observedOptions.body,
+        requestBody: !!request?.body,
+      };
+    });
+    // A delegating wrapper may start the existing HTTP span during this synchronous call.
+    const result = send();
+    let exchange: Exchange | undefined;
+    safely(owner, () => {
+      if (!observed || selectOwner() !== owner) return;
       exchange = begin(
         owner,
         owner.source,
         owner.source.context(),
-        fetchMethod(observedOptions.method ?? request?.method ?? "GET"),
-        request?.url ?? String(input),
-        observedOptions.headers ?? request?.headers,
+        observed.method,
+        observed.url,
+        observed.headers,
       );
       if (!exchange) return;
-      const body = observedOptions.body;
+      const body = observed.body;
       if (typeof body === "string" || body instanceof Uint8Array) {
         if (typeof body === "string" && !exchange.requestHeaders.has("content-type"))
           exchange.requestHeaders.set("content-type", "text/plain;charset=UTF-8");
@@ -878,11 +1011,11 @@ function installFetch(): void {
         if (!exchange.requestHeaders.has("content-type"))
           exchange.requestHeaders.set("content-type", "application/x-www-form-urlencoded");
         exchange.observe(exchange.input, body.toString());
-      } else if (body != null || request?.body) exchange.requestComplete = false;
+      } else if (body != null || observed.requestBody) exchange.requestComplete = false;
     });
     const captured = exchange;
-    if (!captured) return send();
-    return send().then(
+    if (!captured) return result;
+    return result.then(
       (response) => {
         try {
           const init = {
@@ -951,6 +1084,9 @@ function installFetch(): void {
 export function startHttpCapture(options: CaptureOptions): {
   use(source: HttpCaptureSource): () => void;
   stop(): void;
+  spanStarted(span: Span, parent: Context): void;
+  identity(span: object): ObservedHttpIdentity | undefined;
+  spanEnded(span: object): ObservedHttpIdentity | undefined;
 } {
   const fallback: HttpCaptureSource = {
     tracer: trace.getTracer(HUE_SCOPE),
@@ -972,6 +1108,9 @@ export function startHttpCapture(options: CaptureOptions): {
     },
     pending: new Set(),
     observers: new Map(),
+    candidates: new Map(),
+    spans: new WeakSet(),
+    candidatesOverflowed: false,
   };
   if (!owners.size) {
     for (const [captureChannel, listener] of channels) captureChannel.subscribe(listener);
@@ -983,8 +1122,53 @@ export function startHttpCapture(options: CaptureOptions): {
       if (!source || exchange.source === source) exchange.finish(false, undefined, true);
     for (const [restore, registered] of owner.observers)
       if (!source || registered === source) safely(owner, restore);
+    for (const [span, candidate] of owner.candidates)
+      if (!source || candidate.source === source) owner.candidates.delete(span);
   };
   return {
+    spanStarted(span, parent) {
+      safely(owner, () => {
+        if (owners.has(owner)) owner.spans.add(spanSource(span));
+        if (
+          !owners.has(owner) ||
+          startingHttpSpan.getStore() ||
+          suppressed.getStore() === "export" ||
+          isTracingSuppressed(parent) ||
+          owner.candidatesOverflowed
+        )
+          return;
+        const identity = httpSpanIdentity(span);
+        if (!identity || claimedHttpSpans.has(spanSource(span))) return;
+        if (owner.candidates.size >= MAX_HTTP_CANDIDATES) {
+          owner.candidates.clear();
+          owner.candidatesOverflowed = true;
+          queueMicrotask(() => {
+            owner.candidatesOverflowed = false;
+          });
+          return;
+        }
+        const raw = spanSource(span);
+        const candidate: HttpCandidate = {
+          span,
+          ...identity,
+          parent,
+          parentId: parentIdentity(parent),
+          asyncId: executionAsyncId(),
+          source: owner.source,
+        };
+        owner.candidates.set(raw, candidate);
+        queueMicrotask(() => {
+          if (owner.candidates.get(raw) === candidate) owner.candidates.delete(raw);
+        });
+      });
+    },
+    identity(span) {
+      return observedHttpIdentities.get(span);
+    },
+    spanEnded(span) {
+      owner.candidates.delete(span);
+      return observedHttpIdentities.get(span);
+    },
     use(source) {
       if (!owners.has(owner)) return () => {};
       owner.sources.add(source);

@@ -875,6 +875,11 @@ Hue's export traffic is excluded. HTTP requests within model spans retain identi
 content, because model adapters record that content. A `hue.tool()` nested inside a model span
 resumes HTTP content capture for its own calls.
 
+Hue can enrich an application's existing HTTP CLIENT span instead of creating a second span.
+It uses an active matching span or one matching span started synchronously under the same
+provider and parent. Each span is used once, so concurrent requests and retries keep separate
+exchanges. Ambiguous matches receive a Hue HTTP span.
+
 Each body is bounded by the receiver's value cap, 1 MiB by default. A body over the cap records
 Hue's existing truncation marker instead of a partial JSON value. The span's `hue.truncated`
 array names the affected `input.value` or `output.value`; a cut body is incomplete evidence,
@@ -892,8 +897,21 @@ JSON-encoded. Authorization and cookie headers are never recorded. HTTP content 
 authorization, cookies, API keys, exact token fields and secret/password fields, while keeping
 pagination fields such as `nextPageToken`.
 
+Recorded URLs also redact recognized credential path segments, including credential-labeled
+slots such as `/token/<value>`, bot-token segments and Slack incoming-webhook secrets. Ordinary
+resource IDs keep their spelling. For a borrowed span, Hue sanitizes its export snapshot's name,
+URL and legacy URL aliases. Other exporters keep the application's existing naming and URL
+policy. Live HTTP placeholders use the same sanitization.
+
+HTTP URL redaction runs in both content modes. The canonical hooks are `attributes.url.full`
+and any present `attributes.http.url`, `attributes.http.target` or `attributes.url.path` alias.
+Hue sanitizes the callback's answer again. A callback that throws or returns an invalid or
+oversized URI causes the URI attributes to be omitted and an instrumentation failure to be
+reported; the original URI is never restored.
+
 On Node.js 22 and 24, Hue observes per-request diagnostics and copies bytes as the client sends
-or receives them. Bun's `node:http` and `node:https` use the same diagnostics path. Bun's native
+or receives them. Node.js 26's `onResponseData` callback is also verified in CI. Bun's `node:http`
+and `node:https` use the same diagnostics path. Bun's native
 `fetch` uses a wrapper, so create Hue before API clients that save a reference to `fetch`.
 Capture adds no response clone or independent reader and does not drain an unread response.
 An unread or aborted stream can leave its content incomplete. Bun native fetch records request

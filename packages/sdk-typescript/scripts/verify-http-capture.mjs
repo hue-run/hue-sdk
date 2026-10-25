@@ -373,6 +373,181 @@ try {
       }
     });
 
+  await check(
+    "credential paths are scrubbed while loopback request bytes remain unchanged",
+    async () => {
+      const paths = [
+        ["/bot123456789:synthetic_telegram_secret/getMe", "synthetic_telegram_secret"],
+        [
+          "/services/TSYNTHETIC/BSYNTHETIC/synthetic_slack_webhook_secret",
+          "synthetic_slack_webhook_secret",
+        ],
+        ["/token/synthetic_explicit_path_secret/items", "synthetic_explicit_path_secret"],
+        [
+          "/services/TSYNTHETIC/BSYNTHETIC/synthetic_slack_trailing_secret/",
+          "synthetic_slack_trailing_secret",
+        ],
+        ["/token//synthetic_empty_segment_secret/items", "synthetic_empty_segment_secret"],
+        ["/prefix/api_key%2Fsynthetic_encoded_slash_secret/safe", "synthetic_encoded_slash_secret"],
+        ["/%62ot123456789%3Asynthetic_encoded_path_secret/getMe", "synthetic_encoded_path_secret"],
+        ["/a%70i%5Fkey/synthetic_encoded_label_secret/items", "synthetic_encoded_label_secret"],
+        [
+          "/credentials/sk-synthetic123456789012345678901234567890/records",
+          "sk-synthetic123456789012345678901234567890",
+        ],
+      ];
+      for (const captureHttp of [false, true]) {
+        const hue = createHue({ ...options, captureHttp });
+        const from = spans.length;
+        const before = incoming.length;
+        try {
+          for (const [path] of paths) await nodeRequest(path);
+          await flush(hue);
+          assert.deepEqual(
+            incoming.slice(before).map((request) => request.path),
+            paths.map(([path]) => path),
+          );
+          const records = httpSpans(from);
+          assert.equal(records.length, captureHttp ? paths.length : 0);
+          for (const [, secret] of paths) assert.ok(!JSON.stringify(records).includes(secret));
+          if (captureHttp)
+            for (let index = 0; index < paths.length; index++) {
+              const suffix = paths[index][0].endsWith("/items")
+                ? "/items"
+                : paths[index][0].endsWith("/safe")
+                  ? "/safe"
+                  : undefined;
+              if (suffix)
+                assert.ok(
+                  attributes(records[index])["url.full"].endsWith(suffix),
+                  "masking one raw segment cannot swallow an ordinary route suffix",
+                );
+            }
+        } finally {
+          await hue.shutdownSafe();
+        }
+      }
+    },
+  );
+
+  await check("ordinary resource IDs and raw percent encoding survive URL capture", async () => {
+    const hue = createHue(options);
+    const from = spans.length;
+    const paths = [
+      "/messages/msg-123456789_abc/v1.2.3",
+      "/objects/item%2Fidentifier/Caf%C3%A9",
+      "/services/T123/B456/ordinary-resource/records",
+      "/groups/tokenizer/ordinary-id",
+    ];
+    try {
+      for (const path of paths) await nodeRequest(path);
+      await flush(hue);
+      assert.deepEqual(
+        httpSpans(from).map((span) => attributes(span)["url.full"]),
+        paths.map((path) => `${targetUrl}${path}`),
+      );
+    } finally {
+      await hue.shutdownSafe();
+    }
+  });
+
+  await check("whole URL strings in HTTP JSON bodies scrub credential paths", async () => {
+    const hue = createHue(options);
+    const from = spans.length;
+    const links = {
+      telegram: "https://api.telegram.org/bot123456789:synthetic_body_telegram_secret/getMe",
+      slack: "https://hooks.slack.com/services/TSYNTHETIC/BSYNTHETIC/synthetic_body_slack_secret",
+      ordinary: "https://api.example.test/objects/item%2Fidentifier",
+    };
+    try {
+      await nodeRequest("/credential-links", "async", Buffer.from(JSON.stringify(links)));
+      await flush(hue);
+      const records = httpSpans(from);
+      assert.equal(records.length, 1);
+      const serialized = JSON.stringify(records);
+      assert.ok(!serialized.includes("synthetic_body_telegram_secret"));
+      assert.ok(!serialized.includes("synthetic_body_slack_secret"));
+      assert.equal(JSON.parse(attributes(records[0])["input.value"]).ordinary, links.ordinary);
+    } finally {
+      await hue.shutdownSafe();
+    }
+  });
+
+  await check(
+    "URL redaction runs once for aliases and cannot reintroduce credentials",
+    async () => {
+      for (const mode of ["reintroduce", "legacy", "invalid", "throw"]) {
+        const calls = { full: 0, legacy: 0, target: 0, path: 0 };
+        const hue = createHue({
+          ...options,
+          redact: (value, path) => {
+            if (path === "attributes.url.full") calls.full++;
+            else if (path === "attributes.http.url") calls.legacy++;
+            else if (path === "attributes.http.target") calls.target++;
+            else if (path === "attributes.url.path") calls.path++;
+            else return value;
+            if (mode === "legacy")
+              return path === "attributes.http.url"
+                ? `${targetUrl}/token/synthetic_legacy_reintroduced_secret/items`
+                : value;
+            if (path !== "attributes.url.full") return value;
+            if (mode === "throw") throw new Error("synthetic URL redactor failure");
+            return mode === "invalid"
+              ? "not a URL"
+              : `${targetUrl}/token/synthetic_reintroduced_secret/items?access_token=synthetic_reintroduced_query`;
+          },
+        });
+        const from = spans.length;
+        try {
+          await hue.tracer.startActiveSpan(
+            "manual URL aliases",
+            {
+              kind: SpanKind.CLIENT,
+              attributes: {
+                "http.method": "GET",
+                "http.url": `${targetUrl}/small-reply`,
+                "http.target": "/small-reply",
+                "url.path": "/small-reply",
+              },
+            },
+            async (span) => {
+              try {
+                await nodeRequest("/small-reply");
+              } finally {
+                span.end();
+              }
+            },
+          );
+          await hue.flushSafe();
+          const records = httpSpans(from);
+          assert.equal(records.length, 1);
+          const attrs = attributes(records[0]);
+          assert.equal(calls.full, 1);
+          if (mode === "reintroduce" || mode === "legacy") {
+            assert.equal(calls.legacy, 1);
+            assert.equal(calls.target, 1);
+            assert.equal(calls.path, 1);
+            assert.equal(attrs["url.full"], attrs["http.url"]);
+            assert.equal(attrs["http.target"], new URL(attrs["url.full"]).pathname);
+            assert.equal(attrs["url.path"], attrs["http.target"]);
+            assert.ok(attrs["url.full"].endsWith("/items"));
+          } else {
+            assert.equal(attrs["url.full"], undefined);
+            assert.equal(attrs["http.url"], undefined);
+            assert.equal(attrs["http.target"], undefined);
+            assert.equal(attrs["url.path"], undefined);
+            assert.ok(hue.transport.getReport().instrumentationFailures > 0);
+          }
+          assert.ok(!JSON.stringify(records).includes("synthetic_legacy_reintroduced_secret"));
+          assert.ok(!JSON.stringify(records).includes("synthetic_reintroduced_secret"));
+          assert.ok(!JSON.stringify(records).includes("synthetic_reintroduced_query"));
+        } finally {
+          await hue.shutdownSafe();
+        }
+      }
+    },
+  );
+
   await check("custom redaction", async () => {
     const hue = createHue({
       ...options,
@@ -423,6 +598,95 @@ try {
       await hue.shutdownSafe();
     }
   });
+
+  await check(
+    "HTTP creation scope survives late headers and a different writing scope",
+    async () => {
+      const hue = createHue(options);
+      const from = spans.length;
+      const pendingRequest = (path) => {
+        const done = Promise.withResolvers();
+        const ready = Promise.withResolvers();
+        const request = http.request(`${targetUrl}${path}`, { method: "POST" }, (response) => {
+          assert.equal(response.listenerCount("data"), 0);
+          assert.equal(response.listenerCount("readable"), 0);
+          const chunks = [];
+          response.on("data", (chunk) => chunks.push(chunk));
+          response.once("end", () => done.resolve(Buffer.concat(chunks).toString()));
+        });
+        request.once("socket", ready.resolve);
+        request.once("error", done.reject);
+        if (request.socket) ready.resolve();
+        return { request, done: done.promise, ready: ready.promise };
+      };
+      let ordinaryParent;
+      let modelParent;
+      try {
+        await hue.withSpan(
+          "ordinary HTTP creator",
+          async (span) => {
+            ordinaryParent = Buffer.from(span.spanId, "hex").toString("base64");
+            const call = pendingRequest("/ordinary-created");
+            await call.ready;
+            await delay(20);
+            await hue.model(
+              "synthetic-writer",
+              async () => {
+                call.request.setHeader("content-type", "application/json");
+                assert.equal(call.request.flushHeaders(), undefined);
+                await delay(10);
+                call.request.end('{"creator":"ordinary"}');
+                assert.equal(JSON.parse(await call.done).ok, true);
+              },
+              { provider: "synthetic", sessionId: "writer-session", userId: "writer-user" },
+            );
+          },
+          { sessionId: "creator-session", userId: "creator-user" },
+        );
+        await hue.model(
+          "synthetic-creator",
+          async (span) => {
+            modelParent = Buffer.from(span.spanId, "hex").toString("base64");
+            const call = pendingRequest("/model-created");
+            await call.ready;
+            await delay(20);
+            await hue.tool(
+              "ordinary HTTP writer",
+              {},
+              async () => {
+                call.request.setHeader("content-type", "application/json");
+                call.request.end('{"creator":"model"}');
+                assert.equal(JSON.parse(await call.done).ok, true);
+              },
+              { sessionId: "writer-session", userId: "writer-user" },
+            );
+          },
+          { provider: "synthetic", sessionId: "model-session", userId: "model-user" },
+        );
+        await flush(hue);
+        const recorded = httpSpans(from);
+        assert.equal(recorded.length, 2);
+        const ordinary = recorded.find((span) =>
+          attributes(span)["url.full"].endsWith("/ordinary-created"),
+        );
+        const model = recorded.find((span) =>
+          attributes(span)["url.full"].endsWith("/model-created"),
+        );
+        assert.equal(ordinary.parentSpanId, ordinaryParent);
+        assert.equal(attributes(ordinary)["gen_ai.conversation.id"], "creator-session");
+        assert.equal(attributes(ordinary)["user.id"], "creator-user");
+        assert.deepEqual(JSON.parse(attributes(ordinary)["input.value"]), { creator: "ordinary" });
+        assert.equal(JSON.parse(attributes(ordinary)["output.value"]).ok, true);
+        assert.equal(model.parentSpanId, modelParent);
+        assert.equal(attributes(model)["gen_ai.conversation.id"], "model-session");
+        assert.equal(attributes(model)["user.id"], "model-user");
+        assert.equal(attributes(model)["input.value"], undefined);
+        assert.equal(attributes(model)["output.value"], undefined);
+      } finally {
+        await hue.shutdownSafe();
+      }
+    },
+  );
 
   await check("gzip wire bytes, binary and truncation", async () => {
     const hue = createHue(options);
@@ -955,7 +1219,14 @@ try {
     "read-only HTTP methods cannot change application bytes or crash the process",
     async () => {
       const sdk = JSON.stringify(pathToFileURL(require.resolve("@hue-run/sdk")).href);
-      for (const frozen of ["write", "end", "emit", "response.push", "response.emit"]) {
+      for (const frozen of [
+        "write",
+        "end",
+        "flushHeaders",
+        "emit",
+        "response.push",
+        "response.emit",
+      ]) {
         const outputs = [];
         for (const captureHttp of [false, true]) {
           const setup = frozen.startsWith("response.")

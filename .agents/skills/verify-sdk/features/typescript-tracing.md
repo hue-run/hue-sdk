@@ -132,7 +132,7 @@ Use `bun test tests/tool-endpoint.test.ts` against the loopback receiver. Check 
 
 Run `bun test tests/http-capture.test.ts` from `packages/sdk-typescript`, then repeat the file
 against the installed tarball. From the repository root, run the native driver against that same
-consumer with Node.js 22, Node.js 24 and Bun 1.4.2:
+consumer with Node.js 22, Node.js 24, the CI-tested Node.js 26, and Bun 1.4.2:
 
 ```sh
 node packages/sdk-typescript/scripts/verify-http-capture.mjs <installed-consumer> --clients
@@ -141,6 +141,19 @@ node packages/sdk-typescript/scripts/verify-http-capture.mjs <installed-consumer
 `verify-package.mjs` runs this driver for Node and Bun. `--clients` exercises installed axios,
 node-fetch, got, gaxios, googleapis, Slack, undici, Linear and Notion clients against synthetic
 loopback services. It requires their test dependencies in the consumer; no live provider is used.
+
+The installed consumer for the provider integration also needs `@vercel/otel@2.1.3`:
+
+```sh
+node packages/sdk-typescript/scripts/verify-http-capture-vercel.mjs <installed-consumer>
+```
+
+This driver uses the real instrumentor. Check one bodyful span per physical fetch or HTTP
+request, delayed bodies, concurrent identical URLs with distinct inputs and reversed responses,
+retries, metadata-only mode and restart. Its generic reservation cases check creation context,
+pending-span privacy, single-use claims, ambiguous and expired candidates, and overflow fallback.
+Existing providers,
+other exporters' naming and URL policy, and the request's headers must remain unchanged.
 
 Inspect exported CLIENT spans for scrubbed HTTP identity, query arguments in `input.value`,
 request bodies merged with those arguments, parsed JSON or text response bodies in `output.value`,
@@ -156,12 +169,21 @@ model identity without content, nested tools resuming HTTP content, borrowed pro
 multiple-client shutdown. Request headers, including an
 existing `traceparent`, must reach the server unchanged.
 
+Verify URL/name/legacy-alias sanitization on Hue's borrowed-span export snapshot in both
+content modes, including live placeholders. Recognized credential path segments are redacted
+while ordinary resource IDs retain their spelling. Canonical URL redaction hooks must run,
+their answers must be sanitized again, and invalid answers must omit URI fields and report an
+instrumentation failure. Confirm delayed `setHeader` and `flushHeaders` capture the headers
+actually sent, with creator parent, model-content policy, session and user metadata preserved
+when another scope writes later. No SDK `data` or `readable` listener may be added.
+
 Exercise late, paused, piped, async-iterated, unread and aborted responses, chunked and fixed
 lengths, and gzip. Compressed wire bytes must not be parsed as JSON. The instrumentation must
 not introduce a response clone reader or an unbounded body buffer.
 
-Node.js 22 lacks undici body-chunk diagnostics. Both tested Node versions expose per-request
-`onData` and `onBodySent` callbacks, which Hue observes without cloning a response. Bun 1.4.2
+Node.js 22 lacks undici body-chunk diagnostics. Node.js 22 and 24 expose per-request `onData`
+and `onBodySent` callbacks; Node.js 26's response observer uses `onResponseData`. Hue observes
+these callbacks without cloning a response. Bun 1.4.2
 publishes `http.client.*` for `node:http`, but no undici channels for native `fetch`; its fetch
 path is a pull-driven response wrapper. Body-bearing `Request` objects, `Blob`, `FormData` and
 stream request bodies in that fallback omit `input.value`, preserving application consumption.

@@ -88,7 +88,12 @@ import {
   type ResourceCache,
 } from "./privacy.js";
 import { otlpExporterVersion, sdkVersion } from "./version.js";
-import { startHttpCapture, suppressHttpCapture, type HttpCaptureSource } from "./http-capture.js";
+import {
+  startHttpCapture,
+  suppressHttpCapture,
+  type HttpCaptureSource,
+  type ObservedHttpIdentity,
+} from "./http-capture.js";
 import type { ExportIssue, ExportReport, HueOptions, Signal } from "./types.js";
 
 type Response = {
@@ -363,6 +368,7 @@ export class HueTransport {
   private closed = false;
   private shutdownPromise?: Promise<ExportReport>;
   private httpCapture?: ReturnType<typeof startHttpCapture>;
+  private httpIdentities = new WeakMap<ReadableSpan, ObservedHttpIdentity>();
   /** The latest flush's send of its records; the next flush's send starts after it. */
   private sendPromise?: Promise<unknown>;
   /** Set while a flush sends its records: the processors leave the uploads to that flush, which
@@ -448,6 +454,14 @@ export class HueTransport {
           valueBytes: this.limits.valueBytes,
           cut: this.admissionCuts.get(span),
           digested: this.admissionDigests.get(span),
+          httpIdentity: this.httpIdentities.get(span),
+          onHttpIdentityFailure: () =>
+            this.instrumentationFailure(
+              "traces",
+              "HTTP URL redaction failed; identity omitted",
+              1,
+              span.spanContext().traceId,
+            ),
           ...(offload ? { offload } : {}),
         });
       },
@@ -497,6 +511,7 @@ export class HueTransport {
     this.spanProcessor = {
       onStart: (span, parent) => {
         try {
+          this.httpCapture?.spanStarted(span, parent);
           spans.onStart(span, parent);
         } catch {
           this.instrumentationFailure();
@@ -504,6 +519,7 @@ export class HueTransport {
         this.track(span);
       },
       onEnd: (span) => {
+        const httpIdentity = this.httpCapture?.spanEnded(span);
         if (this.live.delete(span) && !this.live.size) this.stopLiveTimer();
         let admitted: ReadableSpan | undefined;
         try {
@@ -521,6 +537,7 @@ export class HueTransport {
             return;
           }
           admitted = queued as ReadableSpan;
+          if (httpIdentity) this.httpIdentities.set(admitted, httpIdentity);
           this.protectMedia(admitted);
           this.countEnded(admitted);
           spans.onEnd(admitted);
@@ -791,6 +808,8 @@ export class HueTransport {
         const { record, markers } = pendingPlaceholder(span);
         const admitted = this.enqueue("traces", record, true) as ReadableSpan | undefined;
         if (!admitted) continue;
+        const identity = this.httpCapture?.identity(span);
+        if (identity) this.httpIdentities.set(admitted, identity);
         this.placeholders.set(admitted, markers);
         this.placeholderSources.set(admitted, span);
         try {
