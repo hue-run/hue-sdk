@@ -14,6 +14,7 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTrace
 
 from hue_sdk import Hue
 
+NEXT_PAGE_TOKEN = "synthetic-next-page"
 MESSAGES = [
     {
         "id": f"synthetic-{index}",
@@ -74,6 +75,7 @@ def verify(options: dict[str, bool]) -> None:
                 payload = {
                     "messages": [{"id": m["id"], "threadId": m["threadId"]} for m in MESSAGES],
                     "resultSizeEstimate": len(MESSAGES),
+                    "nextPageToken": NEXT_PAGE_TOKEN,
                 }
             else:
                 payload = next((m for m in MESSAGES if route.path == f"{prefix}/{m['id']}"), None)
@@ -146,7 +148,11 @@ def verify(options: dict[str, bool]) -> None:
         f"Expected {expected_clients} HTTP spans, got {len(clients)}."
     )
     assert len(exports) == 2 + expected_clients, f"Unexpected exported spans: {len(exports)}."
-    bodies = options.get("capture_content", True) and options.get("capture_http_bodies", True)
+    bodies = (
+        options.get("capture_http", True)
+        and options.get("capture_content", True)
+        and options.get("capture_http_bodies", True)
+    )
     for span in clients:
         attrs = attributes(span)
         assert span.parent_span_id == tools[0].span_id, "HTTP span must be a tool child."
@@ -165,17 +171,19 @@ def verify(options: dict[str, bool]) -> None:
                 {
                     "messages": [{"id": m["id"], "threadId": m["threadId"]} for m in MESSAGES],
                     "resultSizeEstimate": 5,
+                    "nextPageToken": NEXT_PAGE_TOKEN,
                 }
                 if attrs["url.full"].endswith("/messages")
                 else next(m for m in MESSAGES if attrs["url.full"].endswith(f"/{m['id']}"))
-            )
+            ), output
         else:
             assert "input.value" not in attrs and "output.value" not in attrs
     wire = b"".join(exported_bodies)
     assert b"synthetic-gmail-access-token" not in wire, "Gmail authorization must not be exported."
     assert b"synthetic-verify-key" not in wire, "Hue authorization must not be exported."
-    if not bodies or not options.get("capture_http", True):
+    if not bodies:
         assert b"Synthetic message " not in wire and b"Synthetic subject " not in wire
+        assert NEXT_PAGE_TOKEN.encode() not in wire
     assert acknowledgements, "The receiver must acknowledge a real OTLP export."
     print(
         json.dumps(

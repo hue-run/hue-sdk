@@ -25,12 +25,14 @@ const traceRequest = protobuf
 `,
   )
   .root.lookupType("Request");
+const nextPageToken = "synthetic-next-page";
 const messages = Array.from({ length: 5 }, (_, index) => ({
   id: `synthetic-${index + 1}`,
   threadId: `thread-${index + 1}`,
   snippet: `Synthetic unread message ${index + 1}`,
   payload: {
     mimeType: "text/plain",
+    headers: [{ name: "Subject", value: `Synthetic subject ${index + 1}` }],
     body: { data: Buffer.from(`Synthetic content ${index + 1}`).toString("base64url") },
   },
 }));
@@ -72,6 +74,7 @@ for (const [policy, options, expectHttp, expectBodies] of [
       body = {
         messages: messages.map(({ id, threadId }) => ({ id, threadId })),
         resultSizeEstimate: 5,
+        nextPageToken,
       };
     } else {
       assert.equal(url.searchParams.get("format"), "full");
@@ -172,6 +175,7 @@ for (const [policy, options, expectHttp, expectBodies] of [
           assert.deepEqual(output, {
             messages: messages.map(({ id, threadId }) => ({ id, threadId })),
             resultSizeEstimate: 5,
+            nextPageToken,
           });
         } else {
           assert.deepEqual(
@@ -187,7 +191,11 @@ for (const [policy, options, expectHttp, expectBodies] of [
     const wire = Buffer.concat(payloads);
     assert.ok(!wire.includes(Buffer.from("synthetic-gmail-token")));
     assert.ok(!wire.includes(Buffer.from("synthetic-hue-key")));
-    if (!expectBodies) assert.ok(!wire.includes(Buffer.from("Synthetic unread message")));
+    if (!expectBodies) {
+      assert.ok(!wire.includes(Buffer.from("Synthetic unread message")));
+      assert.ok(!wire.includes(Buffer.from("Synthetic subject")));
+      assert.ok(!wire.includes(Buffer.from(nextPageToken)));
+    }
     console.log(
       JSON.stringify({
         mode: "offline",
