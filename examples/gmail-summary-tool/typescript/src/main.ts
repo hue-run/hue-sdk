@@ -5,7 +5,7 @@ import { z } from "zod";
 
 const messageSchema = z.object({ id: z.string().min(1) });
 const listSchema = z.object({ messages: z.array(messageSchema).default([]) });
-type Gmail = { baseUrl: string; accessToken: string };
+type Gmail = { baseUrl: string; accessToken: string; maxResults?: number };
 
 // This helper returns a summary, as an ordinary agent tool would.
 export async function summarizeInbox(gmail: Gmail) {
@@ -17,7 +17,9 @@ export async function summarizeInbox(gmail: Gmail) {
     if (!response.ok) throw new Error(`Gmail request failed with HTTP ${response.status}`);
     return response.json();
   }
-  const page = listSchema.parse(await get("messages?maxResults=5&q=is%3Aunread"));
+  const page = listSchema.parse(
+    await get(`messages?maxResults=${gmail.maxResults ?? 5}&q=is%3Aunread`),
+  );
   const ids: string[] = [];
   for (const message of page.messages.slice(0, 5)) {
     const full = messageSchema.parse(
@@ -31,8 +33,10 @@ export async function summarizeInbox(gmail: Gmail) {
 export async function runSummary(hue: ReturnType<typeof createHue>, gmail: Gmail) {
   return hue.withSpan("inbox.request", async (span) => {
     span.setInput({ task: "Summarize up to five unread messages" });
-    const summary = await hue.tool("summarize_inbox", { maxResults: 5, q: "is:unread" }, () =>
-      summarizeInbox(gmail),
+    const summary = await hue.tool(
+      "summarize_inbox",
+      { maxResults: gmail.maxResults ?? 5, q: "is:unread" },
+      () => summarizeInbox(gmail),
     );
     span.setOutput(summary);
     return { summary, traceId: span.traceId };

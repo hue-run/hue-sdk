@@ -48,6 +48,7 @@ def serve(handler):
 
 def verify(options: dict[str, bool], *, model_scope: bool = False, canonical: bool = False) -> None:
     fixture_name = None
+    max_results = 5
     messages = MESSAGES
     listing = {
         "messages": [{"id": m["id"], "threadId": m["threadId"]} for m in messages],
@@ -56,9 +57,12 @@ def verify(options: dict[str, bool], *, model_scope: bool = False, canonical: bo
     }
     if canonical:
         fixture = json.loads(
-            (Path(__file__).resolve().parents[1] / "fixtures" / "canonical-gmail.json").read_text()
+            (
+                Path(__file__).resolve().parents[1] / "fixtures" / "canonical-gmail-v2.json"
+            ).read_text()
         )
         fixture_name = fixture["name"]
+        max_results = fixture["maxResults"]
         messages, listing = fixture["messages"], fixture["list"]
     exports = []
     exported_bodies: list[bytes] = []
@@ -97,7 +101,7 @@ def verify(options: dict[str, bool], *, model_scope: bool = False, canonical: bo
             route = urlsplit(self.path)
             prefix = "/gmail/v1/users/me/messages"
             if route.path == prefix and parse_qs(route.query) == {
-                "maxResults": ["5"],
+                "maxResults": [str(max_results)],
                 "q": ["is:unread"],
             }:
                 payload = listing
@@ -150,7 +154,9 @@ def verify(options: dict[str, bool], *, model_scope: bool = False, canonical: bo
                         )
                         before.raise_for_status()
                         assert before.json() == {"completion": "synthetic-provider-response"}
-                        trace_id, summary = run(hue, gmail_url, "synthetic-gmail-access-token")
+                        trace_id, summary = run(
+                            hue, gmail_url, "synthetic-gmail-access-token", max_results=max_results
+                        )
                         after = provider.post(
                             f"{gmail_url}/v1/synthetic-model",
                             json={"prompt": "synthetic-provider-request-1"},
@@ -160,7 +166,9 @@ def verify(options: dict[str, bool], *, model_scope: bool = False, canonical: bo
                         assert after.json() == {"completion": "synthetic-provider-response"}
                     model.set_output(summary)
             else:
-                trace_id, summary = run(hue, gmail_url, "synthetic-gmail-access-token")
+                trace_id, summary = run(
+                    hue, gmail_url, "synthetic-gmail-access-token", max_results=max_results
+                )
             if not hue.force_flush():
                 raise RuntimeError("Telemetry export did not complete successfully.")
 
@@ -181,7 +189,7 @@ def verify(options: dict[str, bool], *, model_scope: bool = False, canonical: bo
     if options.get("capture_content", True):
         assert json.loads(tool_attrs["gen_ai.tool.call.arguments"]) == {
             "query": "is:unread",
-            "limit": 5,
+            "limit": max_results,
         }
         assert json.loads(tool_attrs["gen_ai.tool.call.result"]) == summary
     else:
@@ -224,7 +232,7 @@ def verify(options: dict[str, bool], *, model_scope: bool = False, canonical: bo
         assert "?" not in attrs["url.full"], "The URL must omit query values."
         if bodies:
             assert json.loads(attrs["input.value"]) == (
-                {"maxResults": "5", "q": "is:unread"}
+                {"maxResults": str(max_results), "q": "is:unread"}
                 if attrs["url.full"].endswith("/messages")
                 else {"format": "full"}
             )

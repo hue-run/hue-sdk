@@ -55,11 +55,17 @@ To use the separate shared Gmail response fixture, run:
 .venv/bin/python main.py --canonical
 ```
 
-The [canonical fixture](../fixtures/README.md) serves fuller synthetic message
-objects with distinct timestamps in newest-first order. The offline receiver
-checks each captured response against the server fixture without changing it.
-The output identifies `"fixture": "canonical-gmail-v1"`. The original default and
-model-scope fixtures remain available as separate scenarios.
+The [canonical v2 fixture](../fixtures/README.md) requests `maxResults=10` and
+returns five fuller synthetic messages in newest-first order, without a next-page
+token. Gmail defines [`maxResults`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list)
+as a maximum. The tool still summarizes at most five messages. The offline server
+checks that the actual request asks for ten, and the receiver checks that the
+captured query says `"maxResults": "10"` and that each response matches the server
+fixture. No recorded payload or query is repaired.
+
+The output identifies `"fixture": "canonical-gmail-v2"`. Canonical v1 and its
+earlier full-page comparison remain preserved. The original default and
+model-scope scenarios still request five messages.
 
 ## Read a live mailbox
 

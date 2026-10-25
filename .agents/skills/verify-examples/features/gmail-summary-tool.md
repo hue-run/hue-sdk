@@ -61,6 +61,8 @@ For the separate canonical source fixture and fresh downstream World proof:
 "$V/venv/bin/python" examples/gmail-summary-tool/python/main.py --canonical
 ```
 
+Canonical v2 really sends `maxResults=10` and returns five messages. The helper's
+live/default limit remains five. Keep v1's full-page5/6 result unchanged.
 The TypeScript manifest records the source fixture hash, trace ID and batch
 hashes. The files contain the receiver's OTLP protobuf after decompression,
 with attributes and payloads unchanged. Keep the original fixture's replay

@@ -46,8 +46,10 @@ For a separate fixture with explicit MIME fields and distinct message dates, run
 npm run offline -- --canonical --export-dir=../../../.context/gmail-canonical-run
 ```
 
-The [canonical fixture](../fixtures/README.md) contains synthetic values chosen
-before capture. The runner compares each exported JSON value with the server's
+The [canonical v2 fixture](../fixtures/README.md) contains synthetic values chosen
+before capture. This test requests `maxResults=10` and returns five messages, so
+the page is not full. Live and default mode still request five messages and
+return the same summary shape. The original v1 full-page fixture is preserved. The runner compares each exported JSON value with the server's
 response and saves the unchanged OTLP protobuf batches after gzip decompression.
 It refuses to overwrite an existing batch or manifest. Keep these artifacts
 separate from the original fixture's results. A downstream World replay result

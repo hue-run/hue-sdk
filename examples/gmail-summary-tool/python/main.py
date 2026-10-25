@@ -18,12 +18,14 @@ class Summary(TypedDict):
     ids: list[str]
 
 
-def summarize_inbox(hue: Hue, gmail: requests.Session, base_url: str) -> Summary:
+def summarize_inbox(
+    hue: Hue, gmail: requests.Session, base_url: str, *, max_results: int = 5
+) -> Summary:
     with hue.tool("summarize_inbox") as tool:
-        tool.set_input({"query": "is:unread", "limit": 5})
+        tool.set_input({"query": "is:unread", "limit": max_results})
         response = gmail.get(
             f"{base_url}/gmail/v1/users/me/messages",
-            params={"maxResults": 5, "q": "is:unread"},
+            params={"maxResults": max_results, "q": "is:unread"},
             timeout=15,
         )
         response.raise_for_status()
@@ -56,11 +58,11 @@ def env_bool(name: str) -> bool:
     return value == "true"
 
 
-def run(hue: Hue, base_url: str, access_token: str) -> tuple[str, Summary]:
+def run(hue: Hue, base_url: str, access_token: str, *, max_results: int = 5) -> tuple[str, Summary]:
     with requests.Session() as gmail, hue.span("gmail.summary") as root:
         root.set_input({"task": "Summarize five unread Gmail messages."})
         gmail.headers["Authorization"] = f"Bearer {access_token}"
-        summary = summarize_inbox(hue, gmail, base_url)
+        summary = summarize_inbox(hue, gmail, base_url, max_results=max_results)
         root.set_output(summary)
         return root.trace_id, summary
 

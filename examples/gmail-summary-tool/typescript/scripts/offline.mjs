@@ -58,10 +58,11 @@ const modelScope = process.argv.includes("--model-scope");
 const canonical = process.argv.includes("--canonical");
 assert.ok(!(modelScope && canonical), "Choose one offline scenario");
 const fixtureBytes = canonical
-  ? await readFile(new URL("../../fixtures/canonical-gmail.json", import.meta.url))
+  ? await readFile(new URL("../../fixtures/canonical-gmail-v2.json", import.meta.url))
   : undefined;
 const fixture = fixtureBytes ? JSON.parse(fixtureBytes.toString("utf8")) : undefined;
 const messages = fixture?.messages ?? originalMessages;
+const maxResults = fixture?.maxResults ?? 5;
 const listResponse = fixture?.list ?? {
   messages: messages.map(({ id, threadId }) => ({ id, threadId })),
   resultSizeEstimate: 5,
@@ -109,7 +110,7 @@ for (const [policy, options, expectHttp, expectBodies] of policies) {
     gmailCalls.push(`${request.method} ${url.pathname}${url.search}`);
     let body;
     if (url.pathname === "/gmail/v1/users/me/messages") {
-      assert.equal(url.searchParams.get("maxResults"), "5");
+      assert.equal(url.searchParams.get("maxResults"), String(maxResults));
       assert.equal(url.searchParams.get("q"), "is:unread");
       body = listResponse;
     } else {
@@ -158,7 +159,7 @@ for (const [policy, options, expectHttp, expectBodies] of policies) {
     ...options,
   });
   try {
-    const gmailConfig = { baseUrl: gmailUrl, accessToken: "synthetic-gmail-token" };
+    const gmailConfig = { baseUrl: gmailUrl, accessToken: "synthetic-gmail-token", maxResults };
     async function callSyntheticModel() {
       const response = await fetch(`${gmailUrl}/synthetic-model`, {
         method: "POST",
@@ -216,7 +217,7 @@ for (const [policy, options, expectHttp, expectBodies] of policies) {
     assert.equal(Buffer.from(tools[0].traceId, "base64").toString("hex"), traceId);
     if (options.captureContent !== false) {
       assert.deepEqual(json(tools[0], "gen_ai.tool.call.arguments"), {
-        maxResults: 5,
+        maxResults,
         q: "is:unread",
       });
       assert.deepEqual(json(tools[0], "gen_ai.tool.call.result"), summary);
@@ -245,7 +246,7 @@ for (const [policy, options, expectHttp, expectBodies] of policies) {
         const isList = text(span, "url.full").endsWith("/messages");
         assert.deepEqual(
           json(span, "input.value"),
-          isList ? { maxResults: "5", q: "is:unread" } : { format: "full" },
+          isList ? { maxResults: String(maxResults), q: "is:unread" } : { format: "full" },
         );
         const output = json(span, "output.value");
         if (isList) {

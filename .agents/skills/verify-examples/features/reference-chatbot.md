@@ -24,7 +24,8 @@ Preconditions:
   ```sh
   (cd packages/sdk-typescript && bun run build && npm pack --ignore-scripts --pack-destination "$V")
   rsync -a --exclude node_modules --exclude dist examples/reference-chatbot/ "$V"/chatbot/
-  (cd "$V"/chatbot && bun add ../hue-run-sdk-*.tgz && bun run build)
+  example_archive="$V/hue-run-sdk-$(node -p 'require("./packages/sdk-typescript/package.json").version').tgz"
+  (cd "$V"/chatbot && bun add "@hue-run/sdk@file:$example_archive" && bun run build)
   ```
 
 - **Start it.** `HUE_CHAT_MODE=synthetic PORT=3401 node "$V"/chatbot/dist/server.js > "$V"/server.log 2>&1 & echo $! > "$V"/server.pid; sleep 1; curl -s http://127.0.0.1:3401/config`. Expected: JSON with `"mode":"synthetic"`.
