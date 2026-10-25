@@ -943,6 +943,7 @@ class Hue:
             limits=self._limits,
             dropped_records=dropped_records,
             uploads=self._uploads,
+            http_redactor=self._text_content,
         )
         self._log_processor = BoundedLogProcessor(
             self._log_exporter,

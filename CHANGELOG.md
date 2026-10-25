@@ -1990,12 +1990,19 @@ No registry release is claimed until publication and registry acceptance complet
   `capture_http_bodies=False` to keep HTTP identity without bodies, or `capture_http=False` to
   restore the previous absence of automatic HTTP spans. `capture_content=False` continues to omit
   content and also disables HTTP bodies, regardless of `capture_http_bodies`.
+  Redactors now also receive HTTP identity URL strings and present path aliases in every
+  content mode, including metadata-only export.
 
 #### Added
 
 - **Wire**: outbound HTTP CLIENT spans carry `http.request.method`, `url.full`, `url.scheme`,
   `server.address`, `server.port` and `http.response.status_code` when available. Recorded URLs
-  omit userinfo, queries and fragments. With body capture enabled, `input.value` merges query
+  omit userinfo, queries and fragments and mask recognized credential-bearing path formats,
+  preserving ordinary business identifiers. The existing redactor receives `url.full` even in
+  metadata-only mode. Present `http.url`, `http.target` and `url.path` hooks follow, with each
+  result sanitized again. Full URL aliases share the final URL, path aliases share its pathname
+  and `url.query` is removed. These fields and method-only span names are protected in Hue's
+  export copy without changing other exporters' original spans. With body capture enabled, `input.value` merges query
   parameters with JSON-object or form fields, and `output.value` records the parsed JSON response
   body or eligible response text. Status and allowed headers remain separate attributes, including
   `http.request.header.notion_version` and `http.response.header.notion_version`.
@@ -2011,6 +2018,7 @@ No registry release is claimed until publication and registry acceptance complet
   complete response bodies. Calls use the client's existing owned or borrowed tracer provider.
   An owned provider keeps HTTP spans in the active Hue helper's trace when the application
   temporarily activates an independent trace. Borrowed providers retain the active application's parent.
+  Forked children detach inherited capture and can create a fresh client for their own capture.
 
 ### [0.13.6] - 2026-10-24
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import copy
 from math import isfinite
 from typing import Any
@@ -26,6 +26,7 @@ from opentelemetry.trace import Link, SpanContext, Status, format_span_id
 
 from ._attachment import Attachment, PlacedAttachment, attachment_part
 from ._blobs import MAX_BLOB_BYTES, Held, HeldValues, Uploads, attach_held, held_size
+from ._http_identity import safe_http_span
 from ._inline_files import (
     INLINE_FILE_TEXT_PER_RECORD,
     MAX_INLINE_FILE_TEXT,
@@ -41,6 +42,7 @@ from ._records import CONTENT_PREFIXES as CONTENT_PREFIXES
 from ._records import (
     http_truncated_attributes,
     is_truncated_marker,
+    replace_span,
     truncated_marker,
     with_truncated_keys,
 )
@@ -671,6 +673,7 @@ class _SpanSnapshot(ReadableSpan):
         record_bytes: int = MAX_REQUEST_BYTES,
         value_bytes: int | None = None,
         hold: Hold | None = None,
+        http_redactor: Callable[[str, str], str | None] | None = None,
     ) -> None:
         budget = _ValueBudget(
             capture_content,
@@ -685,7 +688,7 @@ class _SpanSnapshot(ReadableSpan):
             budget.held.size = staged.size
             staged._released = True
         try:
-            self._copy(span, budget, capture_content)
+            self._copy(safe_http_span(span, http_redactor), budget, capture_content)
         except BaseException:
             # The values held for a copy that failed are no one's.
             budget.held.release()
@@ -766,9 +769,15 @@ def snapshot_span(
     record_bytes: int = MAX_REQUEST_BYTES,
     value_bytes: int | None = None,
     hold: Hold | None = None,
+    http_redactor: Callable[[str, str], str | None] | None = None,
 ) -> ReadableSpan:
     return _SpanSnapshot(
-        span, capture_content, record_bytes=record_bytes, value_bytes=value_bytes, hold=hold
+        span,
+        capture_content,
+        record_bytes=record_bytes,
+        value_bytes=value_bytes,
+        hold=hold,
+        http_redactor=http_redactor,
     )
 
 
@@ -825,7 +834,12 @@ def _value_bytes(value: Any, limit: int) -> int:
     return 8
 
 
-def snapshot_pending_span(span: ReadableSpan, capture_content: bool = True) -> PendingSpan:
+def snapshot_pending_span(
+    span: ReadableSpan,
+    capture_content: bool = True,
+    *,
+    http_redactor: Callable[[str, str], str | None] | None = None,
+) -> PendingSpan:
     """Announce a still-open span with Hue's placeholder shape.
 
     The placeholder is a new child of the real span that ends at 0 and carries the real
@@ -838,11 +852,12 @@ def snapshot_pending_span(span: ReadableSpan, capture_content: bool = True) -> P
     if context is None:
         raise ValueError("A placeholder needs the span's context.")
     real_parent = span.parent
+    identity = safe_http_span(replace_span(span, attributes=_live_attributes(span)), http_redactor)
     copied = budget.value(
         {
             key: value
             for key, value in budget.permitted(
-                http_truncated_attributes(span, _live_attributes(span)), files=True
+                http_truncated_attributes(identity, identity.attributes), files=True
             ).items()
             if isinstance(key, str)
             and not _placeholder_omits(key)
@@ -855,7 +870,7 @@ def snapshot_pending_span(span: ReadableSpan, capture_content: bool = True) -> P
         attributes[PENDING_PARENT_KEY] = format_span_id(real_parent.span_id)
     return PendingSpan(
         source=span,
-        name=budget.value(span.name),
+        name=budget.value(identity.name),
         context=SpanContext(
             context.trace_id,
             _span_ids.generate_span_id(),

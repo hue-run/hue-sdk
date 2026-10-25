@@ -50,6 +50,8 @@ def test_installed_wheel_outbound_http_capture(tmp_path, wheel):
         "test_http_markers.py",
         "test_http_parent_context.py",
         "test_http_context_cleanup.py",
+        "test_http_fork.py",
+        "test_http_identity.py",
     ):
         shutil.copyfile(package / "tests" / name, tmp_path / name)
     environment = {"PATH": os.environ["PATH"], "PYTHONNOUSERSITE": "1"}
@@ -73,6 +75,8 @@ def test_installed_wheel_outbound_http_capture(tmp_path, wheel):
             "test_http_markers.py",
             "test_http_parent_context.py",
             "test_http_context_cleanup.py",
+            "test_http_fork.py",
+            "test_http_identity.py",
         ],
         env=environment,
         cwd=tmp_path,

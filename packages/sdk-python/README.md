@@ -367,7 +367,17 @@ An existing matching HTTP CLIENT parent can receive the observed content instead
 instrumentors that create their spans inside a Hue wrapper can still produce duplicate spans.
 
 Identity includes method, scheme, host, port, path and response status. `url.full` omits URL userinfo,
-query strings and fragments. Captured content passes through Hue's credential filtering and the
+query strings and fragments. Recognized credential-bearing path formats are masked, including
+prefixed keys, explicit credential/value segments and bot or webhook capability tokens. Ordinary
+business identifiers and unchanged encoded path segments retain their spelling. The existing
+`redactor` receives `url.full` when a full URL is present, including metadata-only capture.
+Present `http.url`, `http.target` and `url.path` hooks follow in that order. Path hooks receive the
+pathname. Hue sanitizes each answer and omits all URI attributes if an answer is invalid or fails.
+In Hue's export copy, full URL aliases share the final URL, path aliases share its pathname and
+`url.query` is removed. The copy's name is the HTTP method. Other exporters retain their original
+span, including when Hue borrows their provider.
+
+Captured content passes through Hue's credential filtering and the
 existing `redactor`, called with `input.value` or `output.value`. Authorization and cookie headers
 are never captured. Ordinary header containers and known pagination cursors remain available,
 with credential fields inside them redacted. Query values are content: `input.value` holds query
@@ -398,6 +408,9 @@ shutdown. Raw compressed reads record size without decoded content. Finish or cl
 before flushing and shutting Hue down. Raw `http.client`, custom socket transports, gRPC,
 WebSockets and requests made by other processes are
 outside this capture.
+
+After `os.fork()`, child HTTP continues with inherited capture detached. Create a fresh Hue client
+in the child to enable its capture and exporter lifecycle.
 
 ## Existing instrumentation
 

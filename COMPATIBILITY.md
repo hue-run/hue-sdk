@@ -19,7 +19,12 @@ Since Python `0.14.0`, Hue observes outbound HTTP through `requests`, `httpx` an
 their existing bytes and headers. `capture_http=False` disables observation, and
 `capture_http_bodies=False` retains identity without bodies. `capture_content=False` also disables
 HTTP bodies. Captured content uses the existing redactor and credential filtering. URL userinfo,
-query strings and fragments are excluded from identity attributes. Body capture is limited to
+query strings and fragments are excluded from identity attributes. Recognized credential-bearing
+path formats are masked while ordinary identifiers remain. URL identity also passes through the
+existing `redactor` as `url.full`, including metadata-only capture. Borrowed spans are sanitized
+only in Hue's export copy. Present `http.url`, `http.target` and `url.path` hooks follow the
+canonical URL hook. Full URL aliases share the final URL, path aliases share its pathname,
+`url.query` is removed and span names contain only the method. Body capture is limited to
 eligible text and JSON content, at most 1 MiB per side, with truncation marked. Streaming capture
 observes only application-consumed bytes. Calls made through raw sockets, gRPC, WebSockets or
 another process are outside this capture. See the [Python HTTP capture guide](./packages/sdk-python/README.md#outbound-http-capture).

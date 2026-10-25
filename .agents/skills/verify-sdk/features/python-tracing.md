@@ -13,6 +13,11 @@ An application opens `Hue(base_url, api_key, ...)`, records spans, model calls a
   content opt-outs and redaction, marks bodies over 1 MiB, keeps model HTTP identity without bodies,
   resumes body capture in nested Hue tools and suppresses exporter traffic. Import hooks, nested
   wrappers, independent provider contexts and multiple-client shutdown remain safe.
+- `py-http-identity` scrubs recognized credentials in URL paths, preserves ordinary identifiers,
+  applies URL and present URI-alias redactors in both content modes, removes `url.query` and
+  sanitizes aliases and method-only span names only in Hue's export copy.
+- `py-http-fork` keeps ordinary HTTP working after `os.fork()`, detaches inherited capture and
+  permits a fresh Hue client in the child, including inherited requests and aiohttp responses.
 - `py-ack` returns `force_flush()` and receipt results that match the receiver.
 - `py-media` inspects bounded, nonempty media and exports exact digests and blob entries.
 - `py-file-upload` covers opt-in `record_file` uploads and name validation.
@@ -56,6 +61,16 @@ Preconditions:
   metadata-only and HTTP opt-outs, existing redaction, imports after Hue creation and client
   shutdown. Repeat from the installed wheel, including Python 3.10. These checks use synthetic
   HTTP endpoints and establish no live-provider compatibility claim.
+- **HTTP identity (`py-http-identity`).** Run `uv run --frozen --all-groups pytest tests/test_http_identity.py`.
+  Check real requests and HTTPX consumer bytes, default and metadata-only policies, redacted path
+  credentials and preserved business IDs. Borrowed stable and legacy URLs use the canonical URL
+  redactor followed by present full URL and path hooks. Final aliases agree, query attributes are
+  removed, all URI aliases disappear on invalid redaction, and the other exporter keeps its
+  original attributes and span name. Path-only spans run only their present path hooks.
+- **After fork (`py-http-fork`).** Run `uv run --frozen --all-groups pytest tests/test_http_fork.py`.
+  All three cases cover ordinary child HTTP and a fresh child Hue client, with no inherited
+  response, an inherited requests response or an inherited aiohttp response. The parent continues
+  its own capture. These cases require `os.fork()` and run against the installed wheel too.
 - **Sub-agents (`py-subagent`).** `uv run --frozen --all-groups pytest tests/test_sdk.py -q -k subagent`. Expected: `6 passed` in about 2 s.
 - **Static checks** (3.5 s): `uv run --frozen --all-groups ruff check src tests && uv run --frozen --all-groups mypy`.
 - **Serving isolation.** Run `uv run --frozen --all-groups pytest tests/test_isolation.py -k "attribute or mcp"` and `uv run --frozen --all-groups pytest tests/test_async_serving.py`. The optional compatibility group supplies the real async provider client; all HTTP responses are synthetic.

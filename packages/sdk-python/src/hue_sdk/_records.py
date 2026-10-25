@@ -188,13 +188,14 @@ class OwnedSpan(ReadableSpan):
 def replace_span(
     span: ReadableSpan,
     *,
+    name: str | None = None,
     attributes: Mapping[str, Any] | None = None,
     events: Sequence[Event] | None = None,
     links: Sequence[Link] | None = None,
 ) -> ReadableSpan:
-    """A copy of ``span`` with its attributes, events or links replaced."""
+    """A copy of ``span`` with its name, attributes, events or links replaced."""
     return OwnedSpan(
-        name=span.name,
+        name=span.name if name is None else name,
         context=span.context,
         parent=span.parent,
         resource=span.resource,

@@ -385,10 +385,12 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         limits: AdvertisedLimits | None = None,
         dropped_records: DroppedRecords | None = None,
         uploads: Uploads | None = None,
+        http_redactor: Callable[[str, str], str | None] | None = None,
     ) -> None:
         # Set before the worker starts; it reads these on every loop.
         self._live_spans = live_spans
         self._uploads = uploads
+        self._http_redactor = http_redactor
         self._live: dict[int, _LiveSpan] = {}
         self._next_tick = 0.0
         # Spans ended per trace, the count a case's trace receipt is held to; bounded, oldest
@@ -403,6 +405,17 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
             capture_content,
             limits=limits,
             dropped_records=dropped_records,
+        )
+
+    def _snapshot(self, item: Any, capture_content: bool) -> Any:
+        value_bytes = self._limits.current.value_bytes
+        return type(self)._copy(
+            item,
+            capture_content,
+            record_bytes=self._max_bytes,
+            value_bytes=value_bytes,
+            hold=self._hold(value_bytes),
+            http_redactor=self._http_redactor,
         )
 
     def _hold(self, value_bytes: int) -> Hold | None:
@@ -540,7 +553,9 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         # Copy, trim and size on this worker, never in the application's on_start.
         for span in due:
             try:
-                placeholder = snapshot_pending_span(span, self._capture_content)
+                placeholder = snapshot_pending_span(
+                    span, self._capture_content, http_redactor=self._http_redactor
+                )
                 if span.end_time is None:
                     self._admit_advisory(placeholder)
             except Exception:

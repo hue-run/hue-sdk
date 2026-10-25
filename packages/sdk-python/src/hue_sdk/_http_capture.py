@@ -6,6 +6,7 @@ import functools
 import importlib.abc
 import importlib.machinery
 import json
+import os
 import sys
 import weakref
 from collections.abc import Callable
@@ -20,6 +21,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from ._http_identity import sanitize_http_url
 from ._http_streams import install_stream, uninstall_stream_hooks
 from ._limits import MAX_CONTENT_BYTES, TRUNCATED_KEY
 from ._otel_compat import instrumentation_suppressed
@@ -102,7 +104,7 @@ def _identity(raw: str, method: str) -> tuple[dict[str, Any], str]:
     netloc = f"[{host}]" if ":" in host else host
     if url.port is not None:
         netloc += f":{url.port}"
-    clean = urlunsplit((url.scheme, netloc, url.path or "/", "", ""))
+    clean = sanitize_http_url(urlunsplit((url.scheme, netloc, url.path or "/", "", "")))
     return {
         "http.request.method": method.upper(),
         "url.full": clean,
@@ -164,6 +166,11 @@ def _scrub(value: Any, depth: int = 0) -> Any:
     if isinstance(value, list):
         return [_scrub(item, depth + 1) for item in value]
     if isinstance(value, str):
+        if value[:8].lower().startswith(("http://", "https://")):
+            try:
+                value = sanitize_http_url(value)
+            except ValueError:
+                pass
         return _scrub_credential_text_unbounded(value)
     return value
 
@@ -400,6 +407,8 @@ class Exchange:
                         self.span.set_attribute(name, clean)
 
     def observe(self, data: bytes | memoryview) -> None:
+        if self.client._pid != os.getpid():
+            return
         with self._finish_lock:
             if self.done:
                 return
@@ -414,6 +423,8 @@ class Exchange:
                 self.buffer.clear()
 
     def finish(self, complete: bool = False) -> None:
+        if self.client._pid != os.getpid():
+            return
         with self._finish_lock:
             if self.done:
                 return
@@ -448,6 +459,8 @@ class Exchange:
                     self.client._record_issue()
 
     def fail(self, error: BaseException) -> None:
+        if self.client._pid != os.getpid():
+            return
         try:
             self.span.set_attribute("error.type", type(error).__name__)
             self.span.set_status(Status(StatusCode.ERROR))
@@ -724,3 +737,18 @@ def unregister(client: Hue) -> None:
                 setattr(owner, name, original)
         _patches.clear()
         uninstall_stream_hooks()
+
+
+def _after_fork() -> None:
+    # A serving process creates its own Hue client; parent threads cannot release child locks.
+    global _lock, _pending
+    _lock = RLock()
+    _clients.clear()
+    _pending = weakref.WeakSet()
+    client_scope.set(None)
+    _exchange.set(None)
+    _aio_decode.set(True)
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)

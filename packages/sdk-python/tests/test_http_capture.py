@@ -1150,7 +1150,7 @@ def test_existing_matching_client_span_receives_content_without_nested_span(rece
                 assert drive("requests", app.url + "/existing") == BODY
             assert hue.force_flush()
         (span,) = http_spans(receiver)
-        assert span.name == "existing HTTP"
+        assert span.name == "POST"
         assert json.loads(attributes(span)["output.value"]) == PAYLOAD
         assert trace.get_tracer_provider() is not provider
         with provider.get_tracer("application").start_as_current_span("still open") as span:

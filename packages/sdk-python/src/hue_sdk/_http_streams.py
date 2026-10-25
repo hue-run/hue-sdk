@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import os
 import weakref
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextvars import ContextVar
@@ -200,6 +201,9 @@ def _close(response: Any, stream: Any, exchange: Any, name: str) -> None:
 
 
 def _drop_aio(key: int, exchange: Any) -> None:
+    # GC may run in an earlier at-fork callback, before this module resets its lock.
+    if exchange.client._pid != os.getpid():
+        return
     with _lock:
         if _aio_streams.get(key) is exchange:
             _aio_streams.pop(key, None)
@@ -327,3 +331,15 @@ def uninstall_stream_hooks() -> None:
                 setattr(cls, name, original)
         _aio_patches.clear()
         _aio_streams.clear()
+
+
+def _after_fork() -> None:
+    global _lock
+    # Locks owned by vanished parent threads cannot be acquired in the child.
+    _lock = RLock()
+    _aio_streams.clear()
+    _reading.set(frozenset())
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)
