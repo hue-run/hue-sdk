@@ -53,7 +53,7 @@ function scrubPath(path: string): string {
     if (
       index === last &&
       /^[A-Za-z0-9_-]+$/.test(value) &&
-      parts[index - 3]?.value === "services" &&
+      parts[index - 3]?.value.toLowerCase() === "services" &&
       /^T[A-Za-z0-9]+$/.test(parts[index - 2]?.value ?? "") &&
       /^B[A-Za-z0-9]+$/.test(parts[index - 1]?.value ?? "")
     ) {
@@ -82,4 +82,15 @@ export function scrubHttpUrl(value: string | URL): URL {
   url.hash = "";
   url.pathname = scrubPath(url.pathname);
   return url;
+}
+
+/** HTTP names can retain a full URL after a provider clips all identifying attributes. */
+export function scrubHttpSpanName(name: string): string {
+  return name.replace(/https?:\/\/[^\s"'<>]+/gi, (value) => {
+    try {
+      return scrubHttpUrl(value).href;
+    } catch {
+      return "[redacted]";
+    }
+  });
 }

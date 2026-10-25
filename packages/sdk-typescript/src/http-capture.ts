@@ -19,9 +19,16 @@ import { TRUNCATED_KEY, truncatedMarker, withTruncatedKeys } from "./privacy.js"
 import { scrubCredentialTextUnbounded } from "./tool-definitions.js";
 import { scrubHttpUrl } from "./http-url.js";
 
+type HttpContentKey = "input.value" | "output.value";
 export interface ObservedHttpIdentity {
   method: string;
   url: string;
+  attributeValueLengthLimit?: number;
+  attributeCountLimit?: number;
+  contentCuts: ReadonlyMap<HttpContentKey, number>;
+}
+interface HttpObservation extends ObservedHttpIdentity {
+  contentCuts: Map<HttpContentKey, number>;
 }
 
 export interface HttpCaptureSource {
@@ -323,8 +330,37 @@ interface Owner {
 }
 const owners = new Set<Owner>();
 const claimedHttpSpans = new WeakSet<object>();
-const observedHttpIdentities = new WeakMap<object, ObservedHttpIdentity>();
+const observedHttpIdentities = new WeakMap<object, HttpObservation>();
 const MAX_HTTP_CANDIDATES = 2048;
+
+/** OTel exposes no Span API for limits; both supported SDK implementations store these values. */
+function providerLimits(
+  span: Span,
+): Pick<ObservedHttpIdentity, "attributeValueLengthLimit" | "attributeCountLimit"> {
+  const result: Pick<ObservedHttpIdentity, "attributeValueLengthLimit" | "attributeCountLimit"> =
+    {};
+  try {
+    const raw = spanSource(span);
+    if (utilTypes.isProxy(raw)) return result;
+    const length = Object.getOwnPropertyDescriptor(raw, "_attributeValueLengthLimit")?.value;
+    if (
+      typeof length === "number" &&
+      (length === Infinity || (Number.isSafeInteger(length) && length >= 0))
+    )
+      result.attributeValueLengthLimit = length === 0 ? Infinity : length;
+    const limits = Object.getOwnPropertyDescriptor(raw, "_spanLimits")?.value;
+    if (!limits || typeof limits !== "object" || utilTypes.isProxy(limits)) return result;
+    const count = Object.getOwnPropertyDescriptor(limits, "attributeCountLimit")?.value;
+    if (
+      typeof count === "number" &&
+      (count === Infinity || (Number.isSafeInteger(count) && count >= 0))
+    )
+      result.attributeCountLimit = count;
+  } catch {
+    /* Unknown provider implementations keep their own policy. */
+  }
+  return result;
+}
 
 function parentIdentity(parent: Context): string {
   const ids = trace.getSpanContext(parent);
@@ -400,14 +436,19 @@ class Exchange {
   private safe(work: () => void): void {
     safely(this.owner, work);
   }
-  private content(key: string, value: unknown, cut: boolean, bytes: number): void {
+  private content(key: HttpContentKey, value: unknown, cut: boolean, bytes: number): void {
     const encoded = encodeBoundedContent(value, contentLimitsOf(this.owner.options.valueBytes()));
     // A prefix may split a credential before the export redactor sees it. HTTP keeps no prefix.
-    this.span.setAttribute(
-      key,
-      encoded.truncated ? JSON.stringify(truncatedMarker(bytes)) : encoded.text,
-    );
-    if (cut || encoded.truncated) this.cuts.add(key);
+    const intended = encoded.truncated ? JSON.stringify(truncatedMarker(bytes)) : encoded.text;
+    this.span.setAttribute(key, intended);
+    const stored = spanAttributes(this.span)?.[key];
+    if (cut || encoded.truncated || stored !== intended) {
+      this.cuts.add(key);
+      observedHttpIdentities.get(spanSource(this.span))?.contentCuts.set(key, bytes);
+      // Other exporters retain the provider's limit too, without a customer-content prefix.
+      if (typeof stored === "string" && stored !== intended)
+        this.span.setAttribute(key, JSON.stringify(truncatedMarker(bytes)));
+    }
   }
   finish(complete: boolean, error?: unknown, stopped = false): void {
     if (this.ended) return;
@@ -557,7 +598,13 @@ function begin(
       ),
     owner.options.failed,
   );
-  observedHttpIdentities.set(spanSource(span), { method, url: safeUrl.href });
+  if (!span.isRecording()) return;
+  observedHttpIdentities.set(spanSource(span), {
+    method,
+    url: safeUrl.href,
+    ...providerLimits(span),
+    contentCuts: new Map(),
+  });
   return new Exchange(owner, source, span, !existing, url, headersOf(headers), bodies);
 }
 

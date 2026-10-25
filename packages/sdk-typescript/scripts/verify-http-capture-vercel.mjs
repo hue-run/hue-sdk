@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import { gunzipSync } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
@@ -302,7 +302,12 @@ const processor = {
     transport?.spanProcessor.onStart(span, parent);
   },
   onEnd(span) {
-    applicationSpans.push({ id: span.spanContext().spanId, attributes: { ...span.attributes } });
+    applicationSpans.push({
+      id: span.spanContext().spanId,
+      name: span.name,
+      attributes: { ...span.attributes },
+      service: span.resource.attributes["service.name"],
+    });
     transport?.spanProcessor.onEnd(span);
   },
   async forceFlush() {
@@ -499,6 +504,111 @@ try {
       ["restart-http", 1],
     ],
   );
+  for (const captureContent of [true, false])
+    for (const mode of ["default", "resource", "target", "path", "invalid", "throw", "custom"]) {
+      await transport.shutdown();
+      const hooks = new Map();
+      const replacement =
+        "https://synthetic-user:synthetic-callback-password@replacement.example.test/new?q=synthetic-callback-query#fragment";
+      transport = createHueTransport({
+        ...options,
+        captureContent,
+        redact: (value, path) => {
+          if (
+            [
+              "attributes.url.full",
+              "attributes.http.url",
+              "attributes.resource.name",
+              "attributes.http.target",
+              "attributes.url.path",
+            ].includes(path)
+          )
+            hooks.set(path, (hooks.get(path) ?? 0) + 1);
+          if (mode === "resource" && path === "attributes.resource.name") return replacement;
+          if (mode === "target" && path === "attributes.http.target") return replacement;
+          if (mode === "path" && path === "attributes.url.path") return replacement;
+          if (mode === "invalid" && path === "attributes.http.target")
+            return "file:///synthetic-invalid";
+          if (mode === "throw" && path === "attributes.url.path")
+            throw new Error("synthetic path callback failure");
+          return value;
+        },
+      });
+      const rawPath = "/token/synthetic-original-capability";
+      const original = `${appUrl}${rawPath}?business=synthetic-uri-business`;
+      const from = spans.length;
+      const vendorFrom = applicationSpans.length;
+      const requestFrom = requests.length;
+      const extra = {
+        "http.target": rawPath,
+        "url.path": rawPath,
+        ...(mode === "custom" ? { "resource.name": "synthetic custom resource label" } : {}),
+      };
+      await fetch(original, { opentelemetry: { attributes: extra } }).then((response) =>
+        response.text(),
+      );
+      let report;
+      try {
+        await flush();
+        report = transport.getReport();
+      } catch (error) {
+        if (!error || typeof error !== "object" || !("report" in error)) throw error;
+        report = error.report;
+      }
+      const exported = spans.slice(from).filter(isHttp);
+      const vendor = applicationSpans
+        .slice(vendorFrom)
+        .find((span) => span.attributes["http.url"] === original);
+      assert.equal(exported.length, 1);
+      assert.ok(vendor);
+      assert.equal(vendor.name, `fetch GET ${original}`);
+      assert.equal(
+        vendor.attributes["resource.name"],
+        mode === "custom" ? "synthetic custom resource label" : `${appUrl}${rawPath}`,
+      );
+      assert.equal(vendor.attributes["http.target"], rawPath);
+      assert.equal(vendor.attributes["url.path"], rawPath);
+      assert.equal(vendor.service, "vercel-http-capture");
+      assert.equal(requests[requestFrom].path, `${rawPath}?business=synthetic-uri-business`);
+      assert.ok(
+        [...hooks.values()].every((count) => count === 1),
+        "URI alias hooks run once per field",
+      );
+      assert.equal(hooks.get("attributes.resource.name"), 1);
+      const attributes = attrs(exported[0]);
+      assert.equal(exported[0].name, "GET");
+      assert.ok(
+        !JSON.stringify(exported).includes("synthetic-original-capability"),
+        "resource.name and every URI alias must hide capability paths",
+      );
+      assert.ok(!JSON.stringify(exported).includes("synthetic-callback-password"));
+      assert.ok(!JSON.stringify(exported).includes("synthetic-callback-query"));
+      if (!captureContent) {
+        assert.equal(attributes["input.value"], undefined);
+        assert.equal(attributes["output.value"], undefined);
+        assert.ok(!JSON.stringify(exported).includes("synthetic-uri-business"));
+      }
+      if (mode === "invalid" || mode === "throw") {
+        for (const key of ["url.full", "http.url", "http.target", "url.path", "resource.name"])
+          assert.equal(attributes[key], undefined, "failed URI callbacks remove all aliases");
+        assert.equal(report.instrumentationFailures, 1);
+      } else {
+        const canonical = ["resource", "target", "path"].includes(mode)
+          ? "https://replacement.example.test/new"
+          : `${appUrl}/token/[redacted]`;
+        assert.equal(attributes["url.full"], canonical);
+        assert.equal(attributes["http.url"], canonical);
+        assert.equal(attributes["http.target"], new URL(canonical).pathname);
+        assert.equal(attributes["url.path"], new URL(canonical).pathname);
+        assert.equal(
+          attributes["resource.name"],
+          mode === "custom" ? "synthetic custom resource label" : canonical,
+        );
+      }
+      console.log(
+        `http-capture @vercel/otel URI aliases ${mode} content=${captureContent}: private Hue copy, unchanged vendor`,
+      );
+    }
   assert.ok(
     requests.every((request) => request.headers.traceparent === undefined),
     "Hue cannot add traceparent to application requests",
@@ -516,6 +626,17 @@ try {
   assert.equal(reservation.status, 0, reservation.stderr);
   assert.match(reservation.stdout, /request reservation survives an unrelated active writer: ok/);
   process.stdout.write(reservation.stdout);
+  await new Promise((done, fail) => {
+    const child = spawn(
+      process.execPath,
+      [fileURLToPath(new URL("./verify-http-capture-limits.mjs", import.meta.url)), consumer],
+      { stdio: "inherit", env: process.env },
+    );
+    child.once("error", fail);
+    child.once("close", (code) =>
+      code === 0 ? done() : fail(new Error(`HTTP provider limits drive exited ${code}`)),
+    );
+  });
   console.log(
     `http-capture @vercel/otel 2.1.3 ${process.version}${globalThis.Bun ? ` Bun ${globalThis.Bun.version}` : ""}: ${requests.length} physical requests, ${spans.filter(isHttp).length} HTTP spans, all checks passed`,
   );

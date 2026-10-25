@@ -863,7 +863,8 @@ identity without query arguments or bodies. `captureContent: false` also disable
 even when `captureHttpBodies` is `true`. `enabled: false` records nothing. The SDK does not read
 environment variables for these options.
 
-A captured span records `http.request.method`, `url.full`, `url.scheme`, `server.address`,
+Subject to the provider's attribute limits, a captured span records `http.request.method`,
+`url.full`, `url.scheme`, `server.address`,
 `server.port`, and the observed `http.response.status_code`. `url.full` excludes userinfo,
 query parameters and fragments. With HTTP content capture, `input.value` holds query arguments
 as strings, with repeated keys as arrays, merged with a JSON object or form body. Other body
@@ -887,6 +888,10 @@ and trace reconstruction can refuse it. Observed byte counts use `http.request.b
 `http.response.body.size`. Binary and compressed bodies keep size only. Hue does not add
 `traceparent` or change application request headers.
 
+Borrowed providers keep their attribute value and count policies. Captured content that a
+provider accepts and then clips is exported as a structured truncation marker. Attributes
+dropped by the provider's count limit remain absent. Live placeholders follow the same policy.
+
 Captured behavior headers are `notion-version`, `slack-api-version`, `stripe-version`,
 `linear-api-version` and `x-github-api-version`. They use `http.request.header.<name>` and
 `http.response.header.<name>` span attributes, with hyphens changed to underscores, such as
@@ -900,14 +905,19 @@ pagination fields such as `nextPageToken`.
 Recorded URLs also redact recognized credential path segments, including credential-labeled
 slots such as `/token/<value>`, bot-token segments and Slack incoming-webhook secrets. Ordinary
 resource IDs keep their spelling. For a borrowed span, Hue sanitizes its export snapshot's name,
-URL and legacy URL aliases. Other exporters keep the application's existing naming and URL
+URL, legacy URL aliases and HTTP URL-valued span attribute `resource.name`. Custom resource
+labels remain unchanged. Hue also scrubs HTTP URLs embedded in CLIENT span names when the
+request cannot be matched. Other exporters keep the application's existing naming and URL
 policy. Live HTTP placeholders use the same sanitization.
 
 HTTP URL redaction runs in both content modes. The canonical hooks are `attributes.url.full`
 and any present `attributes.http.url`, `attributes.http.target` or `attributes.url.path` alias.
-Hue sanitizes the callback's answer again. A callback that throws or returns an invalid or
-oversized URI causes the URI attributes to be omitted and an instrumentation failure to be
-reported; the original URI is never restored.
+An HTTP URL-valued `resource.name` uses `attributes.resource.name` once and shares the final
+canonical URL. A path hook can return a pathname or an absolute HTTP URL. Hue sanitizes the
+callback's answer again. URI replacements over the provider's attribute policy are omitted
+without a capture failure. A callback that throws, returns an invalid URI or exceeds the
+receiver's URI cap causes URI attributes to be omitted and an instrumentation failure to be
+reported.
 
 On Node.js 22 and 24, Hue observes per-request diagnostics and copies bytes as the client sends
 or receives them. Node.js 26's `onResponseData` callback is also verified in CI. Bun's `node:http`

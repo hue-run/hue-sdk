@@ -1530,7 +1530,7 @@ export class HueClient {
  * Creates a client that owns its providers ({@link HueOptions}) or attaches to the application's
  * ({@link ExistingHueProviders}). Strict: use it for setup and CI, `createHueSafe` in serving code.
  *
- * @throws TypeError for invalid options, including a missing `captureContent` choice, an invalid
+ * @throws TypeError for invalid options, including invalid capture flags, an invalid
  * key or `serviceName`, a non-origin or insecure `baseUrl`, or out-of-range budgets.
  */
 export function createHue(options: HueOptions | ExistingHueProviders): HueClient {

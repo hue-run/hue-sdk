@@ -41,8 +41,14 @@ refuses to publish a version without a matching entry below.
   their span names, URLs, status and lifecycle.
 - HTTP identity on Hue's export path removes recognized credentials in URL paths, including
   capability URLs, and applies the URL redactor to stable and legacy aliases in both content
-  modes. Invalid URL redactors omit identity and report a capture failure. Running placeholders
-  use the same filtering. Node 26's renamed undici response callback is supported.
+  modes, including an HTTP URL-valued span `resource.name`. HTTP URLs in unmatched CLIENT
+  span names are scrubbed too. Invalid or receiver-over-limit URL redactor answers omit URI
+  attributes and report a capture failure. Running placeholders use the same filtering.
+  Node 26's renamed undici response callback is supported.
+- Borrowed provider value and count policies remain effective. Captured content accepted and
+  then clipped by the provider exports a structured truncation marker; attributes dropped by
+  its count limit remain absent. URI replacements over the provider's attribute policy are
+  omitted without a capture failure. Final spans and live placeholders follow the same policy.
 
 ### [0.25.1] - 2026-10-25
 

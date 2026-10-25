@@ -155,6 +155,11 @@ pending-span privacy, single-use claims, ambiguous and expired candidates, and o
 Existing providers,
 other exporters' naming and URL policy, and the request's headers must remain unchanged.
 
+The Vercel driver automatically runs `verify-http-capture-limits.mjs` in 11 isolated policy
+cases: value limits 4, 16 and 64, count limits 8, 1 and 0, value limit 0 as unlimited, and the
+receiver's 256 KiB cap. Check final and live structured cuts, absent dropped attributes, URL
+redactor/count policy, and unmatched Vercel CLIENT names under value limits 4 and 16.
+
 Inspect exported CLIENT spans for scrubbed HTTP identity, query arguments in `input.value`,
 request bodies merged with those arguments, parsed JSON or text response bodies in `output.value`,
 response status and normalized behavior-header attributes, observed wire content types in
@@ -169,11 +174,13 @@ model identity without content, nested tools resuming HTTP content, borrowed pro
 multiple-client shutdown. Request headers, including an
 existing `traceparent`, must reach the server unchanged.
 
-Verify URL/name/legacy-alias sanitization on Hue's borrowed-span export snapshot in both
-content modes, including live placeholders. Recognized credential path segments are redacted
+Verify URL/name/legacy-alias and HTTP URL-valued `resource.name` sanitization on Hue's
+borrowed-span export snapshot in both content modes, including live placeholders. Also check
+unmatched CLIENT names containing HTTP URLs. Recognized credential path segments are redacted
 while ordinary resource IDs retain their spelling. Canonical URL redaction hooks must run,
-their answers must be sanitized again, and invalid answers must omit URI fields and report an
-instrumentation failure. Confirm delayed `setHeader` and `flushHeaders` capture the headers
+their answers must be sanitized again, and invalid or receiver-over-limit answers must omit
+URI fields and report an instrumentation failure. Provider-policy URI omissions do not report
+a capture failure. Confirm delayed `setHeader` and `flushHeaders` capture the headers
 actually sent, with creator parent, model-content policy, session and user metadata preserved
 when another scope writes later. No SDK `data` or `readable` listener may be added.
 
