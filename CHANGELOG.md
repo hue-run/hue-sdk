@@ -8,6 +8,28 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.26.0] - 2026-10-25
+
+#### Changed
+
+- **Breaking** `hue world create --export-from slack` lists archived conversations without reading
+  them: it makes no `conversations.info`, `conversations.members`, `conversations.history`,
+  `conversations.replies`, `pins.list` or `bookmarks.list` call for them, and names how many it
+  left unread. The World answers those reads as unknown. Migration: pass `--slack-archived` to read
+  archived conversations in full, as 0.25.0 did.
+
+#### Added
+
+- `--pipedream-account` takes `app=account` pairs (`linear=apn_1,slack=apn_2`) with one
+  `--pipedream-user`, so one run reads several `--export-from` apps into one World: each listed app
+  through its Pipedream Connect account, every other app with its own credentials. A bare account
+  id still names the account of a single `--export-from` app.
+- `hue world create --export-from <list> --save-to <dir>` saves the export to
+  `<dir>/<app>/<app>-export-<n>.json`, the layout `--files` reads, and creates nothing in Hue, so it
+  needs no `HUE_API_KEY`. The directories are owner-only (0700) and the files owner-only (0600);
+  the command refuses before reading anything when the first file of an app exists, and never
+  writes over a file.
+
 ### [0.25.0] - 2026-10-24
 
 #### Added
@@ -2671,6 +2693,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.24 (2026-10-25): pin `@hue-run/sdk@0.26.0`.
 - 0.8.23 (2026-10-24): pin `@hue-run/sdk@0.25.0`.
 - 0.8.22 (2026-10-22): pin `@hue-run/sdk@0.24.0` and route Composio and Pipedream SDK calls through `instrumentComposio` / `instrumentPipedream`.
 - 0.8.18 (2026-10-20): the TypeScript installation command pins `@hue-run/sdk@0.21.1`.
