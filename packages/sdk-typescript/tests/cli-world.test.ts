@@ -1153,7 +1153,7 @@ describe("hue world create --export-from", () => {
     );
   });
 
-  test("salesforce: describes each object and pages its live records with query", async () => {
+  test("salesforce: describes each object and pages queryAll, or query without IsDeleted", async () => {
     const stand = hue();
     const paths: string[] = [];
     // A custom object too wide for one query URL: 600 long field names.
@@ -1213,6 +1213,7 @@ describe("hue world create --export-from", () => {
         case "/query/01gN-200":
           return Response.json({ totalSize: 2, done: true, records: [{ Id: "a0N2" }] });
         case "/query":
+        case "/queryAll":
           if (url.searchParams.get("q")!.endsWith(" FROM User"))
             return Response.json({ totalSize: 1, done: true, records: [{ Id: "005A" }] });
           if (url.searchParams.get("q")!.endsWith(" FROM Note__c")) {
@@ -1241,7 +1242,13 @@ describe("hue world create --export-from", () => {
               totalSize: 1,
               done: true,
               records: [
-                Object.fromEntries(fields.map((field) => [field, field === "Id" ? "a0W1" : 1])),
+                // A record in the recycle bin, in every field group.
+                Object.fromEntries(
+                  fields.map((field) => [
+                    field,
+                    field === "Id" ? "a0W1" : field === "IsDeleted" ? true : 1,
+                  ]),
+                ),
               ],
             });
           }
@@ -1249,7 +1256,10 @@ describe("hue world create --export-from", () => {
             totalSize: 3,
             done: false,
             nextRecordsUrl: "/services/data/v67.0/query/01gA-2000",
-            records: [{ Id: "001A" }, { Id: "001B" }],
+            records: [
+              { Id: "001A", IsDeleted: false },
+              { Id: "001B", IsDeleted: true },
+            ],
           });
         case "/query/01gA-2000":
           return Response.json({ totalSize: 3, done: true, records: [{ Id: "001C" }] });
@@ -1275,19 +1285,19 @@ describe("hue world create --export-from", () => {
       "/sobjects/User/describe",
       "/query?q=SELECT+Id%2CUsername+FROM+User",
       "/sobjects/Account/describe",
-      "/query?q=SELECT+Id%2CName%2CIsDeleted+FROM+Account",
+      "/queryAll?q=SELECT+Id%2CName%2CIsDeleted+FROM+Account",
       "/query/01gA-2000",
       "/sobjects/Widget__c/describe",
       "/sobjects/Wide__c/describe",
     ]);
-    // The wide object is read in field groups: each within the URL budget, each with Id,
-    // together every field once.
+    // The wide object is read in field groups: each within the URL budget, each with Id and
+    // IsDeleted, together every field once.
     expect(wideQueries.length).toBeGreaterThan(1);
     for (const query of wideQueries) {
       expect(query.urlLength).toBeLessThanOrEqual(12_000);
-      expect(query.fields[0]).toBe("Id");
+      expect(query.fields.slice(0, 2)).toEqual(["Id", "IsDeleted"]);
     }
-    expect(wideQueries.flatMap((query) => query.fields.slice(1))).toEqual(["IsDeleted", ...wide]);
+    expect(wideQueries.flatMap((query) => query.fields.slice(2))).toEqual(wide);
     expect(result.stderr).toContain(`Salesforce: 1 Wide__c in ${wideQueries.length} field groups`);
     expect(result.stderr).toContain(
       `Salesforce: read 1 wide object in field groups to stay within the URL limit: Wide__c (${wideQueries.length}).`,
@@ -1298,7 +1308,16 @@ describe("hue world create --export-from", () => {
     );
     const exchanges = (await json(stand.stored.get("salesforce-1"))) as {
       request: { url: string; headers: Record<string, string> };
+      response: { body: { records?: Record<string, unknown>[] } };
     }[];
+    // queryAll's deleted records reach the upload with IsDeleted true, in every field group.
+    expect(
+      exchanges.find((item) => item.request.url.includes("FROM+Account"))!.response.body.records,
+    ).toContainEqual({ Id: "001B", IsDeleted: true });
+    const wideGroups = exchanges.filter((item) => item.request.url.includes("FROM+Wide__c"));
+    expect(wideGroups.length).toBe(wideQueries.length);
+    for (const group of wideGroups)
+      expect(group.response.body.records![0]).toMatchObject({ Id: "a0W1", IsDeleted: true });
     // A query page keeps its query options header and loses the access token.
     expect(
       exchanges.find((item) => item.request.url.endsWith("/query/01gA-2000"))!.request.headers,
@@ -1316,7 +1335,7 @@ describe("hue world create --export-from", () => {
     const notes = exchanges.filter((item) => /Note__c|01gN/.test(item.request.url));
     expect(notes.map((item) => item.request.url.replace(/^.*v67\.0/, ""))).toEqual([
       "/sobjects/Note__c/describe",
-      "/query?q=SELECT+Id%2CIsDeleted%2CBody__c+FROM+Note__c",
+      "/queryAll?q=SELECT+Id%2CIsDeleted%2CBody__c+FROM+Note__c",
       "/query/01gN-200",
     ]);
   });
