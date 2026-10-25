@@ -1,5 +1,5 @@
 import {
-  readWorldPreparation,
+  readWorldRefusal,
   TERMINAL_WORLD_DIAGNOSTICS,
   type WorldPreparationProgress,
 } from "./readiness.js";
@@ -53,10 +53,12 @@ export class HueEnvironmentError extends Error {
     readonly diagnostic?: string,
     /** Bounded, sanitized progress for a World preparation refusal. */
     readonly preparation?: WorldPreparationProgress,
+    /** The gateway's own message for a World refusal, bounded and without control characters. */
+    readonly hint?: string,
   ) {
     super(
       status
-        ? `Hue environment request failed (HTTP ${status}${diagnostic ? `, ${diagnostic}` : ""})`
+        ? `Hue environment request failed (HTTP ${status}${diagnostic ? `, ${diagnostic}` : ""})${hint ? `: ${hint}` : ""}`
         : "Hue environment connection or response failed",
     );
     this.name = "HueEnvironmentError";
@@ -87,7 +89,6 @@ export function isTransientEnvironmentError(error: unknown): boolean {
 }
 /** A `Retry-After` longer than this waits this long: Hue asks for a second, never minutes. */
 const MAX_RETRY_AFTER_MS = 10_000;
-const WORLD_PREPARATION_WAIT_MS = 120_000;
 const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
 /** Version 00 with real identifiers: an all-zero trace or span ID is invalid, and Hue refuses it. */
 function validTraceparent(value: string) {
@@ -165,12 +166,13 @@ export class WorldClient {
     }
     if (!response.ok) {
       const diagnostic = diagnosticOf(response);
-      const preparation = await readWorldPreparation(response, diagnostic);
+      const refusal = await readWorldRefusal(response, diagnostic);
       throw new HueEnvironmentError(
         response.status,
         response.status === 429 || response.status === 503 ? retryAfterMillis(response) : undefined,
         diagnostic,
-        preparation,
+        refusal.preparation,
+        refusal.message,
       );
     }
     try {
@@ -200,7 +202,7 @@ export class WorldClient {
     method: string,
     path: string,
     body?: unknown,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; onPreparing?: (error: HueEnvironmentError) => void } = {},
     waitForWorld = false,
   ): Promise<T> {
     // Serialize once: a body this client cannot encode is a caller error that no retry fixes.
@@ -215,72 +217,46 @@ export class WorldClient {
               REQUEST_BOUNDS,
             ),
           );
+    const { signal } = options;
     let ordinaryFailures = 0;
-    let preparingUntil: number | undefined;
-    let preparation: AbortController | undefined;
-    let preparationTimer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      for (;;) {
-        const signal = preparation
-          ? options.signal
-            ? AbortSignal.any([options.signal, preparation.signal])
-            : preparation.signal
-          : options.signal;
-        if (
-          signal?.aborted ||
-          (preparingUntil !== undefined && performance.now() >= preparingUntil)
-        )
-          throw new HueEnvironmentError();
-        try {
-          return await this.send<T>(method, path, payload, { signal });
-        } catch (error) {
-          if (!(error instanceof HueEnvironmentError)) throw error;
-          if (signal?.aborted) throw error;
-          const preparing =
-            waitForWorld && error.status === 503 && error.diagnostic === "world_preparing";
-          let wait: number;
-          if (preparing) {
-            if (preparingUntil === undefined) {
-              preparingUntil = performance.now() + WORLD_PREPARATION_WAIT_MS;
-              preparation = new AbortController();
-              preparationTimer = setTimeout(() => preparation!.abort(), WORLD_PREPARATION_WAIT_MS);
-            }
-            // A zero Retry-After must not turn preparation into an unbounded busy loop.
-            wait = Math.max(100, error.retryAfterMs ?? 1000);
-          } else {
-            ordinaryFailures++;
-            if (!isTransientEnvironmentError(error) || ordinaryFailures >= this.maxAttempts)
-              throw error;
-            const backoff = Math.min(100 * 2 ** (ordinaryFailures - 1), 2000);
-            wait = error.retryAfterMs ?? backoff + Math.random() * backoff;
-          }
-          if (preparingUntil !== undefined) {
-            const remaining = preparingUntil - performance.now();
-            if (remaining <= 0) throw error;
-            wait = Math.min(wait, remaining);
-          }
-          const waiting = preparation
-            ? options.signal
-              ? AbortSignal.any([options.signal, preparation.signal])
-              : preparation.signal
-            : options.signal;
-          await new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(() => {
-              waiting?.removeEventListener("abort", abort);
-              resolve();
-            }, wait);
-            const abort = () => {
-              clearTimeout(timer);
-              waiting?.removeEventListener("abort", abort);
-              reject(new HueEnvironmentError());
-            };
-            if (waiting?.aborted) abort();
-            else waiting?.addEventListener("abort", abort, { once: true });
-          });
+    // A World that is still preparing is waited for as long as the gateway says to retry and the
+    // caller's signal stands; the last refusal, with the gateway's own words, is what a caller that
+    // stops waiting sees, not a connection failure.
+    let preparing: HueEnvironmentError | undefined;
+    for (;;) {
+      if (signal?.aborted) throw preparing ?? new HueEnvironmentError();
+      try {
+        return await this.send<T>(method, path, payload, { signal });
+      } catch (error) {
+        if (!(error instanceof HueEnvironmentError)) throw error;
+        if (signal?.aborted) throw preparing ?? error;
+        let wait: number;
+        if (waitForWorld && error.status === 503 && error.diagnostic === "world_preparing") {
+          preparing = error;
+          options.onPreparing?.(error);
+          // A zero Retry-After must not turn preparation into an unbounded busy loop.
+          wait = Math.max(100, error.retryAfterMs ?? 1000);
+        } else {
+          ordinaryFailures++;
+          if (!isTransientEnvironmentError(error) || ordinaryFailures >= this.maxAttempts)
+            throw error;
+          const backoff = Math.min(100 * 2 ** (ordinaryFailures - 1), 2000);
+          wait = error.retryAfterMs ?? backoff + Math.random() * backoff;
         }
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", abort);
+            resolve();
+          }, wait);
+          const abort = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", abort);
+            reject(preparing ?? new HueEnvironmentError());
+          };
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        });
       }
-    } finally {
-      if (preparationTimer !== undefined) clearTimeout(preparationTimer);
     }
   }
 
@@ -369,7 +345,10 @@ export class WorldClient {
     return this.request<WorldVersion>("GET", `/environment-versions/${uuid(id)}`);
   }
   /** Creates or recovers one fresh isolated world using a stable idempotency key. */
-  createRun(input: CreateRunInput, options: { signal?: AbortSignal } = {}) {
+  createRun(
+    input: CreateRunInput,
+    options: { signal?: AbortSignal; onPreparing?: (error: HueEnvironmentError) => void } = {},
+  ) {
     if (
       input.maxSteps !== undefined &&
       (!Number.isInteger(input.maxSteps) || input.maxSteps < 1 || input.maxSteps > 500)

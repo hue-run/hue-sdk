@@ -1175,6 +1175,16 @@ type RunKind = "direct" | "simulation" | "mixed";
  * through its Scenario decides nothing. Left open, every world case runs in a fresh world, every
  * answer-only case runs direct, and a version holding both runs mixed; a forced `--mode` is
  * refused when a case cannot run that way. */
+/** Whether to log a case's World-preparation wait now: on its first refusal, then every 30 s. */
+const preparingLogAt = new Map<string, number>();
+function preparingLogged(caseId: string): boolean {
+  const now = Date.now();
+  const last = preparingLogAt.get(caseId);
+  if (last !== undefined && now - last < 30_000) return false;
+  preparingLogAt.set(caseId, now);
+  return true;
+}
+
 export function runKindOf(selection: { mode: RunMode; cases: number; worldCases: number }): {
   kind: RunKind;
   refusal?: string;
@@ -1708,6 +1718,10 @@ async function runOnce(
           return;
         }
         const label = caseKeys.get(event.caseId) ?? event.caseId;
+        if (event.type === "world_preparing") {
+          if (preparingLogged(event.caseId)) output.log(`[${label}] waiting for World preparation`);
+          return;
+        }
         if (event.type === "world_created") output.log(`[${label}] world created`);
         else if (event.type === "target_started") output.log(`[${label}] agent started`);
         else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
@@ -1937,6 +1951,11 @@ async function runExperimentAttempt(
             deprecationWarnings: false,
             signal,
             onProgress(event) {
+              if (event.type === "world_preparing") {
+                if (preparingLogged(context.item.id))
+                  output.log(`[${label}] waiting for World preparation`);
+                return;
+              }
               if (event.type === "world_created") output.log(`[${label}] world created`);
               else if (event.type === "target_started") output.log(`[${label}] agent started`);
               else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
