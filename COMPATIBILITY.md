@@ -24,10 +24,17 @@ path formats are masked while ordinary identifiers remain. URL identity also pas
 existing `redactor` as `url.full`, including metadata-only capture. Borrowed spans are sanitized
 only in Hue's export copy. Present `http.url`, `http.target` and `url.path` hooks follow the
 canonical URL hook. Full URL aliases share the final URL, path aliases share its pathname,
-`url.query` is removed and span names contain only the method. Body capture is limited to
+`url.query` is removed and span names contain only the method.
+HTTP URL-valued `resource.name` metadata is filtered independently in Hue's copy, including parent
+resources, live announcements and log resources, while ordinary service labels remain unchanged.
+Captured values declare `application/json`; original content types are recorded as allowed HTTP
+header attributes. Body capture is limited to
 eligible text and JSON content, at most 1 MiB per side, with truncation marked. Streaming capture
 observes only application-consumed bytes. Calls made through raw sockets, gRPC, WebSockets or
 another process are outside this capture. See the [Python HTTP capture guide](./packages/sdk-python/README.md#outbound-http-capture).
+
+Configured OpenTelemetry attribute limits remain authoritative: accepted body cuts use structured
+markers, dropped keys remain absent and URI rewrites over the accepted value limit are omitted.
 
 The optional HTTPX2 family is verified with `httpx2==2.13.1`.
 

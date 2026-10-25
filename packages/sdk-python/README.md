@@ -340,7 +340,9 @@ remains available for propagation between your own services.
 With an owned provider, HTTP spans stay in the active Hue helper's trace when the application
 temporarily activates an independent trace. The application's current context remains active
 inside its transport. Borrowed providers honor the application's active parent, including
-application spans within the same trace.
+application spans within the same trace. Closed Hue scopes stop affecting later HTTP capture in
+the originating task, including cleanup performed in another task. Detached work retains its
+original client policy and does not move to a newer client after shutdown.
 
 | Option | Default | Effect |
 | --- | --- | --- |
@@ -377,9 +379,14 @@ In Hue's export copy, full URL aliases share the final URL, path aliases share i
 `url.query` is removed. The copy's name is the HTTP method. Other exporters retain their original
 span, including when Hue borrows their provider.
 
+HTTP URL-valued `resource.name` metadata is filtered independently through `url.full` and
+`resource.name` hooks, on spans, logs and their resources, including parent spans and live
+announcements. Ordinary labels and other exporters' original records remain unchanged.
+
 Captured content passes through Hue's credential filtering and the
 existing `redactor`, called with `input.value` or `output.value`. Authorization and cookie headers
-are never captured. Ordinary header containers and known pagination cursors remain available,
+are never captured. HTTP requests made by the redactor itself are excluded from capture.
+Ordinary header containers and known pagination cursors remain available,
 with credential fields inside them redacted. Query values are content: `input.value` holds query
 parameters, with repeated names as arrays, merged with a JSON-object or form body. Other text
 bodies appear under `body`.
@@ -387,7 +394,9 @@ An empty request records `{}`. `output.value` is the parsed JSON response body, 
 other eligible content types. Status and allowed response headers are separate span attributes.
 Captured headers include supported API behavior headers such as `notion-version`, recorded as
 `http.request.header.notion_version` and `http.response.header.notion_version`. Content types use
-`input.mime_type` and `output.mime_type`. Eligible content types are JSON, text, XML and URL-encoded
+`http.request.header.content_type` and `http.response.header.content_type`. Captured values are
+JSON-encoded, including parsed text and form values, so `input.mime_type` and `output.mime_type`
+declare `application/json`. Eligible content types are JSON, text, XML and URL-encoded
 forms. Text uses its declared charset, or UTF-8 when none is declared. Unknown charsets and invalid
 text omit the body. Binary and unrecognized content types record size only. HTTP 5xx responses
 mark the span as an error. Network failures record the exception type without its message.
@@ -396,6 +405,10 @@ Each body is bounded to 1 MiB. A body over the cap records a structured OTLP `hu
 placeholder and its observed byte count rather than body text. The span also lists the affected
 content key in its `hue.truncated` attribute. The span remains present. HTTP bodies are not uploaded
 as oversized span values.
+
+OpenTelemetry's configured attribute limits still apply. Accepted body values shortened by those
+limits carry structured cut markers, while dropped attributes remain missing. URL rewrites that
+exceed the source attribute limit are omitted rather than expanded or restored.
 
 Unbuffered request streams remain unread and record no request body. Request body-size attributes
 require a known byte count. Capture never reads a response stream ahead of its consumer.

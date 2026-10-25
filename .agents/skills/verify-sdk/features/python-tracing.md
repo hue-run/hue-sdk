@@ -12,10 +12,18 @@ An application opens `Hue(base_url, api_key, ...)`, records spans, model calls a
   It preserves consumer bytes and request headers, observes streams without extra reads, applies
   content opt-outs and redaction, marks bodies over 1 MiB, keeps model HTTP identity without bodies,
   resumes body capture in nested Hue tools and suppresses exporter traffic. Import hooks, nested
-  wrappers, independent provider contexts and multiple-client shutdown remain safe.
+  wrappers, independent provider contexts and multiple-client shutdown remain safe. Closed helper
+  scopes are ignored in the originating task after cleanup in another task, while detached work
+  retains its original client policy. User-redactor HTTP is suppressed without
+  suppressing the application call. A later client registration wraps replaced methods again.
+  Captured MIME fields declare JSON while allowed header attributes preserve original content types.
+  Original SDK attribute limits remain authoritative: URI expansions are omitted, accepted body
+  cuts use structured markers and dropped keys stay absent.
 - `py-http-identity` scrubs recognized credentials in URL paths, preserves ordinary identifiers,
   applies URL and present URI-alias redactors in both content modes, removes `url.query` and
-  sanitizes aliases and method-only span names only in Hue's export copy.
+  sanitizes aliases and method-only span names only in Hue's export copy. URL-valued `resource.name`
+  metadata on spans and their resources is filtered independently, including non-HTTP parents,
+  live announcements and log resources, while ordinary labels remain unchanged.
 - `py-http-fork` keeps ordinary HTTP working after `os.fork()`, detaches inherited capture and
   permits a fresh Hue client in the child, including inherited requests and aiohttp responses.
 - `py-ack` returns `force_flush()` and receipt results that match the receiver.
@@ -59,7 +67,9 @@ Preconditions:
   application receives the same bytes and headers with capture on and off. Cover all supported clients and real Slack, Google
   API and Pipedream transports, unread and partially consumed responses, model/export suppression,
   metadata-only and HTTP opt-outs, existing redaction, imports after Hue creation and client
-  shutdown. Repeat from the installed wheel, including Python 3.10. These checks use synthetic
+  shutdown. Check JSON MIME declarations, redactor HTTP recursion, replacement methods and
+  later HTTP after a scope closes in another task. Repeat from the installed wheel, including
+  Python 3.10. These checks use synthetic
   HTTP endpoints and establish no live-provider compatibility claim.
 - **HTTP identity (`py-http-identity`).** Run `uv run --frozen --all-groups pytest tests/test_http_identity.py`.
   Check real requests and HTTPX consumer bytes, default and metadata-only policies, redacted path

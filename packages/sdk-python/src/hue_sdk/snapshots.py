@@ -26,7 +26,11 @@ from opentelemetry.trace import Link, SpanContext, Status, format_span_id
 
 from ._attachment import Attachment, PlacedAttachment, attachment_part
 from ._blobs import MAX_BLOB_BYTES, Held, HeldValues, Uploads, attach_held, held_size
-from ._http_identity import safe_http_span
+from ._http_identity import (
+    _resource_name_attributes,
+    safe_http_resource,
+    safe_http_span,
+)
 from ._inline_files import (
     INLINE_FILE_TEXT_PER_RECORD,
     MAX_INLINE_FILE_TEXT,
@@ -887,7 +891,7 @@ def snapshot_pending_span(
             context.trace_flags,
             context.trace_state,
         ),
-        resource=budget.resource(span.resource),
+        resource=budget.resource(identity.resource),
         attributes=BoundedAttributes(
             attributes=attributes, immutable=True, extended_attributes=True
         ),
@@ -905,6 +909,7 @@ def snapshot_log(
     record_bytes: int = MAX_REQUEST_BYTES,
     value_bytes: int | None = None,
     hold: Hold | None = None,
+    http_redactor: Callable[[str, str], str | None] | None = None,
 ) -> ReadableLogRecord:
     record = copy(log_record.log_record)
     # A log record's media upload under its own trace: an uncorrelated record holds none.
@@ -927,10 +932,12 @@ def snapshot_log(
             record.body = budget.held_body(record.body)
         else:
             record.body = budget.content(record.body, "body")
-        resource = budget.resource(log_record.resource)
+        resource = budget.resource(safe_http_resource(log_record.resource, http_redactor))
         record.attributes = budget.listed(
             budget.attributes(
-                record.attributes, log_record.dropped_attributes, own=holding is not None
+                _resource_name_attributes(record.attributes or {}, http_redactor),
+                log_record.dropped_attributes,
+                own=holding is not None,
             )
         )
         record.event_name = budget.value(record.event_name)

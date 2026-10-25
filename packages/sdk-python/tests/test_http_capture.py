@@ -21,7 +21,7 @@ from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.trace import NonRecordingSpan, SpanContext, SpanKind, TraceFlags
 
 from hue_sdk import Hue
-from hue_sdk._otel_compat import export_context
+from hue_sdk._otel_compat import export_context, instrumentation_suppressed
 
 PAYLOAD = {"ok": True, "items": [{"id": "synthetic-item", "text": "héllo"}]}
 BODY = json.dumps(PAYLOAD, ensure_ascii=False).encode()
@@ -662,6 +662,76 @@ def test_failing_redactor_omits_http_content_without_changing_response(receiver,
     assert b"synthetic-user" not in payload and b"synthetic-item" not in payload
 
 
+@pytest.mark.parametrize("policy", ({}, {"capture_content": False}, {"capture_http_bodies": False}))
+def test_redactor_http_rpc_is_suppressed_without_hiding_application_http(receiver, app, policy):
+    target = app.url + "/target?private=synthetic-target-query-private"
+    request_value = {"private": "synthetic-target-body-private"}
+    baseline = requests.post(target, json=request_value).content
+    baseline_request = app.requests[0]
+    inside = False
+    calls = []
+
+    def redact(key, value):
+        nonlocal inside
+        if key not in {"input.value", "output.value", "url.full"}:
+            return value
+        if inside:
+            raise RuntimeError("synthetic-redactor-reentry")
+        inside = True
+        try:
+            calls.append(key)
+            response = requests.post(
+                app.url + "/redactor", json={"private": "synthetic-redactor-rpc-private"}
+            )
+            assert response.content == BODY
+        finally:
+            inside = False
+        if key == "input.value":
+            return {"input": "[redacted]"}
+        if key == "output.value":
+            return {"output": "[redacted]"}
+        return value
+
+    with Hue(
+        receiver.url, "synthetic-http-key", live_spans=False, redactor=redact, **policy
+    ) as hue:
+        with hue.span("application") as parent:
+            assert not instrumentation_suppressed()
+            assert requests.post(target, json=request_value).content == baseline == BODY
+            assert trace.get_current_span() is parent.otel_span
+            assert not instrumentation_suppressed()
+            assert requests.get(app.url + "/after").content == BODY
+            assert trace.get_current_span() is parent.otel_span
+            assert not instrumentation_suppressed()
+        assert hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 0
+    spans = http_spans(receiver)
+    assert len(spans) == 2
+    assert {attributes(span)["url.full"] for span in spans} == {
+        app.url + "/target",
+        app.url + "/after",
+    }
+    target_requests = [request for request in app.requests if request[0].startswith("/target?")]
+    assert target_requests == [baseline_request, baseline_request]
+    assert len([request for request in app.requests if request[0] == "/redactor"]) == len(calls)
+    assert "url.full" in calls
+    if not policy:
+        assert set(calls) == {"input.value", "output.value", "url.full"}
+        for span in spans:
+            fields = attributes(span)
+            assert json.loads(fields["input.value"]) == {"input": "[redacted]"}
+            assert json.loads(fields["output.value"]) == {"output": "[redacted]"}
+    else:
+        assert set(calls) == {"url.full"}
+    payload = b"".join(body for _, _, body in receiver.requests)
+    for secret in (
+        b"synthetic-target-query-private",
+        b"synthetic-target-body-private",
+        b"synthetic-redactor-rpc-private",
+    ):
+        assert secret not in payload
+
+
 @pytest.mark.parametrize("kind", ("requests", "httpx", "httpx2"))
 def test_streaming_request_body_is_never_read_ahead_or_replayed(receiver, app, kind):
     reads = []
@@ -824,6 +894,70 @@ def test_declared_form_charset_controls_percent_decoding(receiver, app):
         assert hue.force_flush()
     fields = attributes(http_spans(receiver)[0])
     assert json.loads(fields["input.value"]) == {"q": "café"}
+
+
+@pytest.mark.parametrize(
+    (
+        "request_body",
+        "request_mime",
+        "expected_input",
+        "response_body",
+        "response_mime",
+        "expected_output",
+    ),
+    (
+        (
+            "héllo".encode(),
+            "text/plain; charset=utf-8",
+            {"body": "héllo"},
+            "response café".encode(),
+            "text/plain; charset=utf-8",
+            "response café",
+        ),
+        (
+            b"q=hello&tag=first&tag=second",
+            "application/x-www-form-urlencoded",
+            {"q": "hello", "tag": ["first", "second"]},
+            b"ok",
+            "text/plain",
+            "ok",
+        ),
+        (
+            b'{"user_id":"synthetic-user","count":2}',
+            "application/json",
+            {"user_id": "synthetic-user", "count": 2},
+            BODY,
+            "application/json",
+            PAYLOAD,
+        ),
+    ),
+)
+def test_recorded_http_values_use_json_mime_and_keep_actual_wire_content_types(
+    receiver,
+    app,
+    request_body,
+    request_mime,
+    expected_input,
+    response_body,
+    response_mime,
+    expected_output,
+):
+    app.body = response_body
+    app.content_type = response_mime
+    target = app.url + "/mime"
+    headers = {"Content-Type": request_mime}
+    baseline = requests.post(target, data=request_body, headers=headers).content
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        assert requests.post(target, data=request_body, headers=headers).content == baseline
+        assert hue.force_flush()
+    assert baseline == response_body
+    assert app.requests[0] == app.requests[1]
+    fields = attributes(http_spans(receiver)[0])
+    assert json.loads(fields["input.value"]) == expected_input
+    assert json.loads(fields["output.value"]) == expected_output
+    assert fields["input.mime_type"] == fields["output.mime_type"] == "application/json"
+    assert fields["http.request.header.content_type"] == request_mime
+    assert fields["http.response.header.content_type"] == response_mime
 
 
 @pytest.mark.parametrize(
@@ -1209,6 +1343,69 @@ def test_shutdown_preserves_later_application_wrapper(receiver, app):
     finally:
         hue.shutdown_safe()
         requests.adapters.HTTPAdapter.send = original
+
+
+def test_second_client_wraps_a_replaced_method_once_and_preserves_its_owner(receiver, app):
+    script = """
+import sys
+import requests
+from hue_sdk import Hue
+receiver, app = sys.argv[1:]
+baseline = requests.get(app + '/baseline').content
+original = requests.adapters.HTTPAdapter.send
+first = Hue(receiver, 'synthetic-first-key', live_spans=False)
+second = None
+first_wrapper = requests.adapters.HTTPAdapter.send
+error = requests.ConnectionError('synthetic-application-wrapper-failure')
+calls = []
+def application_send(adapter, request, *args, **kwargs):
+    calls.append(request.url)
+    if request.url == app + '/failed':
+        raise error
+    return first_wrapper(adapter, request, *args, **kwargs)
+try:
+    with first.span('first'):
+        assert requests.get(app + '/first').content == baseline
+    assert first.force_flush()
+    requests.adapters.HTTPAdapter.send = application_send
+    second = Hue(receiver, 'synthetic-second-key', live_spans=False)
+    assert requests.adapters.HTTPAdapter.send is not application_send
+    with second.span('second'):
+        try:
+            requests.get(app + '/failed')
+        except requests.ConnectionError as caught:
+            assert caught is error
+        else:
+            raise AssertionError('application exception was lost')
+        assert requests.get(app + '/second').content == baseline
+    assert second.force_flush()
+    assert first.shutdown()
+    assert requests.get(app + '/after-first-shutdown').content == baseline
+    assert second.force_flush()
+    assert second.export_status.instrumentation_failures == 0
+    assert calls.count(app + '/failed') == calls.count(app + '/second') == 1
+    assert second.shutdown()
+    assert requests.adapters.HTTPAdapter.send is application_send
+    assert requests.get(app + '/after-shutdown').content == baseline
+finally:
+    first.shutdown_safe()
+    if second is not None:
+        second.shutdown_safe()
+    requests.adapters.HTTPAdapter.send = original
+"""
+    subprocess.run(
+        [sys.executable, "-I", "-c", script, receiver.url, app.url], check=True, timeout=20
+    )
+    spans = http_spans(receiver)
+    assert len(spans) == 4
+    by_url = {attributes(span)["url.full"]: span for span in spans}
+    parents = {
+        span.name: span.span_id for span in receiver.spans() if span.name in {"first", "second"}
+    }
+    assert by_url[app.url + "/first"].parent_span_id == parents["first"]
+    assert by_url[app.url + "/failed"].parent_span_id == parents["second"]
+    assert by_url[app.url + "/second"].parent_span_id == parents["second"]
+    assert not any(path == "/failed" for path, _, _ in app.requests)
 
 
 def test_slack_sync_and_async_clients_record_real_transports(receiver, app, monkeypatch):

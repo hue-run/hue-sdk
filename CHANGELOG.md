@@ -2002,14 +2002,22 @@ No registry release is claimed until publication and registry acceptance complet
   metadata-only mode. Present `http.url`, `http.target` and `url.path` hooks follow, with each
   result sanitized again. Full URL aliases share the final URL, path aliases share its pathname
   and `url.query` is removed. These fields and method-only span names are protected in Hue's
-  export copy without changing other exporters' original spans. With body capture enabled, `input.value` merges query
+  export copy without changing other exporters' original spans. HTTP URL-valued `resource.name`
+  metadata is filtered independently, including parent resources, live announcements and log
+  resources, while ordinary labels remain
+  unchanged. With body capture enabled, `input.value` merges query
   parameters with JSON-object or form fields, and `output.value` records the parsed JSON response
   body or eligible response text. Status and allowed headers remain separate attributes, including
   `http.request.header.notion_version` and `http.response.header.notion_version`.
+  `input.mime_type` and `output.mime_type` declare `application/json` for all captured JSON-encoded
+  values, including text and forms. Original content types are carried separately as
+  `http.request.header.content_type` and `http.response.header.content_type`.
   The existing redactor and credential filtering apply. Body sizes use
   `http.request.body.size` and `http.response.body.size`; a body over 1 MiB records the existing
   structured OTLP `hue.truncated` placeholder instead of body text. The affected key is also
   listed in the span's `hue.truncated` attribute. Binary bodies record size only.
+  Existing OpenTelemetry attribute limits remain authoritative: accepted body cuts keep structured
+  markers, dropped keys stay absent and URI rewrites beyond the value limit are omitted.
 - HTTP observation adds no runtime dependencies or request headers. Requests to the configured
   Hue origin are excluded. Model HTTP calls keep identity without bodies, while a nested Hue
   tool resumes body capture. Nested supported clients share one Hue HTTP span,
@@ -2018,6 +2026,9 @@ No registry release is claimed until publication and registry acceptance complet
   complete response bodies. Calls use the client's existing owned or borrowed tracer provider.
   An owned provider keeps HTTP spans in the active Hue helper's trace when the application
   temporarily activates an independent trace. Borrowed providers retain the active application's parent.
+  Closed helper scopes stop affecting subsequent HTTP capture in the originating task after
+  asynchronous cleanup. Detached work retains its original client policy.
+  HTTP requests made by a user redactor are excluded from capture to prevent recursive redaction.
   Forked children detach inherited capture and can create a fresh client for their own capture.
 
 ### [0.13.6] - 2026-10-24

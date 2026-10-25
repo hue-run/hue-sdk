@@ -21,7 +21,9 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from ._http_bounds import mark_cut, remember_span
 from ._http_identity import sanitize_http_url
+from ._http_scope import client_scope, is_stale_span, model_for, scope_for
 from ._http_streams import install_stream, uninstall_stream_hooks
 from ._limits import MAX_CONTENT_BYTES, TRUNCATED_KEY
 from ._otel_compat import instrumentation_suppressed
@@ -36,15 +38,13 @@ from ._tool_definitions import (
 if TYPE_CHECKING:
     from .client import Hue
 
-# A Hue scope selects its own client even when another client was initialized later.
-client_scope: ContextVar[Hue | None] = ContextVar("hue_http_client", default=None)
 _aio_decode: ContextVar[bool] = ContextVar("hue_aiohttp_decode", default=True)
 _exchange: ContextVar[Exchange | None] = ContextVar("hue_http_exchange", default=None)
 _lock = RLock()
 _clients: list[weakref.ReferenceType[Hue]] = []
 _patches: list[tuple[Any, str, Any, Any]] = []
 _pending: weakref.WeakSet[Exchange] = weakref.WeakSet()
-_BEHAVIOR_HEADERS = frozenset({"notion-version"})
+_BEHAVIOR_HEADERS = frozenset({"notion-version", "content-type"})
 # Continuation tokens route to another page; they do not authenticate the caller.
 _CONTINUATION_KEYS = frozenset(
     {
@@ -263,7 +263,8 @@ class Exchange:
         self.url = attributes["url.full"]
         self.method = attributes["http.request.method"]
         current = trace.get_current_span()
-        local = client._http_parent.get()
+        local_scope = scope_for(client)
+        local = local_scope.span if local_scope is not None else None
         context = None
         if (
             client._owns_provider
@@ -273,6 +274,8 @@ class Exchange:
         ):
             # Another provider may temporarily be active inside an owned Hue helper.
             context = trace.set_span_in_context(local)
+        elif client._owns_provider and is_stale_span(current):
+            context = trace.set_span_in_context(local if local is not None else trace.INVALID_SPAN)
         existing = getattr(current, "attributes", None) or {}
         same = (
             (
@@ -298,6 +301,7 @@ class Exchange:
         )
         # Preserve the other provider's application context when selecting Hue's parent.
         self.scope_span = current if context is not None else self.span
+        remember_span(self.span)
         self.bodies = self.bodies and self.span.is_recording()
         with _lock:
             _pending.add(self)
@@ -315,6 +319,8 @@ class Exchange:
 
     def _value(self, key: str, value: Any, *, cut: bool = False) -> None:
         def record() -> None:
+            if cut:
+                mark_cut(self.span, key, value["hue.truncated_bytes"])
             # Scrub before the callback; scrub its result again before any processor sees it.
             clean = _scrub(value)
             encoded, truncated = self.client._bounded_content(key, clean, bound=self.cap)
@@ -337,7 +343,16 @@ class Exchange:
                 self._marker(key, len(encoded.encode("utf-8")))
                 return
             self.span.set_attribute(key, encoded)
-            if cut:
+            mime_key = key.partition(".")[0] + ".mime_type"
+            self.span.set_attribute(mime_key, "application/json")
+            stored = getattr(self.span, "attributes", None) or {}
+            if key in stored and (
+                stored[key] != encoded or stored.get(mime_key) != "application/json"
+            ):
+                if not cut:
+                    mark_cut(self.span, key, len(encoded.encode("utf-8")))
+                self._list_cut(key)
+            elif cut:
                 self._list_cut(key)
 
         self.client._instrument(record)
@@ -348,7 +363,9 @@ class Exchange:
 
     def _marker(self, key: str, size: int) -> None:
         # The Hue processor promotes this explicit cut to a structured OTLP placeholder.
+        mark_cut(self.span, key, size)
         self.span.set_attribute(key, json.dumps(truncated_marker(size), separators=(",", ":")))
+        self.span.set_attribute(key.partition(".")[0] + ".mime_type", "application/json")
         self._list_cut(key)
 
     def _input(self, request: Request, query: str) -> None:
@@ -382,8 +399,6 @@ class Exchange:
                 value["body"] = parsed
             self._value("input.value", value)
         # Unknown streaming/binary request bodies stay missing, never misrepresented as empty.
-        if mime and "input.value" in (getattr(self.span, "attributes", None) or {}):
-            self.span.set_attribute("input.mime_type", mime)
 
     def response(self, status: int, headers: Any) -> None:
         self.status = status
@@ -444,8 +459,6 @@ class Exchange:
                     body = _parse(bytes(self.buffer), mime)
                     if body is not _ABSENT:
                         self._value("output.value", body)
-                if self.size or complete:
-                    self.span.set_attribute("output.mime_type", mime)
         except Exception:
             self.client._record_issue()
         finally:
@@ -471,8 +484,9 @@ class Exchange:
 
 
 def _client() -> Hue | None:
-    active = client_scope.get()
-    if active is not None:
+    active_scope = scope_for()
+    if active_scope is not None:
+        active = active_scope.client
         return active if active._active and active.capture_http else None
     with _lock:
         candidates = [reference() for reference in reversed(_clients)]
@@ -496,7 +510,9 @@ def _begin(kind: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Exchange
         current = trace.get_current_span()
         attributes = getattr(current, "attributes", None) or {}
         operation = attributes.get("gen_ai.operation.name")
-        local_model = client._http_model_scope.get()
+        local_model = model_for(client)
+        if local_model is None and is_stale_span(current):
+            local_model = False
         model = (
             local_model
             if local_model is not None
@@ -657,9 +673,13 @@ def _patch(module: Any) -> None:
             return
         for class_name, name, kind, asynchronous in _TARGETS.get(module.__name__, []):
             owner = getattr(module, class_name, None)
-            if owner is None or any(item[0] is owner and item[1] == name for item in _patches):
+            if owner is None:
                 continue
             original = getattr(owner, name)
+            if any(
+                item[0] is owner and item[1] == name and item[3] is original for item in _patches
+            ):
+                continue
             wrapped = _wrap(original, kind, asynchronous)
             setattr(owner, name, wrapped)
             _patches.append((owner, name, original, wrapped))

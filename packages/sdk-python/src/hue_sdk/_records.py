@@ -11,9 +11,11 @@ from typing import Any
 
 from opentelemetry.attributes import BoundedAttributes
 from opentelemetry.sdk._logs import ReadableLogRecord
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.trace import Link, SpanKind
 
+from ._http_bounds import cuts_for
 from ._limits import TRUNCATED_BYTES_KEY, TRUNCATED_KEY
 
 # Attribute keys (and their dotted children) removed in metadata-only mode. Mirrors the
@@ -90,10 +92,12 @@ def http_truncated_attributes(
     span: ReadableSpan, attributes: Mapping[str, Any] | None
 ) -> Mapping[str, Any] | None:
     """An explicitly cut HTTP value is a placeholder, never a complete recorded body."""
-    if span.kind != SpanKind.CLIENT or not attributes or not attributes.get("http.request.method"):
+    if span.kind != SpanKind.CLIENT or not attributes:
         return attributes
+    facts = cuts_for(span)
     listed = attributes.get(TRUNCATED_KEY)
-    if not isinstance(listed, (tuple, list)):
+    listed = listed if isinstance(listed, (tuple, list)) else ()
+    if not facts and not attributes.get("http.request.method"):
         return attributes
     copied: dict[str, Any] | None = None
     for key, size_key in (
@@ -101,7 +105,9 @@ def http_truncated_attributes(
         ("output.value", "http.response.body.size"),
     ):
         value = attributes.get(key)
-        if key not in listed or key not in attributes or is_truncated_marker(value):
+        if (key not in facts and key not in listed) or key not in attributes:
+            continue
+        if is_truncated_marker(value):
             continue
         marker: Any = None
         if isinstance(value, str) and len(value) <= 256:
@@ -109,20 +115,33 @@ def http_truncated_attributes(
                 marker = json.loads(value)
             except (ValueError, RecursionError):
                 pass
-        size = attributes.get(size_key)
+        size = facts.get(key, attributes.get(size_key))
         if (
             isinstance(marker, dict)
             and set(marker) == {TRUNCATED_KEY, TRUNCATED_BYTES_KEY}
             and marker[TRUNCATED_KEY] is True
             and type(marker[TRUNCATED_BYTES_KEY]) is int
             and 0 <= marker[TRUNCATED_BYTES_KEY] <= (1 << 63) - 1
-        ):
+        ) and key not in facts:
             size = marker[TRUNCATED_BYTES_KEY]
         if type(size) is not int or not 0 <= size <= (1 << 63) - 1:
             size = value_bytes(value)
         if copied is None:
             copied = dict(attributes)
         copied[key] = truncated_marker(size)
+    present = [key for key in facts if key in attributes]
+    if present and isinstance(attributes.get(TRUNCATED_KEY), (tuple, list)):
+        # The SDK also clips each key name in this list; restore only our known cut facts.
+        kept = [
+            item
+            for item in listed
+            if isinstance(item, str) and not any(key.startswith(item) for key in present)
+        ]
+        repaired = with_truncated_keys(kept, present)
+        if list(listed) != repaired:
+            if copied is None:
+                copied = dict(attributes)
+            copied[TRUNCATED_KEY] = repaired
     return attributes if copied is None else copied
 
 
@@ -189,16 +208,17 @@ def replace_span(
     span: ReadableSpan,
     *,
     name: str | None = None,
+    resource: Resource | None = None,
     attributes: Mapping[str, Any] | None = None,
     events: Sequence[Event] | None = None,
     links: Sequence[Link] | None = None,
 ) -> ReadableSpan:
-    """A copy of ``span`` with its name, attributes, events or links replaced."""
+    """A copy of ``span`` with its name, resource, attributes, events or links replaced."""
     return OwnedSpan(
         name=span.name if name is None else name,
         context=span.context,
         parent=span.parent,
-        resource=span.resource,
+        resource=span.resource if resource is None else resource,
         attributes=owned_attributes(
             (span.attributes or {}) if attributes is None else attributes, span.dropped_attributes
         ),

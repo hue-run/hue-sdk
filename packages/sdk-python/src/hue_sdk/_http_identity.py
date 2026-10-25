@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from typing import Any
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.trace import SpanKind
 
+from ._http_bounds import SpanBounds, limits_for
 from ._records import replace_span
 from ._tool_definitions import REDACTED, _scrub_credential_text_unbounded
 
@@ -34,6 +37,23 @@ _METHOD = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,32}\Z", re.ASCII)
 _URL_KEYS = ("url.full", "http.url")
 _PATH_KEYS = ("http.target", "url.path")
 _URI_KEYS = (*_URL_KEYS, *_PATH_KEYS, "url.query")
+
+
+def _accepted_length(
+    attributes: Mapping[str, Any], keys: tuple[str, ...] | list[str], bounds: SpanBounds | None
+) -> int | None:
+    if not keys:
+        return None
+    if bounds is not None:
+        return bounds.value_length
+    # Unknown SDK policy cannot authorize widening a value beyond what the source accepted.
+    return min(len(attributes[key]) if isinstance(attributes[key], str) else 0 for key in keys)
+
+
+def _within_length(value: str, limit: int | None) -> str:
+    if limit is not None and len(value) > limit:
+        raise ValueError("HTTP URI exceeds the source attribute limit")
+    return value
 
 
 def _safe_path(path: str) -> str:
@@ -116,11 +136,69 @@ def _path_answer(raw: str, canonical: str | None) -> tuple[str | None, str]:
     return canonical, path
 
 
+def _redacted_url(
+    raw: str,
+    fields: tuple[str, ...],
+    redact: Callable[[str, str], str | None] | None,
+    limit: int | None = None,
+) -> str:
+    safe = _within_length(sanitize_http_url(raw), limit)
+    if redact is not None:
+        for field in fields:
+            rewritten = redact(field, safe)
+            if rewritten is None:
+                raise ValueError("HTTP URL omitted by redactor")
+            safe = _within_length(sanitize_http_url(rewritten), limit)
+    return safe
+
+
+def _resource_name_attributes(
+    attributes: Mapping[str, Any],
+    redact: Callable[[str, str], str | None] | None,
+    *,
+    bounds: SpanBounds | None = None,
+) -> Mapping[str, Any]:
+    value = attributes.get("resource.name")
+    if not isinstance(value, str) or not re.match(r"https?://", value.strip(), re.IGNORECASE):
+        return attributes
+    copied = dict(attributes)
+    try:
+        copied["resource.name"] = _redacted_url(
+            value,
+            ("url.full", "resource.name"),
+            redact,
+            _accepted_length(attributes, ("resource.name",), bounds),
+        )
+    except Exception:
+        copied.pop("resource.name", None)
+    return copied
+
+
+def safe_http_resource(
+    resource: Resource | None, redact: Callable[[str, str], str | None] | None = None
+) -> Resource | None:
+    """Filter a URL-valued resource name without changing ordinary service labels."""
+    if resource is None:
+        return None
+    attributes = _resource_name_attributes(resource.attributes, redact, bounds=limits_for(resource))
+    return (
+        resource
+        if attributes is resource.attributes
+        else Resource(attributes, schema_url=resource.schema_url)
+    )
+
+
 def safe_http_span(
     span: ReadableSpan, redact: Callable[[str, str], str | None] | None = None
 ) -> ReadableSpan:
     """Sanitize HTTP identity in Hue's copy, including both URL conventions and span names."""
     attributes = span.attributes or {}
+    bounds = limits_for(span)
+    resource = safe_http_resource(span.resource, redact)
+    safe_attributes = _resource_name_attributes(attributes, redact, bounds=bounds)
+    if resource is not span.resource or safe_attributes is not attributes:
+        span = replace_span(span, resource=resource, attributes=safe_attributes)
+        attributes = span.attributes or {}
     method = attributes.get("http.request.method", attributes.get("http.method"))
     keys = [key for key in _URL_KEYS if key in attributes]
     if span.kind != SpanKind.CLIENT or not isinstance(method, str):
@@ -132,32 +210,31 @@ def safe_http_span(
         return replace_span(span, name=name) if valid_method else span
     copied = dict(attributes)
     copied.pop("url.query", None)
+    url_length = _accepted_length(attributes, keys, bounds)
+    path_length = _accepted_length(attributes, paths, bounds)
     try:
         urls: dict[str, str] = {}
         for key in keys:
             raw = attributes[key]
             if not isinstance(raw, str):
                 raise ValueError("Invalid HTTP URL")
-            urls[key] = sanitize_http_url(raw)
+            urls[key] = _within_length(sanitize_http_url(raw), url_length)
         canonical: str | None = urls.get("url.full", urls[keys[0]]) if keys else None
         if canonical is not None:
-            if redact is not None:
-                for field in ("url.full", "http.url") if "http.url" in urls else ("url.full",):
-                    rewritten = redact(field, canonical)
-                    if rewritten is None:
-                        raise ValueError("HTTP URL omitted by redactor")
-                    canonical = sanitize_http_url(rewritten)
-            path = urlsplit(canonical).path
+            fields = ("url.full", "http.url") if "http.url" in urls else ("url.full",)
+            canonical = _redacted_url(canonical, fields, redact, url_length)
+            path = _within_length(urlsplit(canonical).path, path_length)
         elif paths:
             for key in paths:
                 raw_path = attributes[key]
                 if not isinstance(raw_path, str):
                     raise ValueError("Invalid HTTP path")
-                _path_answer(raw_path, None)
+                _within_length(_path_answer(raw_path, None)[1], path_length)
             raw_path = attributes.get("url.path", attributes[paths[0]])
             if not isinstance(raw_path, str):
                 raise ValueError("Invalid HTTP path")
             _, path = _path_answer(raw_path, None)
+            _within_length(path, path_length)
         else:
             path = "/"
         if redact is not None:
@@ -166,6 +243,9 @@ def safe_http_span(
                 if rewritten is None:
                     raise ValueError("HTTP path omitted by redactor")
                 canonical, path = _path_answer(rewritten, canonical)
+                _within_length(path, path_length)
+                if canonical is not None:
+                    _within_length(canonical, url_length)
         for key in keys:
             copied[key] = canonical
         for key in paths:

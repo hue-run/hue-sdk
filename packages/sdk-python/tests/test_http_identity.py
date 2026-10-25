@@ -6,6 +6,9 @@ import time
 
 import pytest
 import requests
+from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanLimits, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -616,3 +619,176 @@ def test_whole_url_body_values_scrub_capabilities_and_keep_body_callback_control
         b"synthetic-body-opaque",
     ):
         assert secret not in payload
+
+
+@pytest.mark.parametrize("location", ("span", "resource"))
+def test_url_resource_name_is_filtered_without_changing_plain_labels_or_vendor_resources(
+    receiver, app, location
+):
+    raw = (
+        app.url + "/bot123456789:synthetic_resource_secret/opaque/synthetic-resource-opaque"
+        "?token=synthetic_resource_query"
+    )
+    label = "synthetic-resource-label"
+    resource_attributes = {
+        "service.name": "synthetic-service",
+        "resource.name": raw if location == "resource" else label,
+    }
+    schema = "https://example.test/schema"
+    resource = Resource(resource_attributes, schema_url=schema)
+    provider = TracerProvider(shutdown_on_exit=False, resource=resource)
+    vendor = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(vendor))
+    calls = []
+
+    def redact(key, value):
+        if key in {"url.full", "resource.name"}:
+            calls.append((key, value))
+        if key == "resource.name":
+            return value.replace("/synthetic-resource-opaque", "/[resource-redacted]")
+        return value
+
+    try:
+        with Hue(
+            receiver.url,
+            "synthetic-http-key",
+            capture_content=location == "span",
+            tracer_provider=provider,
+            redactor=redact,
+        ) as hue:
+            with hue.span(
+                "operation",
+                attributes={"resource.name": raw if location == "span" else label},
+            ):
+                hue.logger_provider.get_logger("resource-filter").emit(
+                    body="synthetic-log",
+                    attributes={"resource.name": raw if location == "span" else label},
+                )
+                assert get("requests", app.url + "/resource-check") == BODY
+                deadline = time.monotonic() + 3
+                while not any(
+                    span.name == "operation" and span.end_time_unix_nano == 0
+                    for span in receiver.spans()
+                ):
+                    assert time.monotonic() < deadline, "live resource placeholder was not exported"
+                    time.sleep(0.01)
+            assert hue.force_flush()
+        expected = app.url + "/bot[redacted]/opaque/[resource-redacted]"
+        operation = next(span for span in receiver.spans() if span.name == "operation")
+        assert attributes(operation)["resource.name"] == (expected if location == "span" else label)
+        groups = [
+            group
+            for path, _, body in receiver.requests
+            if path.endswith("/traces")
+            for group in ExportTraceServiceRequest.FromString(body).resource_spans
+        ]
+        assert groups
+        for group in groups:
+            fields = attributes(group.resource)
+            assert fields["resource.name"] == (expected if location == "resource" else label)
+            assert fields["service.name"] == "synthetic-service"
+            assert group.schema_url == schema
+        log_groups = [
+            group
+            for path, _, body in receiver.requests
+            if path.endswith("/logs")
+            for group in ExportLogsServiceRequest.FromString(body).resource_logs
+        ]
+        assert log_groups
+        for group in log_groups:
+            assert attributes(group.resource)["resource.name"] == (
+                expected if location == "resource" else label
+            )
+            for scope_logs in group.scope_logs:
+                for log in scope_logs.log_records:
+                    assert attributes(log)["resource.name"] == (
+                        expected if location == "span" else label
+                    )
+        assert any(key == "resource.name" for key, _ in calls)
+        assert all(value != label for _, value in calls)
+        assert all("synthetic_resource_secret" not in value for _, value in calls)
+        original = next(span for span in vendor.get_finished_spans() if span.name == "operation")
+        assert original.resource is resource
+        assert dict(original.resource.attributes) == resource_attributes
+        assert original.resource.schema_url == schema
+        assert original.attributes["resource.name"] == (raw if location == "span" else label)
+        payload = exported_bytes(receiver)
+        for secret in (
+            b"synthetic_resource_secret",
+            b"synthetic-resource-opaque",
+            b"synthetic_resource_query",
+        ):
+            assert secret not in payload
+        assert len(app.requests) == 1
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize(("value_length", "span_length"), ((16, None), (64, 4)))
+@pytest.mark.parametrize("count", (8, 0))
+def test_live_and_final_uri_callbacks_cannot_expand_the_sdk_attribute_budget(
+    receiver, value_length, span_length, count
+):
+    limits = SpanLimits(
+        max_attributes=count,
+        max_attribute_length=value_length,
+        max_span_attribute_length=span_length,
+    )
+    original_limits = (limits.max_attributes, limits.max_span_attribute_length)
+    provider = TracerProvider(shutdown_on_exit=False, span_limits=limits)
+    vendor = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(vendor))
+    raw = "http://x.test/a"
+    aliases = ("url.full", "http.url", "http.target", "url.path", "url.query")
+    calls = []
+
+    def redact(key, value):
+        if key == "url.full":
+            calls.append(value)
+            return value + "/synthetic-callback-expansion-over-the-sdk-limit"
+        return value
+
+    try:
+        with Hue(
+            receiver.url,
+            "synthetic-http-key",
+            capture_http=False,
+            tracer_provider=provider,
+            redactor=redact,
+        ) as hue:
+            with hue.span(
+                "GET",
+                kind=SpanKind.CLIENT,
+                attributes={
+                    "http.request.method": "GET",
+                    "url.full": raw,
+                    "http.url": raw,
+                    "http.target": "/a",
+                    "url.path": "/a",
+                    "url.query": "q=synthetic",
+                },
+            ) as active:
+                accepted = dict(active.otel_span.attributes)
+                deadline = time.monotonic() + 3
+                while not any(span.end_time_unix_nano == 0 for span in receiver.spans()):
+                    assert time.monotonic() < deadline, "live budget placeholder was not exported"
+                    time.sleep(0.01)
+                for span in receiver.spans():
+                    assert all(key not in attributes(span) for key in aliases)
+            assert hue.force_flush()
+        (finished,) = [span for span in receiver.spans() if span.end_time_unix_nano]
+        fields = attributes(finished)
+        assert all(key not in fields for key in aliases)
+        assert len(fields) <= len(accepted) <= count
+        assert set(fields) <= set(accepted)
+        if count == 8 and span_length is None:
+            assert accepted["url.full"] == raw
+            assert calls
+        else:
+            assert calls == []
+        (original,) = vendor.get_finished_spans()
+        assert dict(original.attributes) == accepted
+        assert (limits.max_attributes, limits.max_span_attribute_length) == original_limits
+        assert b"synthetic-callback-expansion" not in exported_bytes(receiver)
+    finally:
+        provider.shutdown()
