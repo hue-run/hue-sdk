@@ -8,6 +8,33 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.26.0] - 2026-10-25
+
+#### Breaking
+
+- Outbound HTTP capture starts by default with `createHue()` and `createHueTransport()`.
+  `captureContent` now also controls captured HTTP query arguments and text request/response
+  bodies. Migration: set `captureHttp: false` to keep the previous HTTP capture behavior, or
+  `captureHttpBodies: false` to record HTTP identity without content. `captureContent: false`
+  also disables HTTP content, even when `captureHttpBodies` is `true`.
+
+#### Added
+
+- **Wire.** Captured requests emit CLIENT spans with `http.request.method`, a scrubbed `url.full`,
+  `url.scheme`, `server.address`, `server.port`, and the observed `http.response.status_code`.
+  With HTTP content capture, `input.value` holds query arguments merged with an object body,
+  or a non-object body under `body`. `output.value` holds parsed JSON or text responses.
+  Empty successful responses record `null`, including 204 responses without a content type.
+  Allowlisted behavior headers use `http.request.header.<name>` and
+  `http.response.header.<name>`, with hyphens normalized to underscores. Captured values use
+  JSON MIME types; observed HTTP media types use `http.request.header.content_type` and
+  `http.response.header.content_type`.
+  Observed body sizes use
+  `http.request.body.size` and `http.response.body.size`. Bodies over the receiver's value cap
+  use Hue's structured OTLP truncation placeholder, with the affected content attribute named in the
+  span's `hue.truncated` array. A cut body is incomplete evidence and can cause trace
+  reconstruction to refuse it. Export traffic and model calls are excluded.
+
 ### [0.25.1] - 2026-10-25
 
 #### Fixed

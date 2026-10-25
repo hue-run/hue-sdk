@@ -381,6 +381,45 @@ function attributes<T extends Record<string, unknown>>(
   return Object.fromEntries(
     Object.entries(summarized).flatMap(([key, value]) => {
       if (!options.captureContent && isContentKey(key)) return [];
+      // The Span API admits no object attributes. Restore our explicitly cut HTTP marker as
+      // OTLP's structured placeholder, so a reader cannot mistake its JSON text for app data.
+      if (
+        own === true &&
+        typeof source["http.request.method"] === "string" &&
+        (key === "input.value" || key === "output.value") &&
+        Array.isArray(source[TRUNCATED_KEY]) &&
+        source[TRUNCATED_KEY].includes(key) &&
+        typeof value === "string" &&
+        value.length < 256
+      ) {
+        try {
+          const marker: unknown = JSON.parse(value);
+          if (
+            isTruncatedMarker(marker) &&
+            marker &&
+            typeof marker === "object" &&
+            TRUNCATED_BYTES_KEY in marker &&
+            typeof marker[TRUNCATED_BYTES_KEY] === "number" &&
+            Number.isSafeInteger(marker[TRUNCATED_BYTES_KEY]) &&
+            marker[TRUNCATED_BYTES_KEY] >= 0
+          )
+            return [
+              [
+                key,
+                redactValue(
+                  truncatedMarker(marker[TRUNCATED_BYTES_KEY]),
+                  `${path}.${key}`,
+                  options,
+                  budget,
+                  0,
+                  key,
+                ),
+              ],
+            ];
+        } catch {
+          // Other cut content keeps the existing string-prefix representation.
+        }
+      }
       // A span's own value that may be uploaded is placed by the upload step.
       if (own && budget.offload) {
         const held = offloadValue(key, value, `${path}.${key}`, options, budget);

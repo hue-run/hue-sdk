@@ -1177,6 +1177,7 @@ run(
   ai6,
 );
 const installedPackageTests = [
+  "http-capture.test.ts",
   "sdk.test.ts",
   "ai-sdk.test.ts",
   "failure.test.ts",
@@ -1389,6 +1390,11 @@ void [transition, event, options, backend];
       await runAsync(
         runtime,
         [join(source, "scripts/verify-file-cases.mjs"), consumer],
+        destination,
+      );
+      await runAsync(
+        runtime,
+        [join(source, "scripts/verify-http-capture.mjs"), consumer],
         destination,
       );
     }

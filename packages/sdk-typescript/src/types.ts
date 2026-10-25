@@ -38,11 +38,18 @@ export type Signal = "traces" | "logs";
 /** Options accepted by every Hue client and transport, whether enabled or disabled. */
 export interface SharedHueOptions {
   /**
-   * Whether helpers record prompts, responses, tool arguments and results. Defaults to `true`
+   * Whether helpers record prompts, responses, tool arguments, results and HTTP bodies. Defaults to `true`
    * for an enabled client; set `false` explicitly for metadata-only export. A disabled client
    * (`enabled: false`) exports nothing and defaults it to `false`.
    */
   captureContent?: boolean;
+  /** Records outbound HTTP CLIENT spans. Defaults to `true`; never changes request headers. */
+  captureHttp?: boolean;
+  /**
+   * Records bounded textual HTTP request and response bodies. Defaults to `captureContent`;
+   * `captureContent: false` always disables bodies. HTTP identity remains when this is `false`.
+   */
+  captureHttpBodies?: boolean;
   /** Hue origin, `https://app.hue.run` by default. An origin only: no path, query, fragment or credentials. */
   baseUrl?: string;
   /** Recorded as the `service.version` resource attribute of an owned client. */

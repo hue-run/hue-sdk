@@ -57,7 +57,7 @@ Install the exact version below, which [Install the SDK](https://docs.hue.run/qu
 
 ```sh
 # TypeScript: run in the application directory.
-npm install --save-exact @hue-run/sdk@0.25.1
+npm install --save-exact @hue-run/sdk@0.26.0
 ```
 
 ```sh
@@ -92,7 +92,7 @@ Follow [Traces and spans](https://docs.hue.run/guides/traces). Instrument every 
 - **Request span:** `withSpan()` in TypeScript or `span()` in Python around the whole request, with the user's real request as input and the reply the user saw as output, and the application's session and user identifiers. When the application creates its own root span, record them as `input.value` and `output.value`. A case built from the trace uses this input as its task. Hue uses the trace's resolved user ID to build that user's [World](https://docs.hue.run/worlds/overview), regardless of deployment environment. Traces linked to Hue runs, World instances, or run executions never contribute. Hue's evaluation and simulation evidence and deliberately excluded traces also stay excluded. With AI SDK 7, when the installed `@hue-run/sdk/ai-sdk` exports `HueTelemetryOptions`, `hueTelemetry(hue)` also records the call's `runtimeContext` `userId` as the user and `sessionId` (else `threadId`) as the session; with an older package, pass them to `withSpan`.
 - **Model spans:** `model()` around each direct provider call, recording the messages sent and received and provider-reported usage. Leave unknown token counts and costs absent. For tools the provider runs itself, such as hosted MCP or web search, call `recordProviderToolCalls` / `record_provider_tool_calls` inside the model span.
 - **Tool spans:** `tool()` around each tool call, with the arguments and the result the agent actually read. When wrapping MCP tools, pass `mcp: client.getServerVersion()` in TypeScript or `mcp=` in Python so the span names the server; do not infer the server from a generic tool name.
-- **Composio and Pipedream calls:** when the application calls `composio.tools.execute`, a Tool Router `session.execute` or `pipedream.actions.run`, wrap the client once with `instrumentComposio(hue, composio)` or `instrumentPipedream(hue, pipedream)` from `@hue-run/sdk` (TypeScript `0.25.1`). Each platform call then records its own `execute_tool` span with the tool slug or component key, the REST request fields (`user_id`, `connected_account_id`, `external_user_id`, `configured_props`) and the SDK's response, even inside a wrapper tool. The Python SDK has no equivalent; record those calls with `tool()`.
+- **Composio and Pipedream calls:** when the application calls `composio.tools.execute`, a Tool Router `session.execute` or `pipedream.actions.run`, wrap the client once with `instrumentComposio(hue, composio)` or `instrumentPipedream(hue, pipedream)` from `@hue-run/sdk` (since TypeScript `0.25.1`). Each platform call then records its own `execute_tool` span with the tool slug or component key, the REST request fields (`user_id`, `connected_account_id`, `external_user_id`, `configured_props`) and the SDK's response, even inside a wrapper tool. The Python SDK has no equivalent; record those calls with `tool()`.
 - **Context:** preserve propagated parent context, use `inject` / `extract` across processes, and keep spans from existing instrumentation under the request span.
 
 ### HTTP tool endpoint evidence

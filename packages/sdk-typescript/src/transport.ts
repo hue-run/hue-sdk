@@ -2,8 +2,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { Agent, ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { gzip } from "node:zlib";
 import { waitUntil } from "@vercel/functions";
-import type { Attributes, Span as ApiSpan } from "@opentelemetry/api";
-import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
+import { context, type Attributes, type Span as ApiSpan } from "@opentelemetry/api";
+import { ExportResultCode, suppressTracing, type ExportResult } from "@opentelemetry/core";
 import {
   createOtlpNetworkExportDelegate,
   OTLPExporterBase,
@@ -88,6 +88,7 @@ import {
   type ResourceCache,
 } from "./privacy.js";
 import { otlpExporterVersion, sdkVersion } from "./version.js";
+import { startHttpCapture, suppressHttpCapture, type HttpCaptureSource } from "./http-capture.js";
 import type { ExportIssue, ExportReport, HueOptions, Signal } from "./types.js";
 
 type Response = {
@@ -361,6 +362,7 @@ export class HueTransport {
   private logExporter: ReportingExporter<ReadableLogRecord>;
   private closed = false;
   private shutdownPromise?: Promise<ExportReport>;
+  private httpCapture?: ReturnType<typeof startHttpCapture>;
   /** The latest flush's send of its records; the next flush's send starts after it. */
   private sendPromise?: Promise<unknown>;
   /** Set while a flush sends its records: the processors leave the uploads to that flush, which
@@ -551,6 +553,7 @@ export class HueTransport {
         }
       },
       shutdown: async () => {
+        this.httpCapture?.stop();
         this.stopLiveSpans();
         try {
           await spans.shutdown();
@@ -613,6 +616,19 @@ export class HueTransport {
         }
       },
     };
+    if (this.options.captureHttp)
+      this.httpCapture = startHttpCapture({
+        baseUrl: this.options.baseUrl,
+        bodies: this.options.captureHttpBodies,
+        valueBytes: () => this.limits.valueBytes,
+        failed: () => this.instrumentationFailure(),
+      });
+  }
+
+  /** @internal Use the client's local context without changing global OpenTelemetry ownership. */
+  attachHttpCapture(source: HttpCaptureSource): () => void {
+    if (this.closed) return () => {};
+    return this.httpCapture?.use(source) ?? (() => {});
   }
 
   /**
@@ -1608,6 +1624,7 @@ export class HueTransport {
    */
   shutdown(): Promise<ExportReport> {
     this.shutdownPromise ??= (async () => {
+      this.httpCapture?.stop();
       this.closed = true;
       try {
         return await this.flush();
@@ -2659,80 +2676,89 @@ class OtlpHttpTransport implements IExporterTransport {
       if (this.aborted) throw new Error("Hue export deadline exceeded");
       // Never kept alive: each attempt's socket closes with its response or at the deadline.
       this.agent ??= new ConnectionAgent({ keepAlive: false }) as Agent;
-      return await new Promise<ExportResponse>((resolve) => {
-        const req: ClientRequest = request(
-          url,
-          {
-            method: "POST",
-            agent: this.agent,
-            headers: {
-              ...this.headers,
-              "Content-Encoding": "gzip",
-              "Content-Length": body.byteLength,
-            },
-          },
-          (res: IncomingMessage) => {
-            const chunks: Buffer[] = [];
-            let size = 0;
-            const status = res.statusCode ?? 0;
-            const success = status >= 200 && status <= 299;
-            this.lastStatus = status;
-            try {
-              this.onResponse(res.headers);
-            } catch {
-              // Reading advertised limits never fails the request.
-            }
-            res.on("data", (chunk: Buffer) => {
-              size += chunk.length;
-              if (size > MAX_RESPONSE_BYTES) {
-                // Oversized responses fail regardless of status; resolve before tearing down.
-                resolve({ status: "failure", error: new Error("OTLP response exceeded 4 MiB") });
-                res.destroy();
-                return;
-              }
-              chunks.push(chunk);
-            });
-            res.on("end", () => {
-              if (success) {
-                this.onSuccess(res.headers);
-                resolve({ status: "success", data: Buffer.concat(chunks) });
-              } else if (RETRYABLE_STATUS.has(status))
-                resolve({
-                  status: "retryable",
-                  retryInMillis: retryAfterMillis(res.headers["retry-after"]),
-                });
-              else
-                resolve({
-                  status: "failure",
-                  error: new OTLPExporterError(
-                    res.statusMessage,
-                    status,
-                    Buffer.concat(chunks).toString(),
-                  ),
-                });
-            });
-            res.on("error", (error: Error) => {
-              // Sent, but the acknowledgement was not read: success without a body to decode.
-              if (success) resolve({ status: "success" });
-              else if (RETRYABLE_STATUS.has(status))
-                resolve({
-                  status: "retryable",
-                  error,
-                  retryInMillis: retryAfterMillis(res.headers["retry-after"]),
-                });
-              else resolve({ status: "failure", error });
-            });
-          },
-        );
-        this.requests.set(req, resolve);
-        req.on("close", () => this.requests.delete(req));
-        req.setTimeout(timeoutMillis, () => {
-          req.destroy();
-          resolve({ status: "retryable", error: new Error("Request timed out") });
-        });
-        req.on("error", (error: Error) => resolve(networkFailure(error)));
-        req.end(body);
-      });
+      return await suppressHttpCapture(() =>
+        context.with(
+          suppressTracing(context.active()),
+          () =>
+            new Promise<ExportResponse>((resolve) => {
+              const req: ClientRequest = request(
+                url,
+                {
+                  method: "POST",
+                  agent: this.agent,
+                  headers: {
+                    ...this.headers,
+                    "Content-Encoding": "gzip",
+                    "Content-Length": body.byteLength,
+                  },
+                },
+                (res: IncomingMessage) => {
+                  const chunks: Buffer[] = [];
+                  let size = 0;
+                  const status = res.statusCode ?? 0;
+                  const success = status >= 200 && status <= 299;
+                  this.lastStatus = status;
+                  try {
+                    this.onResponse(res.headers);
+                  } catch {
+                    // Reading advertised limits never fails the request.
+                  }
+                  res.on("data", (chunk: Buffer) => {
+                    size += chunk.length;
+                    if (size > MAX_RESPONSE_BYTES) {
+                      // Oversized responses fail regardless of status; resolve before tearing down.
+                      resolve({
+                        status: "failure",
+                        error: new Error("OTLP response exceeded 4 MiB"),
+                      });
+                      res.destroy();
+                      return;
+                    }
+                    chunks.push(chunk);
+                  });
+                  res.on("end", () => {
+                    if (success) {
+                      this.onSuccess(res.headers);
+                      resolve({ status: "success", data: Buffer.concat(chunks) });
+                    } else if (RETRYABLE_STATUS.has(status))
+                      resolve({
+                        status: "retryable",
+                        retryInMillis: retryAfterMillis(res.headers["retry-after"]),
+                      });
+                    else
+                      resolve({
+                        status: "failure",
+                        error: new OTLPExporterError(
+                          res.statusMessage,
+                          status,
+                          Buffer.concat(chunks).toString(),
+                        ),
+                      });
+                  });
+                  res.on("error", (error: Error) => {
+                    // Sent, but the acknowledgement was not read: success without a body to decode.
+                    if (success) resolve({ status: "success" });
+                    else if (RETRYABLE_STATUS.has(status))
+                      resolve({
+                        status: "retryable",
+                        error,
+                        retryInMillis: retryAfterMillis(res.headers["retry-after"]),
+                      });
+                    else resolve({ status: "failure", error });
+                  });
+                },
+              );
+              this.requests.set(req, resolve);
+              req.on("close", () => this.requests.delete(req));
+              req.setTimeout(timeoutMillis, () => {
+                req.destroy();
+                resolve({ status: "retryable", error: new Error("Request timed out") });
+              });
+              req.on("error", (error: Error) => resolve(networkFailure(error)));
+              req.end(body);
+            }),
+        ),
+      );
     } catch (error) {
       return {
         status: "failure",
