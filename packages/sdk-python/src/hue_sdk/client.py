@@ -37,6 +37,9 @@ from ._attachment import (
     read_path,
 )
 from ._blobs import MAX_BLOB_BYTES, ExplicitFile, Tally, Uploads
+from ._http_capture import client_scope
+from ._http_capture import register as register_http
+from ._http_capture import unregister as unregister_http
 from ._inline_files import (
     INLINE_FILE_TEXT_PER_RECORD,
     digest_form_size,
@@ -751,6 +754,8 @@ class Hue:
     enabled: bool
     base_url: str
     capture_content: bool
+    capture_http: bool
+    capture_http_bodies: bool
     tracer_provider: trace.TracerProvider
     tracer: trace.Tracer
     logger_provider: ApiLoggerProvider
@@ -761,6 +766,8 @@ class Hue:
         api_key: str | None = None,
         *,
         capture_content: bool = True,
+        capture_http: bool = True,
+        capture_http_bodies: bool | None = None,
         service_name: str = "hue-python-agent",
         tracer_provider: TracerProvider | None = None,
         logger_provider: LoggerProvider | None = None,
@@ -799,7 +806,13 @@ class Hue:
         for value in (max_queue_size, max_queue_bytes):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError("Queue limits must be positive integers.")
+        if not isinstance(capture_http, bool):
+            raise TypeError("capture_http must be True or False.")
+        if capture_http_bodies is not None and not isinstance(capture_http_bodies, bool):
+            raise TypeError("capture_http_bodies must be True, False or None.")
         self.capture_content = capture_content
+        self.capture_http = capture_http
+        self.capture_http_bodies = capture_content and (capture_http_bodies is not False)
         self._issues = 0
         self._issues_lock = Lock()
         self._redactor = redactor
@@ -840,7 +853,10 @@ class Hue:
                 max_queue_bytes,
                 live_spans,
             )
+            if self.capture_http:
+                register_http(self)
         except Exception:
+            unregister_http(self)
             self._closed = True
             for name in ("_span_processor", "_log_processor"):
                 processor = getattr(self, name, None)
@@ -1236,6 +1252,7 @@ class Hue:
             except Exception:
                 self._record_issue()
                 scope = None
+        http_scope = client_scope.set(self)
         helper = HueSpan(self, otel_span, _category, record_attributes)
         if placed:
 
@@ -1256,6 +1273,7 @@ class Hue:
                 self._record_issue()
             raise
         finally:
+            client_scope.reset(http_scope)
             # Cleanup failures must not mask an application exception or result.
             if scope is not None:
                 try:
@@ -1648,6 +1666,7 @@ class Hue:
         deadline = monotonic() + timeout_millis / 1000
         with self._shutdown_lock:
             if not self._closed:
+                unregister_http(self)
                 self._closed = True
                 self._span_processor.stop_accepting()
                 self._log_processor.stop_accepting()

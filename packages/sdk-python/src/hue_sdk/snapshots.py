@@ -38,8 +38,13 @@ from ._inline_files import (
 )
 from ._limits import MAX_CONTENT_BYTES, TRUNCATED_KEY, cut_utf8, over_utf8
 from ._records import CONTENT_PREFIXES as CONTENT_PREFIXES
+from ._records import (
+    http_truncated_attributes,
+    is_truncated_marker,
+    truncated_marker,
+    with_truncated_keys,
+)
 from ._records import is_content_key as is_content_key
-from ._records import is_truncated_marker, truncated_marker, with_truncated_keys
 from ._tool_definitions import (
     scrub_tool_credentials,
     scrubs_tool_credentials,
@@ -689,7 +694,7 @@ class _SpanSnapshot(ReadableSpan):
             attach_held(self, budget.held)
 
     def _copy(self, span: ReadableSpan, budget: _ValueBudget, capture_content: bool) -> None:
-        attributes: Any = span.attributes
+        attributes: Any = http_truncated_attributes(span, span.attributes)
         if attributes and any(key in attributes for key in _PENDING_MARKERS):
             # Placeholder markers are reserved: a finished span must never read as one.
             attributes = {k: v for k, v in attributes.items() if k not in _PENDING_MARKERS}
@@ -836,7 +841,9 @@ def snapshot_pending_span(span: ReadableSpan, capture_content: bool = True) -> P
     copied = budget.value(
         {
             key: value
-            for key, value in budget.permitted(_live_attributes(span), files=True).items()
+            for key, value in budget.permitted(
+                http_truncated_attributes(span, _live_attributes(span)), files=True
+            ).items()
             if isinstance(key, str)
             and not _placeholder_omits(key)
             and _value_bytes(value, MAX_PLACEHOLDER_VALUE_BYTES) <= MAX_PLACEHOLDER_VALUE_BYTES

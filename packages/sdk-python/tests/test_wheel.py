@@ -9,6 +9,64 @@ from importlib.metadata import version
 from pathlib import Path
 
 
+def test_installed_wheel_outbound_http_capture(tmp_path, wheel):
+    package = Path(__file__).resolve().parents[1]
+    consumer = tmp_path / "consumer"
+    subprocess.run(
+        ["uv", "venv", str(consumer), "--python", sys.executable],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    python = consumer / "bin" / "python"
+    dependencies = [
+        f"{name}=={version(name)}"
+        for name in (
+            "pytest",
+            "opentelemetry-api",
+            "opentelemetry-sdk",
+            "opentelemetry-exporter-otlp-proto-http",
+            "requests",
+            "httpx",
+            "aiohttp",
+            "httplib2",
+            "urllib3",
+            "slack-sdk",
+            "google-api-python-client",
+            "google-auth",
+            "pipedream",
+        )
+    ]
+    subprocess.run(
+        ["uv", "pip", "install", "--python", str(python), str(wheel), *dependencies],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for name in ("conftest.py", "test_http_capture.py", "test_http_markers.py"):
+        shutil.copyfile(package / "tests" / name, tmp_path / name)
+    environment = {"PATH": os.environ["PATH"], "PYTHONNOUSERSITE": "1"}
+    imported = subprocess.run(
+        [str(python), "-I", "-c", "import hue_sdk; print(hue_sdk.__file__)"],
+        env=environment,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert str(consumer) in imported.stdout
+    result = subprocess.run(
+        [str(python), "-I", "-m", "pytest", "-q", "test_http_capture.py", "test_http_markers.py"],
+        env=environment,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "passed" in result.stdout and "skipped" not in result.stdout
+    print(result.stdout.rstrip())
+
+
 def test_installed_wheel_preparation_retries_and_cancellation(tmp_path, wheel):
     package = Path(__file__).resolve().parents[1]
     consumer = tmp_path / "consumer"

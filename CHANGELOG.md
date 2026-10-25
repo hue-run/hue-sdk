@@ -1980,6 +1980,35 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
+### [0.14.0] - 2026-10-25
+
+#### Breaking
+
+- Enabled clients now observe outbound HTTP calls through `requests`, `httpx` sync and async,
+  `urllib.request`, `aiohttp`, `httplib2` and `urllib3` by default. `capture_content=True` now includes
+  their request and response content, including query parameters. Migration: pass
+  `capture_http_bodies=False` to keep HTTP identity without bodies, or `capture_http=False` to
+  restore the previous absence of automatic HTTP spans. `capture_content=False` continues to omit
+  content and also disables HTTP bodies, regardless of `capture_http_bodies`.
+
+#### Added
+
+- **Wire**: outbound HTTP CLIENT spans carry `http.request.method`, `url.full`, `url.scheme`,
+  `server.address`, `server.port` and `http.response.status_code` when available. Recorded URLs
+  omit userinfo, queries and fragments. With body capture enabled, `input.value` merges query
+  parameters with JSON-object or form fields, and `output.value` records the parsed JSON response
+  body or eligible response text. Status and allowed headers remain separate attributes, including
+  `http.request.header.notion_version` and `http.response.header.notion_version`.
+  The existing redactor and credential filtering apply. Body sizes use
+  `http.request.body.size` and `http.response.body.size`; a body over 1 MiB records the existing
+  structured OTLP `hue.truncated` placeholder instead of body text. The affected key is also
+  listed in the span's `hue.truncated` attribute. Binary bodies record size only.
+- HTTP observation adds no runtime dependencies or request headers. Hue's export requests and
+  requests within model spans are excluded, nested supported clients share one Hue HTTP span,
+  and shutdown removes Hue's observation when the last client stops. Streaming capture observes
+  application reads without consuming extra bytes. Unread and incomplete streams cannot provide
+  complete response bodies. Calls use the client's existing owned or borrowed tracer provider.
+
 ### [0.13.6] - 2026-10-24
 
 #### Added

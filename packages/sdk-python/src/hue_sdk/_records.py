@@ -3,6 +3,7 @@ copies the exporters send when a record must shed content to fit the receiver's 
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from copy import copy
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from typing import Any
 from opentelemetry.attributes import BoundedAttributes
 from opentelemetry.sdk._logs import ReadableLogRecord
 from opentelemetry.sdk.trace import Event, ReadableSpan
-from opentelemetry.trace import Link
+from opentelemetry.trace import Link, SpanKind
 
 from ._limits import TRUNCATED_BYTES_KEY, TRUNCATED_KEY
 
@@ -83,6 +84,46 @@ def truncated_marker(size: int) -> dict[str, Any]:
     """Hue's receiver's own marker for a value it replaced: nothing of the value, its size, and
     the flag a reader tests."""
     return {TRUNCATED_KEY: True, TRUNCATED_BYTES_KEY: size}
+
+
+def http_truncated_attributes(
+    span: ReadableSpan, attributes: Mapping[str, Any] | None
+) -> Mapping[str, Any] | None:
+    """An explicitly cut HTTP value is a placeholder, never a complete recorded body."""
+    if span.kind != SpanKind.CLIENT or not attributes or not attributes.get("http.request.method"):
+        return attributes
+    listed = attributes.get(TRUNCATED_KEY)
+    if not isinstance(listed, (tuple, list)):
+        return attributes
+    copied: dict[str, Any] | None = None
+    for key, size_key in (
+        ("input.value", "http.request.body.size"),
+        ("output.value", "http.response.body.size"),
+    ):
+        value = attributes.get(key)
+        if key not in listed or key not in attributes or is_truncated_marker(value):
+            continue
+        marker: Any = None
+        if isinstance(value, str) and len(value) <= 256:
+            try:
+                marker = json.loads(value)
+            except (ValueError, RecursionError):
+                pass
+        size = attributes.get(size_key)
+        if (
+            isinstance(marker, dict)
+            and set(marker) == {TRUNCATED_KEY, TRUNCATED_BYTES_KEY}
+            and marker[TRUNCATED_KEY] is True
+            and type(marker[TRUNCATED_BYTES_KEY]) is int
+            and 0 <= marker[TRUNCATED_BYTES_KEY] <= (1 << 63) - 1
+        ):
+            size = marker[TRUNCATED_BYTES_KEY]
+        if type(size) is not int or not 0 <= size <= (1 << 63) - 1:
+            size = value_bytes(value)
+        if copied is None:
+            copied = dict(attributes)
+        copied[key] = truncated_marker(size)
+    return attributes if copied is None else copied
 
 
 def is_truncated_marker(value: Any) -> bool:
