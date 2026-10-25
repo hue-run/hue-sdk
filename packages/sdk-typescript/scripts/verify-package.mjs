@@ -1193,6 +1193,7 @@ const installedPackageTests = [
   "local-worker.test.ts",
   "coverage-gap.test.ts",
   "receipt.test.ts",
+  "setup-port.test.ts",
   "managed.test.ts",
   "files.test.ts",
   "world.test.ts",
