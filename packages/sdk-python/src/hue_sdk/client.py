@@ -1286,9 +1286,18 @@ class Hue:
             raise
         finally:
             if http_model is not None:
-                self._http_model_scope.reset(http_model)
-            self._http_parent.reset(http_parent)
-            client_scope.reset(http_scope)
+                try:
+                    self._http_model_scope.reset(http_model)
+                except Exception:
+                    self._record_issue()
+            try:
+                self._http_parent.reset(http_parent)
+            except Exception:
+                self._record_issue()
+            try:
+                client_scope.reset(http_scope)
+            except Exception:
+                self._record_issue()
             # Cleanup failures must not mask an application exception or result.
             if scope is not None:
                 try:

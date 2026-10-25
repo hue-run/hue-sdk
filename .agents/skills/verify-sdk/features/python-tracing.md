@@ -48,7 +48,7 @@ Preconditions:
 
   Expected: `trace_id <32 hex> flushed True`, and the stub logs `GET /api/v1/projects/current` and `POST /api/v1/otlp/v1/traces` with status 200.
 - **Behavior test.** `uv run --frozen --all-groups pytest tests/test_sdk.py -q -k redact`. Expected: all selected tests pass in about 2 s.
-- **Outbound HTTP (`py-http`).** Run `uv run --frozen --all-groups pytest tests/test_http_capture.py tests/test_http_markers.py tests/test_http_parent_context.py`.
+- **Outbound HTTP (`py-http`).** Run `uv run --frozen --all-groups pytest tests/test_http_capture.py tests/test_http_markers.py tests/test_http_parent_context.py tests/test_http_context_cleanup.py`.
   Check exported CLIENT spans against a loopback server, their scrubbed URLs, query/body input
   values, parsed response bodies and structured OTLP truncation placeholders. Confirm the
   application receives the same bytes and headers with capture on and off. Cover all supported clients and real Slack, Google
