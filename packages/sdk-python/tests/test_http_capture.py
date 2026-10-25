@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import io
 import json
 import subprocess
 import sys
@@ -286,6 +287,15 @@ def test_no_http_spans_in_model_or_export_context(receiver, app):
     assert http_spans(receiver) == []
 
 
+def test_configured_hue_origin_is_excluded_from_http_capture(receiver):
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        hue.validate_project()
+        assert requests.get(receiver.url + "/same-origin?user_id=synthetic-user").status_code == 200
+        assert hue.force_flush()
+    assert len(receiver.requests) == 2
+    assert receiver.spans() == []
+
+
 @pytest.mark.parametrize("kind", tuple(kind for kind in TRANSPORTS if kind != "urllib"))
 def test_non_success_status_preserves_the_response(receiver, app, kind):
     app.status = 503
@@ -344,6 +354,69 @@ def test_query_and_body_credentials_are_scrubbed_but_identity_fields_remain(rece
     for forbidden in (b"synthetic-password", b"synthetic-secret", b"synthetic-query-secret"):
         assert forbidden not in payload
     assert b"synthetic-response-cookie" not in payload
+
+
+def test_pagination_and_gmail_headers_preserve_content_while_nested_credentials_are_scrubbed(
+    receiver, app
+):
+    response_value = {
+        "nextPageToken": "synthetic-next-page",
+        "payload": {
+            "headers": [
+                {"name": "Subject", "value": "Synthetic subject"},
+                {"name": "From", "value": "sender@example.test"},
+                {"name": "Authorization", "value": "Bearer synthetic-pair-secret"},
+                {"name": "Cookie", "value": "synthetic-pair-cookie"},
+            ]
+        },
+        "headers": {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer synthetic-map-secret",
+            "Cookie": "synthetic-map-cookie",
+        },
+        "access_token": "synthetic-access-secret",
+    }
+    app.body = json.dumps(response_value).encode()
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        response = requests.post(
+            app.url + "/gmail?pageToken=synthetic-request-page&access_token=synthetic-query-secret",
+            json={"continuation_token": "synthetic-continuation", "user_id": "synthetic-user"},
+        )
+        assert response.json() == response_value
+        next_page = requests.get(
+            app.url + "/gmail", params={"pageToken": response.json()["nextPageToken"]}
+        )
+        assert next_page.json() == response_value
+        assert hue.force_flush()
+    spans = http_spans(receiver)
+    assert len(spans) == 2
+    fields = attributes(spans[0])
+    assert json.loads(attributes(spans[1])["input.value"])["pageToken"] == "synthetic-next-page"
+    recorded_input = json.loads(fields["input.value"])
+    assert recorded_input["pageToken"] == "synthetic-request-page"
+    assert recorded_input["continuation_token"] == "synthetic-continuation"
+    assert recorded_input["user_id"] == "synthetic-user"
+    recorded_output = json.loads(fields["output.value"])
+    assert recorded_output["nextPageToken"] == "synthetic-next-page"
+    headers = recorded_output["payload"]["headers"]
+    assert headers[:2] == response_value["payload"]["headers"][:2]
+    assert headers[2] == {"name": "Authorization", "value": "[redacted]"}
+    assert headers[3] == {"name": "Cookie", "value": "[redacted]"}
+    assert recorded_output["headers"] == {
+        "Content-Type": "application/json",
+        "Authorization": "[redacted]",
+        "Cookie": "[redacted]",
+    }
+    payload = b"".join(body for _, _, body in receiver.requests)
+    for forbidden in (
+        b"synthetic-pair-secret",
+        b"synthetic-pair-cookie",
+        b"synthetic-map-secret",
+        b"synthetic-map-cookie",
+        b"synthetic-access-secret",
+        b"synthetic-query-secret",
+    ):
+        assert forbidden not in payload
 
 
 def test_raw_url_userinfo_and_headers_are_observed_without_exporting_credentials(receiver, app):
@@ -568,6 +641,39 @@ def test_complete_text_between_sixteen_kib_and_one_mib_keeps_its_content(receive
     fields = attributes(http_spans(receiver)[0])
     assert json.loads(fields["output.value"]) == value
     assert "output.value" not in fields.get("hue.truncated", [])
+
+
+def test_declared_latin1_request_and_response_capture_actual_text(receiver, app):
+    app.body = b"caf\xe9"
+    app.content_type = "text/plain; charset=iso-8859-1"
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        response = requests.post(
+            app.url + "/latin1", data=app.body, headers={"Content-Type": app.content_type}
+        )
+        assert response.content == app.body
+        assert hue.force_flush()
+    fields = attributes(http_spans(receiver)[0])
+    assert json.loads(fields["input.value"]) == {"body": "café"}
+    assert json.loads(fields["output.value"]) == "café"
+
+
+@pytest.mark.parametrize(
+    ("mime", "body"),
+    (("text/plain; charset=synthetic-invalid", b"ascii"), ("text/plain; charset=utf-8", b"\xff")),
+)
+def test_undecodable_bodies_are_omitted_without_inventing_characters(receiver, app, mime, body):
+    app.body = body
+    app.content_type = mime
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        response = requests.post(
+            app.url + "/undecodable", data=body, headers={"Content-Type": mime}
+        )
+        assert response.content == body
+        assert hue.force_flush()
+    fields = attributes(http_spans(receiver)[0])
+    assert fields["http.response.body.size"] == len(body)
+    assert "input.value" not in fields
+    assert "output.value" not in fields
 
 
 @pytest.mark.parametrize("kind", ("requests", "urllib3", "httpx", "httpx-async"))
@@ -991,6 +1097,30 @@ def test_aiohttp_custom_serializer_runs_once_and_captures_actual_relative_reques
     assert json.loads(fields["input.value"]) == {"tag": "synthetic-tag", **sent}
 
 
+def test_aiohttp_multipart_stream_is_not_misrepresented_as_an_empty_request(receiver, app):
+    import aiohttp
+
+    payload = b"synthetic-multipart-file-bytes"
+
+    async def run():
+        form = aiohttp.FormData()
+        form.add_field(
+            "file", io.BytesIO(payload), filename="synthetic.txt", content_type="text/plain"
+        )
+        async with aiohttp.ClientSession() as client:
+            async with client.post(app.url + "/multipart", data=form) as response:
+                assert await response.read() == BODY
+
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        asyncio.run(run())
+        assert hue.force_flush()
+    assert payload in app.requests[0][2]
+    fields = attributes(http_spans(receiver)[0])
+    assert fields["http.request.method"] == "POST"
+    assert "input.value" not in fields
+    assert json.loads(fields["output.value"]) == PAYLOAD
+
+
 def test_google_api_client_httplib2_and_authorized_session(receiver, app):
     import httplib2
     from google.auth.credentials import AnonymousCredentials
@@ -1064,3 +1194,40 @@ with Hue(sys.argv[1], 'synthetic-http-key', live_spans=False) as hue:
 """
     subprocess.run([sys.executable, "-c", script, receiver.url, app.url], check=True, timeout=20)
     assert len(http_spans(receiver)) == 2
+
+
+def test_last_shutdown_during_first_import_preserves_the_import(receiver):
+    script = """
+import importlib, sys
+from threading import Event, Thread
+from hue_sdk import Hue
+from hue_sdk import _http_capture as capture
+assert 'httplib2' not in sys.modules
+hue = Hue(sys.argv[1], 'synthetic-http-key', live_spans=False)
+entered, proceed = Event(), Event()
+original = capture._finder.find_spec
+errors, imported = [], []
+def paused(fullname, path=None, target=None):
+    if fullname == 'httplib2':
+        entered.set()
+        assert proceed.wait(5)
+    return original(fullname, path, target)
+capture._finder.find_spec = paused
+def load():
+    try:
+        imported.append(importlib.import_module('httplib2'))
+    except BaseException as error:
+        errors.append(error)
+thread = Thread(target=load)
+thread.start()
+try:
+    assert entered.wait(5)
+    assert hue.shutdown()
+finally:
+    proceed.set()
+    thread.join(5)
+assert not thread.is_alive()
+assert errors == []
+assert imported[0].__name__ == 'httplib2'
+"""
+    subprocess.run([sys.executable, "-c", script, receiver.url], check=True, timeout=20)

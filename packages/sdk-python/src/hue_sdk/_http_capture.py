@@ -11,6 +11,7 @@ import weakref
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
+from email.message import Message
 from http.client import HTTPSConnection
 from threading import RLock
 from typing import TYPE_CHECKING, Any
@@ -42,6 +43,21 @@ _clients: list[weakref.ReferenceType[Hue]] = []
 _patches: list[tuple[Any, str, Any, Any]] = []
 _pending: weakref.WeakSet[Exchange] = weakref.WeakSet()
 _BEHAVIOR_HEADERS = frozenset({"notion-version"})
+# Continuation tokens route to another page; they do not authenticate the caller.
+_CONTINUATION_KEYS = frozenset(
+    {
+        "pagetoken",
+        "nextpagetoken",
+        "previouspagetoken",
+        "prevpagetoken",
+        "continuationtoken",
+        "nexttoken",
+        "previoustoken",
+        "resumetoken",
+        "deltatoken",
+        "cursortoken",
+    }
+)
 _TARGETS = {
     "requests.adapters": [("HTTPAdapter", "send", "requests", False)],
     "httpx._client": [
@@ -108,7 +124,12 @@ def _byte_size(text: str) -> int:
 
 
 def _parse(data: bytes, mime: str) -> Any:
-    text = data.decode("utf-8", errors="replace")
+    content_type = Message()
+    content_type["content-type"] = mime
+    try:
+        text = data.decode(content_type.get_content_charset() or "utf-8")
+    except (UnicodeError, LookupError):
+        return _ABSENT
     base = mime.partition(";")[0].strip().lower()
     if base == "application/json" or base.endswith("+json"):
         try:
@@ -125,15 +146,28 @@ def _scrub(value: Any, depth: int = 0) -> Any:
     if depth > 32:
         raise ValueError("HTTP content exceeds its nesting limit")
     if isinstance(value, dict):
-        return {
-            key: REDACTED if _is_credential_key(key) else _scrub(item, depth + 1)
-            for key, item in value.items()
-        }
+        result = {}
+        header_name = value.get("name")
+        sensitive_header = isinstance(header_name, str) and _credential_key(header_name)
+        for key, item in value.items():
+            result[_scrub_credential_text_unbounded(key)] = (
+                REDACTED
+                if _credential_key(key) or (key == "value" and sensitive_header)
+                else _scrub(item, depth + 1)
+            )
+        return result
     if isinstance(value, list):
         return [_scrub(item, depth + 1) for item in value]
     if isinstance(value, str):
         return _scrub_credential_text_unbounded(value)
     return value
+
+
+def _credential_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "").replace("_", "")
+    if normalized == "headers" or normalized in _CONTINUATION_KEYS:
+        return False
+    return normalized in {"cookie", "setcookie", "proxyauthorization"} or _is_credential_key(key)
 
 
 @dataclass
@@ -172,7 +206,10 @@ def _request(kind: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Reques
         )
     if kind == "aiohttp":
         # ClientRequest owns the bytes already serialized by the application's session.
-        body = getattr(owner.body, "_value", _ABSENT)
+        payload = owner.body
+        body = None if payload is None else getattr(payload, "_value", _ABSENT)
+        if payload is not None and body is None:
+            body = _ABSENT
         return Request(str(owner.url), owner.method, _headers(owner.headers), body)
     connection = _argument(args, kwargs, 1, "conn")
     if kind == "httplib2":
@@ -196,6 +233,7 @@ def _request(kind: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Reques
 class Exchange:
     def __init__(self, client: Hue, request: Request) -> None:
         self.client = client
+        self._finish_lock = RLock()
         self.cap = min(MAX_CONTENT_BYTES, client._limits.current.value_bytes)
         self.done = False
         self.size = 0
@@ -231,7 +269,8 @@ class Exchange:
             else client.tracer.start_span(self.method, kind=SpanKind.CLIENT, attributes=attributes)
         )
         self.bodies = self.bodies and self.span.is_recording()
-        _pending.add(self)
+        with _lock:
+            _pending.add(self)
         if self.bodies:
             for key, value in request.headers.items():
                 if key in _BEHAVIOR_HEADERS:
@@ -285,9 +324,11 @@ class Exchange:
     def _input(self, request: Request, query: str) -> None:
         mime = request.headers.get("content-type", "")
         body = request.body
-        if isinstance(body, str):
-            if len(body) > self.cap:
-                self._value("input.value", truncated_marker(_byte_size(body)), cut=True)
+        if type(body) is str:
+            size = _byte_size(body)
+            self.span.set_attribute("http.request.body.size", size)
+            if size > self.cap:
+                self._value("input.value", truncated_marker(size), cut=True)
                 return
             body = body.encode("utf-8")
         if isinstance(body, (bytes, bytearray, memoryview)):
@@ -303,6 +344,8 @@ class Exchange:
                 self._value("input.value", truncated_marker(len(body)), cut=True)
                 return
             parsed = _parse(bytes(body), mime)
+            if parsed is _ABSENT:
+                return
             if isinstance(parsed, dict):
                 value.update(parsed)
             else:
@@ -334,22 +377,24 @@ class Exchange:
                         self.span.set_attribute(name, clean)
 
     def observe(self, data: bytes | memoryview) -> None:
-        if self.done:
-            return
-        self.size += len(data)
-        if (
-            self.bodies
-            and _text_type(self.headers.get("content-type", ""))
-            and self.size <= self.cap
-        ):
-            self.buffer.extend(data)
-        elif self.size > self.cap:
-            self.buffer.clear()
+        with self._finish_lock:
+            if self.done:
+                return
+            self.size += len(data)
+            if (
+                self.bodies
+                and _text_type(self.headers.get("content-type", ""))
+                and self.size <= self.cap
+            ):
+                self.buffer.extend(data)
+            elif self.size > self.cap:
+                self.buffer.clear()
 
     def finish(self, complete: bool = False) -> None:
-        if self.done:
-            return
-        self.done = True
+        with self._finish_lock:
+            if self.done:
+                return
+            self.done = True
         try:
             if self.size or complete:
                 self.span.set_attribute("http.response.body.size", self.size)
@@ -363,14 +408,16 @@ class Exchange:
                     self._value("output.value", truncated_marker(self.size), cut=True)
                 elif complete:
                     body = _parse(bytes(self.buffer), mime)
-                    self._value("output.value", body)
+                    if body is not _ABSENT:
+                        self._value("output.value", body)
                 if self.size or complete:
                     self.span.set_attribute("output.mime_type", mime)
         except Exception:
             self.client._record_issue()
         finally:
             self.buffer.clear()
-            _pending.discard(self)
+            with _lock:
+                _pending.discard(self)
             if self.owned:
                 try:
                     self.span.end()
@@ -426,6 +473,13 @@ def _begin(kind: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Exchange
         request = _request(kind, args, kwargs)
         parent = _exchange.get()
         identity, _ = _identity(request.url, request.method)
+        base = urlsplit(client.base_url)
+        if (
+            identity["url.scheme"] == base.scheme
+            and identity["server.address"] == base.hostname
+            and identity["server.port"] == (base.port or (443 if base.scheme == "https" else 80))
+        ):
+            return None
         if (
             parent is not None
             and parent.method == identity["http.request.method"]
@@ -587,6 +641,8 @@ class _Finder(importlib.abc.MetaPathFinder):
             return None
         # Delegate in the existing finder order, including application-defined importers.
         finders = list(sys.meta_path)
+        if self not in finders:
+            return None
         for finder in finders[finders.index(self) + 1 :]:
             find = getattr(finder, "find_spec", None)
             spec = find(fullname, path, target) if find is not None else None
@@ -613,7 +669,9 @@ def register(client: Hue) -> None:
 
 def unregister(client: Hue) -> None:
     # End unfinished exchanges before the client's processor stops admitting records.
-    for exchange in list(_pending):
+    with _lock:
+        pending = list(_pending)
+    for exchange in pending:
         if exchange.client is client:
             exchange.finish()
     with _lock:
