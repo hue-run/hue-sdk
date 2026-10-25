@@ -57,7 +57,7 @@ dev = [
   "pdoc>=16.0.0,<17",
 ]
 compatibility = [
-    "openai==3.29.0",
+    "openai==3.34.0",
     "openinference-instrumentation-openai==0.1.65",
 ]
 
