@@ -24,7 +24,7 @@
       {
         "boundary": "Configure the instrumentor's own content controls. This does not certify every provider API.",
         "path": "Python OpenAI instrumentation",
-        "verifiedSupport": "OpenAI 3.29.0 and OpenInference OpenAI 0.1.65, using a synthetic HTTP streaming provider and a synthetic Responses call with a hosted MCP tool"
+        "verifiedSupport": "OpenAI 3.34.0 and OpenInference OpenAI 0.1.65, using a synthetic HTTP streaming provider and a synthetic Responses call with a hosted MCP tool"
       },
       {
         "boundary": "No Hue package or model wrapper required; metrics and OTLP gRPC ingestion are not supported.",
@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:9748039ce8c598b9dc79435ddb6be32d8805403896256b31bdaac9a4f57fdc8d",
+    "sha256": "sha256:1b59c1db2024212b8fbba4bd0aab3d16fc57acb1d72f0dcc4814eee2bf80e92c",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
