@@ -15,6 +15,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.connectionpool import ConnectionPool
 
+from .._otel_compat import suppress_instrumentation
 from ..evals._json import MISSING, encode, json_value, uuid
 from ..transport import DEFAULT_BASE_URL, normalize_base_url, reject_positional_api_key
 from .readiness import (
@@ -307,6 +308,7 @@ class WorldClient:
                 return current + path[len(previous) :]
         return path
 
+    @suppress_instrumentation()
     def _send(
         self,
         method: str,

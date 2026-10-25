@@ -743,6 +743,8 @@ class Hue:
     It governs Hue's content helpers and, at export time,
     recognized third-party content attributes; unrecognized custom attributes, span names
     and other exporters remain caller-owned.
+    ``capture_http`` defaults to True. ``capture_http_bodies`` follows ``capture_content``;
+    False keeps automatic HTTP identity without request or response content.
     ``tracer_provider`` and ``logger_provider`` attach Hue's processors to existing SDK
     providers. A provider Hue creates for the other signal shares the borrowed provider's
     resource, so spans and correlated logs report one ``service.name``; ``service_name``
@@ -831,6 +833,10 @@ class Hue:
             "hue_context", default=None
         )
         self._model_scope: ContextVar[dict[str, str] | None] = ContextVar("hue_model", default=None)
+        self._http_parent: ContextVar[trace.Span | None] = ContextVar(
+            "hue_http_parent", default=None
+        )
+        self._http_model_scope: ContextVar[bool | None] = ContextVar("hue_http_model", default=None)
         if not enabled:
             self._owns_provider = False
             self._owns_logger_provider = False
@@ -1253,6 +1259,12 @@ class Hue:
                 self._record_issue()
                 scope = None
         http_scope = client_scope.set(self)
+        http_parent = self._http_parent.set(otel_span)
+        http_model = (
+            self._http_model_scope.set(_category == "model")
+            if _category in {"model", "tool"}
+            else None
+        )
         helper = HueSpan(self, otel_span, _category, record_attributes)
         if placed:
 
@@ -1273,6 +1285,9 @@ class Hue:
                 self._record_issue()
             raise
         finally:
+            if http_model is not None:
+                self._http_model_scope.reset(http_model)
+            self._http_parent.reset(http_parent)
             client_scope.reset(http_scope)
             # Cleanup failures must not mask an application exception or result.
             if scope is not None:

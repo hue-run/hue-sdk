@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 
 import requests
 
+from .._otel_compat import suppress_instrumentation
 from ..transport import DEFAULT_BASE_URL, normalize_base_url, reject_positional_api_key
 from ._json import MISSING, encode, json_value, uuid
 from ._media import MediaClient, _no_auth
@@ -325,6 +326,7 @@ class EvaluationClient:
             time.sleep(backoff + random.random() * backoff)
             attempt += 1
 
+    @suppress_instrumentation()
     def _request_once(self, method: str, path: str, payload: bytes | None) -> Any:
         try:
             attempt = 0
@@ -997,6 +999,7 @@ class EvaluationClient:
         """Ask Hue to verify the staged bytes against the declared identity."""
         return self._request("POST", f"/artifacts/{uuid(artifact_id)}/complete", {})
 
+    @suppress_instrumentation()
     def upload_artifact_bytes(self, upload: dict[str, Any], data: bytes, content_type: str) -> None:
         """Stage bytes at the storage capability Hue issued; the Hue key is never sent there."""
         from ..managed import _upload_headers, _upload_url
@@ -1023,6 +1026,7 @@ class EvaluationClient:
         except requests.RequestException:
             raise HueApiError() from None
 
+    @suppress_instrumentation()
     def download_artifact(self, artifact_id: str, *, max_bytes: int | None = None) -> bytes:
         """Verified bytes of one ready artifact of this project, bounded to 25 MiB.
 

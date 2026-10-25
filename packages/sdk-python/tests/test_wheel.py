@@ -28,6 +28,7 @@ def test_installed_wheel_outbound_http_capture(tmp_path, wheel):
             "opentelemetry-exporter-otlp-proto-http",
             "requests",
             "httpx",
+            "httpx2",
             "aiohttp",
             "httplib2",
             "urllib3",
@@ -43,7 +44,12 @@ def test_installed_wheel_outbound_http_capture(tmp_path, wheel):
         capture_output=True,
         text=True,
     )
-    for name in ("conftest.py", "test_http_capture.py", "test_http_markers.py"):
+    for name in (
+        "conftest.py",
+        "test_http_capture.py",
+        "test_http_markers.py",
+        "test_http_parent_context.py",
+    ):
         shutil.copyfile(package / "tests" / name, tmp_path / name)
     environment = {"PATH": os.environ["PATH"], "PYTHONNOUSERSITE": "1"}
     imported = subprocess.run(
@@ -56,7 +62,16 @@ def test_installed_wheel_outbound_http_capture(tmp_path, wheel):
     )
     assert str(consumer) in imported.stdout
     result = subprocess.run(
-        [str(python), "-I", "-m", "pytest", "-q", "test_http_capture.py", "test_http_markers.py"],
+        [
+            str(python),
+            "-I",
+            "-m",
+            "pytest",
+            "-q",
+            "test_http_capture.py",
+            "test_http_markers.py",
+            "test_http_parent_context.py",
+        ],
         env=environment,
         cwd=tmp_path,
         check=True,

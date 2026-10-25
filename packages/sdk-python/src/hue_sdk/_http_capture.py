@@ -64,6 +64,10 @@ _TARGETS = {
         ("Client", "_send_single_request", "httpx", False),
         ("AsyncClient", "_send_single_request", "httpx", True),
     ],
+    "httpx2._client": [
+        ("Client", "_send_single_request", "httpx", False),
+        ("AsyncClient", "_send_single_request", "httpx", True),
+    ],
     "urllib.request": [("AbstractHTTPHandler", "do_open", "urllib", False)],
     "aiohttp.client": [("ClientSession", "_request", "aiohttp_session", True)],
     "aiohttp.client_reqrep": [("ClientRequest", "send", "aiohttp", True)],
@@ -232,7 +236,7 @@ def _request(kind: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Reques
 
 
 class Exchange:
-    def __init__(self, client: Hue, request: Request) -> None:
+    def __init__(self, client: Hue, request: Request, *, model: bool = False) -> None:
         self.client = client
         self._finish_lock = RLock()
         self.cap = min(MAX_CONTENT_BYTES, client._limits.current.value_bytes)
@@ -243,16 +247,30 @@ class Exchange:
         self.status = 0
         self.encoded = False
         self.bodies = (
-            client.capture_content and client.capture_http_bodies and not client._setup_key
+            client.capture_content
+            and client.capture_http_bodies
+            and not client._setup_key
+            and not model
         )
         attributes, query = _identity(request.url, request.method)
         self.url = attributes["url.full"]
         self.method = attributes["http.request.method"]
         current = trace.get_current_span()
+        local = client._http_parent.get()
+        context = None
+        if (
+            client._owns_provider
+            and local is not None
+            and local.get_span_context().is_valid
+            and current.get_span_context().trace_id != local.get_span_context().trace_id
+        ):
+            # Another provider may temporarily be active inside an owned Hue helper.
+            context = trace.set_span_in_context(local)
         existing = getattr(current, "attributes", None) or {}
         same = (
             (
-                current.is_recording()
+                context is None
+                and current.is_recording()
                 and getattr(current, "kind", None) == SpanKind.CLIENT
                 and existing.get("http.request.method", existing.get("http.method")) == self.method
                 and _identity(
@@ -267,8 +285,12 @@ class Exchange:
         self.span = (
             current
             if same
-            else client.tracer.start_span(self.method, kind=SpanKind.CLIENT, attributes=attributes)
+            else client.tracer.start_span(
+                self.method, kind=SpanKind.CLIENT, attributes=attributes, context=context
+            )
         )
+        # Preserve the other provider's application context when selecting Hue's parent.
+        self.scope_span = current if context is not None else self.span
         self.bodies = self.bodies and self.span.is_recording()
         with _lock:
             _pending.add(self)
@@ -461,16 +483,24 @@ def _begin(kind: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Exchange
         current = trace.get_current_span()
         attributes = getattr(current, "attributes", None) or {}
         operation = attributes.get("gen_ai.operation.name")
-        if client._model_scope.get() is not None or operation in {
-            "chat",
-            "text_completion",
-            "generate_content",
-            "embeddings",
-            "image_generation",
-            "speech",
-            "transcription",
-        }:
-            return None
+        local_model = client._http_model_scope.get()
+        model = (
+            local_model
+            if local_model is not None
+            else (
+                operation
+                in {
+                    "chat",
+                    "text_completion",
+                    "generate_content",
+                    "embeddings",
+                    "image_generation",
+                    "speech",
+                    "transcription",
+                }
+                or attributes.get("openinference.span.kind") == "LLM"
+            )
+        )
         request = _request(kind, args, kwargs)
         parent = _exchange.get()
         identity, _ = _identity(request.url, request.method)
@@ -487,7 +517,7 @@ def _begin(kind: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Exchange
             and parent.url == identity["url.full"]
         ):
             return None
-        return Exchange(client, request)
+        return Exchange(client, request, model=model)
     except Exception:
         client._record_issue()
         return None
@@ -564,7 +594,7 @@ def _wrap(original: Callable[..., Any], kind: str, asynchronous: bool) -> Callab
                 exchange.encoded = not _aio_decode.get()
             token = _exchange.set(exchange)
             scope = trace.use_span(
-                exchange.span,
+                exchange.scope_span,
                 end_on_exit=False,
                 record_exception=False,
                 set_status_on_exception=False,
@@ -589,7 +619,10 @@ def _wrap(original: Callable[..., Any], kind: str, asynchronous: bool) -> Callab
             return original(*args, **kwargs)
         token = _exchange.set(exchange)
         scope = trace.use_span(
-            exchange.span, end_on_exit=False, record_exception=False, set_status_on_exception=False
+            exchange.scope_span,
+            end_on_exit=False,
+            record_exception=False,
+            set_status_on_exception=False,
         )
         try:
             with scope:

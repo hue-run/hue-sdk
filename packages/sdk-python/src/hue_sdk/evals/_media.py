@@ -26,6 +26,7 @@ import requests
 import urllib3
 
 from .._inline_files import loads_message
+from .._otel_compat import suppress_instrumentation
 
 MediaFetchErrorReason = Literal[
     "not_found", "missing", "unavailable", "forbidden", "too_large", "digest_mismatch", "failed"
@@ -402,6 +403,7 @@ class MediaClient:
         resolved.failures.extend(prefixes)
         return resolved
 
+    @suppress_instrumentation()
     def _grant(self, path: str, sha256: str) -> _Grant:
         """The download link of one file, asked once more after an unavailable answer or a lost
         connection."""
@@ -440,6 +442,7 @@ class MediaClient:
             time.sleep(wait)
             attempt += 1
 
+    @suppress_instrumentation()
     def _download(self, grant: _Grant, sha256: str) -> bytes:
         """The bytes behind a link, fetched without the key, stopped past the reported size and
         checked against the digest. The download ends once no byte has arrived for the client's

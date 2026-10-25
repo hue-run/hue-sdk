@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import importlib
 import io
 import json
 import subprocess
@@ -15,7 +16,7 @@ from urllib.parse import urlsplit
 import pytest
 import requests
 from opentelemetry import trace
-from opentelemetry.context import attach, detach
+from opentelemetry.context import Context, attach, detach
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.trace import NonRecordingSpan, SpanContext, SpanKind, TraceFlags
 
@@ -24,7 +25,8 @@ from hue_sdk._otel_compat import export_context
 
 PAYLOAD = {"ok": True, "items": [{"id": "synthetic-item", "text": "héllo"}]}
 BODY = json.dumps(PAYLOAD, ensure_ascii=False).encode()
-TRANSPORTS = ("requests", "httpx", "httpx-async", "urllib", "aiohttp", "httplib2", "urllib3")
+HTTPX_TRANSPORTS = ("httpx", "httpx-async", "httpx2", "httpx2-async")
+TRANSPORTS = ("requests", *HTTPX_TRANSPORTS, "urllib", "aiohttp", "httplib2", "urllib3")
 
 
 @dataclass
@@ -143,10 +145,10 @@ def drive(kind, url, *, stream=False, body=b'{"user_id":"synthetic-user","count"
         with requests.Session() as client:
             with client.post(url, data=body, headers=headers, stream=stream) as response:
                 return b"".join(response.iter_content(7)) if stream else response.content
-    if kind in ("httpx", "httpx-async"):
-        import httpx
+    if kind in HTTPX_TRANSPORTS:
+        httpx = importlib.import_module(kind.partition("-")[0])
 
-        if kind == "httpx":
+        if not kind.endswith("-async"):
             with httpx.Client(trust_env=False) as client:
                 request = client.build_request("POST", url, content=body, headers=headers)
                 response = client.send(request, stream=stream)
@@ -276,7 +278,7 @@ def test_capture_switches_preserve_http_behavior_and_metadata_only(
     assert all(b"synthetic-query" not in body for _, _, body in receiver.requests)
 
 
-def test_no_http_spans_in_model_or_export_context(receiver, app):
+def test_model_http_keeps_identity_and_export_context_is_suppressed(receiver, app):
     with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
         with hue.model("synthetic-model", provider="synthetic"):
             assert drive("requests", app.url + "/model") == BODY
@@ -291,7 +293,91 @@ def test_no_http_spans_in_model_or_export_context(receiver, app):
             assert drive("requests", app.url + "/foreign-model") == BODY
         assert hue.force_flush()
     assert len(app.requests) == 3
-    assert http_spans(receiver) == []
+    spans = http_spans(receiver)
+    assert len(spans) == 2
+    assert {attributes(span)["url.full"] for span in spans} == {
+        app.url + "/model",
+        app.url + "/foreign-model",
+    }
+    assert all(
+        "input.value" not in attributes(span) and "output.value" not in attributes(span)
+        for span in spans
+    )
+
+
+def test_nested_tool_restores_app_bodies_without_changing_inherited_model_metadata(receiver, app):
+    before = {"text": "synthetic-provider-private-response-before"}
+    after = {"text": "synthetic-provider-private-response-after"}
+    app.routes["/provider-before"] = json.dumps(before).encode()
+    app.routes["/provider-after"] = json.dumps(after).encode()
+    foreign = TracerProvider(shutdown_on_exit=False)
+    try:
+        with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+            with hue.model("synthetic-model", provider="synthetic-provider"):
+                assert (
+                    requests.post(
+                        app.url + "/provider-before?private=synthetic-provider-private-query",
+                        json={"prompt": "synthetic-provider-private-request-before"},
+                    ).json()
+                    == before
+                )
+                with hue.tool("app-call") as tool:
+                    with foreign.get_tracer("application").start_as_current_span(
+                        "foreign-model",
+                        context=Context(),
+                        kind=SpanKind.CLIENT,
+                        attributes={
+                            "gen_ai.operation.name": "chat",
+                            "openinference.span.kind": "LLM",
+                        },
+                    ):
+                        assert (
+                            requests.post(
+                                app.url + "/tool?user_id=synthetic-user",
+                                json={"team_id": "synthetic-team"},
+                            ).json()
+                            == PAYLOAD
+                        )
+                        tool.log_inference(
+                            output=[
+                                {
+                                    "role": "assistant",
+                                    "parts": [{"type": "text", "content": "synthetic-tool-log"}],
+                                }
+                            ]
+                        )
+                assert (
+                    requests.post(
+                        app.url + "/provider-after",
+                        json={"prompt": "synthetic-provider-private-request-after"},
+                    ).json()
+                    == after
+                )
+            assert hue.force_flush()
+        spans = http_spans(receiver)
+        assert len(spans) == 3
+        for span in spans:
+            fields = attributes(span)
+            if fields["url.full"].endswith("/tool"):
+                assert json.loads(fields["input.value"]) == {
+                    "user_id": "synthetic-user",
+                    "team_id": "synthetic-team",
+                }
+                assert json.loads(fields["output.value"]) == PAYLOAD
+                assert span.parent_span_id.hex() == tool.span_id
+            else:
+                assert fields["http.request.method"] == "POST"
+                assert fields["http.response.status_code"] == 200
+                assert "input.value" not in fields and "output.value" not in fields
+        (log,) = receiver.logs()
+        log_fields = attributes(log)
+        assert log_fields["gen_ai.operation.name"] == "chat"
+        assert log_fields["gen_ai.provider.name"] == "synthetic-provider"
+        assert log_fields["gen_ai.request.model"] == "synthetic-model"
+        assert log.span_id.hex() == tool.span_id
+        assert all(b"synthetic-provider-private" not in body for _, _, body in receiver.requests)
+    finally:
+        foreign.shutdown()
 
 
 def test_configured_hue_origin_is_excluded_from_http_capture(receiver):
@@ -576,7 +662,7 @@ def test_failing_redactor_omits_http_content_without_changing_response(receiver,
     assert b"synthetic-user" not in payload and b"synthetic-item" not in payload
 
 
-@pytest.mark.parametrize("kind", ("requests", "httpx"))
+@pytest.mark.parametrize("kind", ("requests", "httpx", "httpx2"))
 def test_streaming_request_body_is_never_read_ahead_or_replayed(receiver, app, kind):
     reads = []
 
@@ -678,7 +764,7 @@ def test_binary_response_records_size_without_body(receiver, app, kind):
     assert "output.value" not in fields
 
 
-@pytest.mark.parametrize("kind", ("requests", "httpx", "httpx-async", "aiohttp", "urllib3"))
+@pytest.mark.parametrize("kind", ("requests", *HTTPX_TRANSPORTS, "aiohttp", "urllib3"))
 def test_gzip_decode_behavior_is_unchanged(receiver, app, kind):
     baseline = drive(kind, app.url + "/gzip")
     with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
@@ -759,7 +845,7 @@ def test_undecodable_bodies_are_omitted_without_inventing_characters(receiver, a
     assert "output.value" not in fields
 
 
-@pytest.mark.parametrize("kind", ("requests", "urllib3", "httpx", "httpx-async"))
+@pytest.mark.parametrize("kind", ("requests", "urllib3", *HTTPX_TRANSPORTS))
 def test_raw_compressed_reads_preserve_bytes_and_record_size_only(receiver, app, kind):
     def read():
         url = app.url + "/gzip"
@@ -775,9 +861,9 @@ def test_raw_compressed_reads_preserve_bytes_and_record_size_only(receiver, app,
                     return response.read(decode_content=False)
                 finally:
                     response.close()
-        import httpx
+        httpx = importlib.import_module(kind.partition("-")[0])
 
-        if kind == "httpx":
+        if not kind.endswith("-async"):
             with httpx.Client(trust_env=False) as client:
                 with client.stream("GET", url) as response:
                     return b"".join(response.iter_raw())
@@ -828,9 +914,7 @@ def test_aiohttp_decompression_choice_preserves_bytes_and_honest_capture(
         assert "output.value" not in fields
 
 
-@pytest.mark.parametrize(
-    "kind", ("requests", "httpx", "httpx-async", "urllib", "aiohttp", "urllib3")
-)
+@pytest.mark.parametrize("kind", ("requests", *HTTPX_TRANSPORTS, "urllib", "aiohttp", "urllib3"))
 def test_response_read_failure_preserves_the_client_exception(receiver, app, kind):
     app.incomplete = True
     with pytest.raises(Exception) as baseline:
@@ -855,7 +939,7 @@ def test_urllib_silent_short_read_keeps_partial_body_marked(receiver, app):
     assert "output.value" in fields["hue.truncated"]
 
 
-@pytest.mark.parametrize("kind", ("aiohttp", "httpx"))
+@pytest.mark.parametrize("kind", ("aiohttp", "httpx", "httpx2"))
 def test_async_response_cancellation_preserves_task_and_context(receiver, app, kind):
     app.body_gate = Event()
 
@@ -871,7 +955,7 @@ def test_async_response_cancellation_preserves_task_and_context(receiver, app, k
                         started.set()
                         await response.read()
             else:
-                import httpx
+                httpx = importlib.import_module(kind.partition("-")[0])
 
                 async with httpx.AsyncClient(trust_env=False) as client:
                     async with client.stream("GET", app.url + "/cancelled") as response:
@@ -921,10 +1005,10 @@ def test_redirects_record_each_actual_wire_url_and_status(receiver, app, kind):
         url = app.url + "/redirect?tag=original"
         if kind == "requests":
             return requests.get(url).content
-        if kind in ("httpx", "httpx-async"):
-            import httpx
+        if kind in HTTPX_TRANSPORTS:
+            httpx = importlib.import_module(kind.partition("-")[0])
 
-            if kind == "httpx":
+            if not kind.endswith("-async"):
                 with httpx.Client(follow_redirects=True, trust_env=False) as client:
                     return client.get(url).content
 
@@ -973,7 +1057,7 @@ def test_redirects_record_each_actual_wire_url_and_status(receiver, app, kind):
     assert recorded == [(app.url + "/final", 200), (app.url + "/redirect", 302)]
 
 
-@pytest.mark.parametrize("kind", ("requests", "httpx"))
+@pytest.mark.parametrize("kind", ("requests", "httpx", "httpx2"))
 @pytest.mark.parametrize("failure", (False, True))
 def test_foreign_processor_error_preserves_http_result_or_original_error(
     receiver, app, monkeypatch, kind, failure
@@ -1005,7 +1089,7 @@ def test_foreign_processor_error_preserves_http_result_or_original_error(
                     else:
                         assert requests.get(app.url + "/processor").content == BODY
                 else:
-                    import httpx
+                    httpx = importlib.import_module(kind.partition("-")[0])
 
                     error = httpx.RequestError("synthetic-request-failure")
                     transport = httpx.MockTransport(fail) if failure else None
@@ -1296,11 +1380,13 @@ def test_import_hook_instruments_clients_first_imported_after_hue(receiver, app)
     script = """
 import json, sys
 from hue_sdk import Hue
-assert 'aiohttp' not in sys.modules and 'httpx' not in sys.modules
+assert 'aiohttp' not in sys.modules and 'httpx' not in sys.modules and 'httpx2' not in sys.modules
 with Hue(sys.argv[1], 'synthetic-http-key', live_spans=False) as hue:
-    import asyncio, aiohttp, httpx
+    import asyncio, aiohttp, httpx, httpx2
     with httpx.Client(trust_env=False) as client:
         assert client.get(sys.argv[2] + '/late-httpx').json()['ok']
+    with httpx2.Client(trust_env=False) as client:
+        assert client.get(sys.argv[2] + '/late-httpx2').json()['ok']
     async def run():
         async with aiohttp.ClientSession() as client:
             async with client.get(sys.argv[2] + '/late-aiohttp') as response:
@@ -1309,7 +1395,7 @@ with Hue(sys.argv[1], 'synthetic-http-key', live_spans=False) as hue:
     assert hue.force_flush()
 """
     subprocess.run([sys.executable, "-c", script, receiver.url, app.url], check=True, timeout=20)
-    assert len(http_spans(receiver)) == 2
+    assert len(http_spans(receiver)) == 3
 
 
 def test_last_shutdown_during_first_import_preserves_the_import(receiver):

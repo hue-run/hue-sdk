@@ -1984,7 +1984,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 #### Breaking
 
-- Enabled clients now observe outbound HTTP calls through `requests`, `httpx` sync and async,
+- Enabled clients now observe outbound HTTP calls through `requests`, `httpx` and `httpx2` sync and async,
   `urllib.request`, `aiohttp`, `httplib2` and `urllib3` by default. `capture_content=True` now includes
   their request and response content, including query parameters. Migration: pass
   `capture_http_bodies=False` to keep HTTP identity without bodies, or `capture_http=False` to
@@ -2004,10 +2004,13 @@ No registry release is claimed until publication and registry acceptance complet
   structured OTLP `hue.truncated` placeholder instead of body text. The affected key is also
   listed in the span's `hue.truncated` attribute. Binary bodies record size only.
 - HTTP observation adds no runtime dependencies or request headers. Requests to the configured
-  Hue origin and requests within model spans are excluded, nested supported clients share one Hue HTTP span,
+  Hue origin are excluded. Model HTTP calls keep identity without bodies, while a nested Hue
+  tool resumes body capture. Nested supported clients share one Hue HTTP span,
   and shutdown removes Hue's observation when the last client stops. Streaming capture observes
   application reads without consuming extra bytes. Unread and incomplete streams cannot provide
   complete response bodies. Calls use the client's existing owned or borrowed tracer provider.
+  An owned provider keeps HTTP spans in the active Hue helper's trace when the application
+  temporarily activates an independent trace. Borrowed providers retain the active application's parent.
 
 ### [0.13.6] - 2026-10-24
 

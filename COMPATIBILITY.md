@@ -14,7 +14,7 @@ This checkout covers TypeScript `0.25.1` and Python `0.14.0`. Registry availabil
 
 ## Existing dependencies
 
-Since Python `0.14.0`, Hue observes outbound HTTP through `requests`, `httpx` sync and async,
+Since Python `0.14.0`, Hue observes outbound HTTP through `requests`, `httpx` and `httpx2` sync and async,
 `urllib.request`, `aiohttp`, `httplib2` and `urllib3`, without new runtime dependencies. Requests use
 their existing bytes and headers. `capture_http=False` disables observation, and
 `capture_http_bodies=False` retains identity without bodies. `capture_content=False` also disables
@@ -23,6 +23,8 @@ query strings and fragments are excluded from identity attributes. Body capture 
 eligible text and JSON content, at most 1 MiB per side, with truncation marked. Streaming capture
 observes only application-consumed bytes. Calls made through raw sockets, gRPC, WebSockets or
 another process are outside this capture. See the [Python HTTP capture guide](./packages/sdk-python/README.md#outbound-http-capture).
+
+The optional HTTPX2 family is verified with `httpx2==2.13.1`.
 
 `@hue-run/sdk` core can coexist with AI SDK 6 (installed-package validation covers 6.0.116). The `hueTelemetry` adapter still requires AI SDK 7 and a compatible `@ai-sdk/otel` peer; it explicitly rejects AI SDK 6. Keep AI SDK 6 instrumentation on its existing provider and attach Hue transport, or use a standard OTLP exporter. Do not force dependency resolution or upgrade a framework solely to add tracing.
 

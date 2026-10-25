@@ -22,6 +22,7 @@ from opentelemetry.context import Context
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from ._inline_files import is_media_content_type
+from ._otel_compat import suppress_instrumentation
 from .evals._json import MISSING, encode, json_value, uuid
 from .transport import DEFAULT_BASE_URL, normalize_base_url
 
@@ -396,6 +397,7 @@ class _InvocationApi:
         upload: bool = False,
         upload_headers: dict[str, str] | None = None,
     ) -> bytes:
+        @suppress_instrumentation()
         def send() -> bytes:
             remaining = deadline - monotonic()
             if remaining <= 0:

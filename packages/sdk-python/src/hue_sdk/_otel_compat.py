@@ -9,6 +9,8 @@ deep inside the exporter or as a silent behavior change in Hue's feedback protec
 from __future__ import annotations
 
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from opentelemetry import context as otel_context
 from opentelemetry.context import Context, create_key, get_value, set_value
@@ -68,6 +70,16 @@ def instrumentation_suppressed(context: Context | None = None) -> bool:
     return SUPPRESS_INSTRUMENTATION_KEY is not None and bool(
         get_value(SUPPRESS_INSTRUMENTATION_KEY, context)
     )
+
+
+@contextmanager
+def suppress_instrumentation() -> Iterator[None]:
+    """Keep the SDK's own control and storage requests out of application traces."""
+    token = otel_context.attach(export_context())
+    try:
+        yield
+    finally:
+        otel_context.detach(token)
 
 
 __all__ = [
