@@ -3,6 +3,7 @@ import { AsyncLocalStorage, executionAsyncId } from "node:async_hooks";
 import { channel } from "node:diagnostics_channel";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import { types as utilTypes } from "node:util";
+import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from "node:zlib";
 import {
   context,
   trace,
@@ -17,7 +18,7 @@ import {
 import { isTracingSuppressed } from "@opentelemetry/core";
 import { HUE_SCOPE } from "./config.js";
 import { contentLimitsOf, encodeBoundedContent, safeSpan, spanSource } from "./safety.js";
-import { TRUNCATED_KEY, truncatedMarker, withTruncatedKeys } from "./privacy.js";
+import { TRUNCATED_KEY, isTruncatedMarker, truncatedMarker, withTruncatedKeys } from "./privacy.js";
 import { scrubCredentialTextUnbounded } from "./tool-definitions.js";
 import { scrubHttpUrl } from "./http-url.js";
 
@@ -171,8 +172,34 @@ function headersOf(value: unknown): Headers {
   return result;
 }
 
+const DECODABLE_ENCODINGS = new Set(["gzip", "x-gzip", "deflate", "br"]);
+function contentEncodings(headers: Headers): string[] {
+  return (headers.get("content-encoding") ?? "")
+    .split(",")
+    .map((encoding) => encoding.trim().toLowerCase())
+    .filter((encoding) => encoding && encoding !== "identity");
+}
+/** Decoded wire bytes, or undefined when they exceed the cap or do not decode. */
+function decodeBody(bytes: Buffer, encoding: string, cap: number): Buffer | undefined {
+  const options = { maxOutputLength: cap };
+  try {
+    if (encoding === "gzip" || encoding === "x-gzip") return gunzipSync(bytes, options);
+    if (encoding === "br") return brotliDecompressSync(bytes, options);
+    if (encoding === "deflate") {
+      try {
+        return inflateSync(bytes, options);
+      } catch {
+        return inflateRawSync(bytes, options);
+      }
+    }
+  } catch {
+    /* A body over the cap once decoded, or one the runtime cannot decode, keeps size only. */
+  }
+  return undefined;
+}
+
 function textual(headers: Headers): boolean {
-  if (headers.has("content-encoding") && headers.get("content-encoding") !== "identity")
+  if (!contentEncodings(headers).every((encoding) => DECODABLE_ENCODINGS.has(encoding)))
     return false;
   const type = headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   return (
@@ -189,6 +216,8 @@ function textual(headers: Headers): boolean {
 /** Only bytes that already pass through the customer's request or response are retained. */
 class Body {
   size = 0;
+  /** Bun's fetch hands the application decoded bytes while the response still names its encoding. */
+  decoded = false;
   private parts: Buffer[] = [];
   private retained = 0;
   constructor(readonly cap: number) {}
@@ -231,7 +260,13 @@ class Body {
   }
   value(headers: Headers): unknown {
     if (this.size > this.cap) return truncatedMarker(this.size);
-    const text = Buffer.concat(this.parts, this.retained).toString("utf8");
+    let bytes: Buffer | undefined = Buffer.concat(this.parts, this.retained);
+    if (!this.decoded && bytes.byteLength)
+      for (const encoding of contentEncodings(headers).reverse()) {
+        bytes = decodeBody(bytes, encoding, this.cap);
+        if (!bytes) return truncatedMarker(this.size);
+      }
+    const text = bytes.toString("utf8");
     const type = headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
     if (!text) return undefined;
     if (type === "application/json" || type?.endsWith("+json")) {
@@ -553,7 +588,7 @@ class Exchange {
           const query = queryBytes > this.input.cap ? undefined : queryOf(this.url.searchParams);
           if (this.requestComplete && (this.input.size === 0 || textual(this.requestHeaders))) {
             const body = this.input.value(this.requestHeaders);
-            const cut = this.input.size > this.input.cap || !query;
+            const cut = this.input.size > this.input.cap || !query || isTruncatedMarker(body);
             const input = !query
               ? truncatedMarker(queryBytes + this.input.size)
               : cut
@@ -572,7 +607,7 @@ class Exchange {
             (this.output.size === 0 || textual(this.responseHeaders))
           ) {
             const body = this.output.value(this.responseHeaders);
-            const cut = this.output.size > this.output.cap;
+            const cut = this.output.size > this.output.cap || isTruncatedMarker(body);
             this.content("output.value", body ?? null, cut, this.output.size);
             this.setAttribute("output.mime_type", "application/json");
           }
@@ -1170,6 +1205,7 @@ function installFetch(): void {
           captured.responseHeaders = headersOf(init.headers);
           // Bun exposes only the logical fetch, so a followed redirect's body has no proven hop.
           if (response.redirected) captured.responseComplete = false;
+          captured.output.decoded = true;
           const body = response.body;
           if (!captured.bodies || !body) {
             captured.finish(true);

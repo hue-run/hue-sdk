@@ -194,7 +194,11 @@ actually sent, with creator parent, model-content policy, session and user metad
 when another scope writes later. No SDK `data` or `readable` listener may be added.
 
 Exercise late, paused, piped, async-iterated, unread and aborted responses, chunked and fixed
-lengths, and gzip. Compressed wire bytes must not be parsed as JSON. The instrumentation must
+lengths, and gzip, deflate and br. A compressed response is decoded for capture only, so
+`output.value` holds the decoded body while the application receives its usual bytes: compressed
+from node:http, decoded from fetch (Hue reads the compressed bytes inside undici on Node and the
+decoded bytes Bun's fetch hands over). Corrupt bytes, or a body over the value cap once decoded,
+record a truncation marker, never parsed wire bytes. The instrumentation must
 not introduce a response clone reader or an unbounded body buffer.
 
 Node.js 22 lacks undici body-chunk diagnostics. Node.js 22 and 24 expose per-request `onData`

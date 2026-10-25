@@ -8,6 +8,21 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Fixed
+
+- HTTP capture decodes gzip, deflate and br responses before applying the text and size policy,
+  so a compressed JSON or text response records `output.value` instead of its size only. The
+  application still receives its usual bytes. Undecodable bytes record a truncation marker.
+
+#### Added
+
+- `hue eval --command` exports `TRACEPARENT` (the execution's trace context) to direct, answer-only
+  cases alongside `HUE_CASE_*` and `HUE_EXECUTION_ID`, and drops an inherited `TRACESTATE`.
+- `hue eval` prints `Run id: <id> (MCP get_run, list_run_items)` and, with the verdicts,
+  `Scoring run id: <id>`, in place of `Experiment: <id>`. `--json` output is unchanged.
+
 ### [0.26.0] - 2026-10-25
 
 #### Breaking

@@ -51,7 +51,7 @@ import {
   type ScenarioPins,
 } from "../evals/scenarios.js";
 import { collectDirectOutputs, stageDirectCase } from "./eval-direct.js";
-import { runEnvironmentTarget } from "../evals/environment-target.js";
+import { caseTraceparent, runEnvironmentTarget } from "../evals/environment-target.js";
 import {
   runSimulation,
   simulationTargetContext,
@@ -85,6 +85,8 @@ export interface DirectTargetContext {
   config: JsonValue;
   item: Pick<ExperimentCase, "id" | "externalKey">;
   executionId: string;
+  /** Identity of the execution's root span, exported to a command as `TRACEPARENT`. */
+  trace?: { traceId: string; spanId: string };
   /** Verified copies of the agent-visible pinned files (`source`, templates, originals). */
   files: LocalFile[];
   /** Private scratch directory for this case; generated files may be written here. */
@@ -767,6 +769,8 @@ function commandAdapter(
       executionId: context.executionId,
       files: context.files,
     });
+    // Only direct contexts carry the execution's trace identity; a world joins through its run.
+    const trace = (context as Partial<DirectTargetContext>).trace;
     const identity = {
       HUE_EXECUTION_ID: context.executionId,
       HUE_ENVIRONMENT_RUN_ID: context.environmentRunId,
@@ -775,6 +779,7 @@ function commandAdapter(
       HUE_CASE_DIR: layout.caseDirectory,
       HUE_CASE_INPUTS: layout.inputsPath,
       HUE_CASE_OUTPUT_DIR: layout.outputDirectory,
+      ...(trace ? { TRACEPARENT: caseTraceparent(trace), TRACESTATE: undefined } : {}),
     };
     // The token-bearing file is written inside a private directory registered before any of it
     // exists, so a forced exit at any point removes it.
@@ -846,6 +851,9 @@ function directCommandAdapter(
         HUE_CASE_ID: context.item.id,
         HUE_CASE_KEY: context.item.externalKey,
         HUE_EXECUTION_ID: context.executionId,
+        ...(context.trace
+          ? { TRACEPARENT: caseTraceparent(context.trace), TRACESTATE: undefined }
+          : {}),
       },
       stdin: JSON.stringify({ inputs, config: context.config }),
       timeoutSeconds,
@@ -1549,6 +1557,8 @@ async function readAndReportVerdicts(
     renderTable(verdicts, output);
     if (baseline) renderComparison(baseline.experimentId, baseline.comparison, output);
     output.log(`Run: ${run.runUrl}`);
+    output.log(`Run id: ${verdicts.experimentId} (MCP get_run, list_run_items)`);
+    output.log(`Scoring run id: ${verdicts.runId}`);
   }
   const totals = verdicts.summary.totals;
   if (run.telemetryNotAccepted?.length) return 1;
@@ -1704,7 +1714,7 @@ async function runOnce(
         if (event.type === "run_created") {
           runUrl = event.runUrl;
           output.log(`Run: ${event.runUrl}`);
-          output.log(`Experiment: ${event.experimentId}`);
+          output.log(`Run id: ${event.experimentId} (MCP get_run, list_run_items)`);
           try {
             let after: string | undefined;
             do {
@@ -1914,7 +1924,7 @@ async function runExperimentAttempt(
     experimentId = attempt.experimentId;
     runUrl = new URL(`/runs/${experimentId}`, connection.baseUrl).toString();
     output.log(`Run: ${runUrl}`);
-    output.log(`Experiment: ${experimentId}`);
+    output.log(`Run id: ${experimentId} (MCP get_run, list_run_items)`);
     report = await runExperiment({
       client,
       hue: run.hue,
@@ -1977,6 +1987,7 @@ async function runExperimentAttempt(
             externalKey: context.item.externalKey,
           },
           executionId: context.executionId,
+          trace: { traceId: context.span.traceId, spanId: context.span.spanId },
           files: structuredClone(context.files),
           outputDirectory: context.outputDirectory,
           signal,
@@ -2180,6 +2191,7 @@ async function runWorker(
                 config: context.config,
                 item: context.item,
                 executionId: context.executionId,
+                trace: context.trace,
                 files: context.files,
                 outputDirectory: context.outputDirectory,
                 signal: context.signal ?? signal,
