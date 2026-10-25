@@ -68,8 +68,9 @@ node --env-file=.env dist/main.js --live
 
 Live mode makes only Gmail GET requests. It prints the count and trace ID after
 Hue acknowledges export. It makes no model request and changes no mailbox data.
-Create Hue before API clients on Node 22 and Bun so the fetch fallback can observe
-those clients. A fetch reference saved before Hue initialization can escape capture.
+Node.js HTTP clients and fetch use diagnostics. On Bun, create Hue before API
+clients that save a reference to native fetch. Its wrapper cannot observe a
+reference saved before Hue initialization.
 
 These application environment switches map to constructor options:
 
