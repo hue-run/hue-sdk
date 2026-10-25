@@ -8,6 +8,18 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [Unreleased]
+
+#### Fixed
+
+- A World case whose World Hue was still preparing failed after a fixed two minutes with a
+  status-less `ConnectionFailed` ("Hue environment connection or response failed"). The World
+  client now waits as long as Hue answers `503 world_preparing` with a retry, honoring each
+  `Retry-After`, until the run's signal stops it; `hue eval` logs `waiting for World preparation`
+  (`world_preparing` progress events on `runSimulation` and `runEnvironmentTarget`). A case that
+  is stopped while waiting reports Hue's refusal itself: `ServiceRefused` with cause
+  `world_preparing` and Hue's message, now kept as `HueEnvironmentError.hint`.
+
 ### [0.25.0] - 2026-10-24
 
 #### Added
