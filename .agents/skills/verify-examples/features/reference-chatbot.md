@@ -8,6 +8,7 @@ A Node HTTP app (`examples/reference-chatbot`) serving a chat page at `/`, its s
 - `chat-error` reports a controlled error separately from telemetry.
 - `chat-capture` honors `HUE_CAPTURE_CONTENT=false` (metadata only), `HUE_CAPTURE_HTTP=false`, and `HUE_CAPTURE_HTTP_BODIES=false`. The app validates and passes these options to the SDK.
 - `chat-telemetry` waits for both trace and log acknowledgements before reporting `accepted`.
+- `chat-http-policy` imports the app's configured Hue client in a separate acceptance child and checks a real loopback HTTP exchange in its exported OTLP.
 
 ## How to get to it (user POV)
 
@@ -32,7 +33,7 @@ Preconditions:
 - **Chat.** `curl -sN http://127.0.0.1:3401/chat -H 'content-type: application/json' -d "{\"sessionId\":\"$(python3 -c 'import uuid;print(uuid.uuid4())')\",\"messages\":[{\"role\":\"user\",\"content\":\"count the words in hello world\"}]}"`. Expected: SSE `trace`, a `textStatistics` tool call and result, text deltas, a telemetry event with `accepted`, then `done`. The stub log gains `POST /api/v1/otlp/v1/traces` and `/v1/logs` with status 200.
 - **Controlled error.** Same request with `,"mode":"controlled-error"` in the body. Expected: an `error` event and telemetry still `accepted`.
 - **Print the export evidence.** `cat "$V"/stub.log "$V"/server.log`.
-- **Content and HTTP policies at once** (about 10 s). `node "$V"/chatbot/scripts/acceptance.mjs "$V"/chatbot` runs four combinations of content and HTTP settings against `HUE_BASE_URL` (the stub) and prints its JSON report.
+- **Content and HTTP policies at once** (about 10 s). `node "$V"/chatbot/scripts/acceptance.mjs "$V"/chatbot` runs four combinations of content and HTTP settings against `HUE_BASE_URL` (the stub) and prints its JSON report. Each setting also imports the app's actual configured client in a separate child, sends one parented JSON request to a loopback app API, and receives its OTLP on a separate origin. The `httpPolicies` report records the trace ID, HTTP span count, content policy and real receiver acknowledgement bytes. The check decodes OTLP with the development-only `protobufjs` package and verifies the HTTP parent, method, sanitized URL, status, query, request and response. Identity-only and metadata-only modes retain one HTTP span without content; HTTP-off retains none. Raw protobuf bytes must omit credentials and, when bodies are off, all request, response and query sentinels.
 
 ## Gotchas
 

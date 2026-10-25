@@ -3,11 +3,13 @@ import { once } from "node:events";
 import { resolve } from "node:path";
 import { strict as assert } from "node:assert";
 import { randomUUID } from "node:crypto";
+import { verifyHttpPolicy } from "./http-policy.mjs";
 
 // Run from an installed standalone chatbot. Supply HUE_API_KEY/HUE_BASE_URL in the
 // process environment; this script never writes or prints the key.
 const cwd = resolve(process.argv[2] ?? ".");
 const evidence = [];
+const httpPolicies = [];
 for (const [captureContent, captureHttp, captureHttpBodies] of [
   ["true", "true", "true"],
   ["false", "true", "true"],
@@ -116,5 +118,8 @@ for (const [captureContent, captureHttp, captureHttpBodies] of [
     }
   }
   assert.equal(stderr, "", "Chatbot wrote server or telemetry diagnostics");
+  httpPolicies.push(
+    await verifyHttpPolicy({ cwd, captureContent, captureHttp, captureHttpBodies }),
+  );
 }
-console.log(JSON.stringify({ node: process.version, evidence }, null, 2));
+console.log(JSON.stringify({ node: process.version, evidence, httpPolicies }, null, 2));

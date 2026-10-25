@@ -21,7 +21,7 @@ if (mode === "live" && (!process.env.AI_GATEWAY_API_KEY || !process.env.HUE_CHAT
   throw new Error("Live mode requires AI_GATEWAY_API_KEY and HUE_CHAT_MODEL (provider/model)");
 // Message records name the inference they belong to, as the agent's model spans do.
 const chatModel = chatModelIdentity(mode, process.env.HUE_CHAT_MODEL);
-const hue = createHue({
+export const hue = createHue({
   apiKey: process.env.HUE_API_KEY,
   baseUrl: process.env.HUE_BASE_URL,
   serviceName: "hue-reference-chatbot",
