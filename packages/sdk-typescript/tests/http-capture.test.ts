@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { request } from "node:http";
 import { brotliCompressSync, deflateSync, gzipSync } from "node:zlib";
 import { createHue, createHueTransport, type HueOptions } from "../src/index.js";
-import { MAX_CONTENT_BYTES } from "../src/config.js";
 import { apiKey, attr, receiver } from "./sdk-receiver.js";
 
 function provider() {
@@ -178,7 +177,7 @@ describe("default outbound HTTP capture", () => {
 
   test.each([
     ["corrupt gzip bytes", Buffer.from("not a gzip member")],
-    ["a gzip body over the value cap once decoded", gzipSync("x".repeat(MAX_CONTENT_BYTES + 1))],
+    ["a gzip body over the value cap once decoded", gzipSync("x".repeat(1024 * 1024 + 1))],
   ])(
     "records a truncation marker for %s while the node:http caller sees the wire bytes",
     async (_label, wire) => {
