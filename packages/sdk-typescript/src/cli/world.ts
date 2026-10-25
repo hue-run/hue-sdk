@@ -613,13 +613,16 @@ async function save(ctx: Context, directory: string, uploads: Upload[]) {
   for (const upload of uploads) {
     const shown = join(directory, upload.app, upload.name);
     const path = resolve(ctx.cwd, shown);
+    // EEXIST from mkdir means a file holds the app's directory name, not that the export exists.
+    let made = false;
     try {
       await mkdir(resolve(ctx.cwd, directory, upload.app), { recursive: true, mode: 0o700 });
+      made = true;
       await writeFile(path, await upload.bytes(), { flag: "wx", mode: 0o600 });
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code ?? "unwritable";
       throw new WorldCommandError(
-        code === "EEXIST"
+        made && code === "EEXIST"
           ? `${shown} exists already; save to another directory`
           : `Unable to write ${shown}: ${code}`,
       );

@@ -1893,6 +1893,18 @@ describe("hue world create --export-from: several apps, saved exports, archived 
     );
     expect(api.queries.length).toBe(queries);
 
+    // A file in the place of the app's directory is named as such, not as an earlier export.
+    await mkdir(join(dir, "blocked"));
+    await writeFile(join(dir, "blocked", "linear"), "");
+    const blocked = await world(
+      ["create", "--apps", "linear", "--export-from", "linear", "--save-to", "blocked"],
+      { cwd: dir, env: { HUE_API_KEY: "", LINEAR_API_KEY: LINEAR_KEY }, io },
+    );
+    expect(blocked.code).toBe(1);
+    expect(blocked.stderr).toContain(
+      `Unable to write ${join("blocked", "linear", "linear-export-1.json")}: EEXIST`,
+    );
+
     // The saved files upload exactly with --files.
     const stand = hue();
     const created = await world(
