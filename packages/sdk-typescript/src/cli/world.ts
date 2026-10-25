@@ -30,6 +30,7 @@ import {
   type Transport,
 } from "./world-http.js";
 import { parseHueOrigin } from "./login.js";
+import { shellWord } from "./mcp.js";
 
 /**
  * `hue world create` and `hue world run`. Create asks Hue for a World of its simulated apps
@@ -394,6 +395,11 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
       throw new UsageError(
         "--save-to only saves the export; create the World from the saved files with --files",
       );
+    // The Composio connection goes in the creation request, not in the files.
+    if (composioUser !== undefined)
+      throw new UsageError(
+        "--save-to keeps the files but not the Composio connection; run the Composio export without --save-to",
+      );
   }
   if (values["dry-run"] && exportFrom.length)
     throw new UsageError("--dry-run reads nothing; run the export without it");
@@ -442,7 +448,7 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
     if (saveTo !== undefined) {
       await save(ctx, saveTo, uploads);
       ctx.out(
-        `Saved ${uploads.length} ${uploads.length === 1 ? "file" : "files"}. Create the World from them with: hue world create --apps ${apps.join(",")} --files ${saveTo}`,
+        `Saved ${uploads.length} ${uploads.length === 1 ? "file" : "files"}. Create the World from them with: hue world create --apps ${apps.join(",")} --files ${shellWord(saveTo)}`,
       );
       return 0;
     }
@@ -567,7 +573,11 @@ function pipedreamAccountsOf(
   if (value === undefined) return undefined;
   if (!exportFrom.length)
     throw new UsageError("--pipedream-account names the accounts --export-from apps read through");
-  const pairs = list(value);
+  // Unlike list(), keeps repeats, so a pair named twice is refused below.
+  const pairs = value
+    .split(",")
+    .map((pair) => pair.trim())
+    .filter(Boolean);
   const accounts = new Map<string, string>();
   if (!pairs.length)
     throw new UsageError("Composio and Pipedream ids are 1 to 256 characters without spaces");

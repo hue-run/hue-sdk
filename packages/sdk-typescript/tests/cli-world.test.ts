@@ -1715,6 +1715,20 @@ describe("hue world create --export-from through a Pipedream Connect account", (
           "--pipedream-user",
           "u",
           "--pipedream-account",
+          "linear=apn_1,linear=apn_1",
+        ],
+        PIPEDREAM_ENV,
+        "--pipedream-account names linear twice",
+      ],
+      [
+        [
+          "--apps",
+          "linear",
+          "--export-from",
+          "linear",
+          "--pipedream-user",
+          "u",
+          "--pipedream-account",
           " ",
         ],
         PIPEDREAM_ENV,
@@ -1905,6 +1919,13 @@ describe("hue world create --export-from: several apps, saved exports, archived 
       `Unable to write ${join("blocked", "linear", "linear-export-1.json")}: EEXIST`,
     );
 
+    // The printed --files path is one shell word.
+    const spaced = await world(
+      ["create", "--apps", "linear", "--export-from", "linear", "--save-to", "my exports"],
+      { cwd: dir, env: { HUE_API_KEY: "", LINEAR_API_KEY: LINEAR_KEY }, io },
+    );
+    expect(spaced.stdout).toContain("--files 'my exports'");
+
     // The saved files upload exactly with --files.
     const stand = hue();
     const created = await world(
@@ -1971,6 +1992,21 @@ describe("hue world create --export-from: several apps, saved exports, archived 
       [
         ["--apps", "linear", "--export-from", "linear", "--save-to", "out", "--files", "data"],
         "--save-to only saves the export",
+      ],
+      [
+        [
+          "--apps",
+          "linear",
+          "--export-from",
+          "linear",
+          "--save-to",
+          "out",
+          "--composio-user",
+          "u",
+          "--composio-account",
+          "c",
+        ],
+        "--save-to keeps the files but not the Composio connection",
       ],
       [
         ["--apps", "linear", "--export-from", "linear", "--slack-archived"],

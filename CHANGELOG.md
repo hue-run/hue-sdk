@@ -26,9 +26,10 @@ refuses to publish a version without a matching entry below.
   id still names the account of a single `--export-from` app.
 - `hue world create --export-from <list> --save-to <dir>` saves the export to
   `<dir>/<app>/<app>-export-<n>.json`, the layout `--files` reads, and creates nothing in Hue, so it
-  needs no `HUE_API_KEY`. The directories are owner-only (0700) and the files owner-only (0600);
-  the command refuses before reading anything when the first file of an app exists, and never
-  writes over a file.
+  needs no `HUE_API_KEY`. The files are owner-only (0600), as are the directories it creates
+  (0700); the command refuses before reading anything when the first file of an app exists, and
+  never writes over a file. A Linear export read through Composio can't be saved, since the
+  Composio connection belongs to the creation request rather than the files.
 
 ### [0.25.0] - 2026-10-24
 
@@ -106,7 +107,7 @@ refuses to publish a version without a matching entry below.
   alone, for `--case`, `--set` and `--dataset-version` alike: every case with a world runs as a
   simulation, every case without one runs direct, and a version holding both runs mixed. A forced
   `--mode direct` over a case that pins a world is refused before a run exists, as `--mode
-  simulation` over a case that pins none already was. `CaseConversionPublication.environmentId`
+simulation` over a case that pins none already was. `CaseConversionPublication.environmentId`
   and `.environmentVersionId` are typed nullable, as Hue returns them for such a case, and
   `grading: "answer"` is read.
 
@@ -154,7 +155,7 @@ refuses to publish a version without a matching entry below.
   when the export lacks the trace's root, as it was with the root. Two exports of one MLflow trace
   whose `info` differs, as when a tag was added between them, are read once, keeping one export's
   `info`, the same whichever file is read first, and the note in `files.notes` ends `read once from
-  this copy` when the later file's copy is the one kept; when the trace's root had no parent, the
+this copy` when the later file's copy is the one kept; when the trace's root had no parent, the
   trace was refused with `span … appears with different content`.
 - A zstd file with a frame whose content fails its checksum, or is longer or shorter than the frame
   declares, is not read, as a gzip file with a member that fails its trailer is not; the frames
@@ -173,13 +174,13 @@ refuses to publish a version without a matching entry below.
   not 16 KiB a frame or member. A file over its own bound counts more than that bound against the
   input's, so four such files refuse the input; each was listed in `files.unsupported` and counted
   only its size on disk. Each refusal says whether content decompresses past the bound (`a zstd
-  file that decompresses to more than 67108864 bytes`) or its frames count past it (`a zstd file
-  whose frames count for more than 67108864 bytes, each at least 128; decompress it first`), for a
+file that decompresses to more than 67108864 bytes`) or its frames count past it (`a zstd file
+whose frames count for more than 67108864 bytes, each at least 128; decompress it first`), for a
   file, for a length-prefixed file's messages and for the input.
 - **Wire** A span that no batch holds alone, though each of its values is within the 1 MiB inline
   limit, has its largest text values stored as values of their own and listed in `hue.blobs` until
   a batch holds it, its source record last. Such a trace was refused with `One span exceeds the
-  import batch bounds`: a transcript whose agent span holds a large image both as its input and in
+import batch bounds`: a transcript whose agent span holds a large image both as its input and in
   its source record, as a request logged without its reply or an image before the first turn does,
   or whose tool span holds a large result.
 - A gzip file that breaks off inside a member's 8-byte trailer is not read when the CRC-32 it holds
@@ -222,6 +223,7 @@ refuses to publish a version without a matching entry below.
   and `mlflow.spanType` only while it nests at most 32 levels deep and holds only finite numbers
   and safe integers. `--session-key` adds its conversation to a trace whose agent spans name none,
   starting before any tool span that names one so that the trace list shows it.
+
 ### [0.23.1] - 2026-10-22
 
 #### Fixed
@@ -357,6 +359,7 @@ refuses to publish a version without a matching entry below.
   application bundles. `serverExternalPackages` is no longer needed.
 
 #### Changed
+
 - `hue login` prints next steps that fit the repository: `hue mcp install --client` names the one client whose configuration the root holds (`.mcp.json` or `.claude`, `.cursor`, `.vscode`, `.codex`, `.gemini`, `.windsurf`) and otherwise lists the clients; the `hue eval` hint shows `./hue-agent.ts` for a TypeScript repository, `--command` for a Python one and nothing when the language is unknown.
 - The optional Vercel AI SDK peers widen to `ai@^6.0.0 || ^7.0.0` and `@ai-sdk/otel@^1.0.0`. `hueTelemetry` uses only the per-call `integrations` option and `OpenTelemetry({ tracer, usage })`, present since `ai@7.0.0` / `@ai-sdk/otel@1.0.0`, so apps on other AI SDK 7 patch releases no longer get peer warnings. The installed-package tests still run the `7.0.99 / 1.0.99` and `7.0.100 / 1.0.100` pairs.
 - `verifyTrace` adds `project` to a result without a receipt once Hue reports the trace missing: the project the key searched (`checkConnection()` shape), so a key for another project is told apart from a trace that is not stored yet. `verified` and `receipt` are unchanged.
@@ -431,7 +434,7 @@ refuses to publish a version without a matching entry below.
   archives of OTLP/JSON trace exports, complete Langfuse observation exports and text ATIF v1.7 and
   v1.8 exports into gzip OTLP/JSON batches beside an immutable `manifest.json`, and prints the
   manifest digest and totals that Hue MCP's `prepare_trace_import` takes. `hue traces import upload
-  <directory> --authorization-file <file> --json` delivers the bundle to Hue's import routes with the
+<directory> --authorization-file <file> --json` delivers the bundle to Hue's import routes with the
   short-lived `hue_it_` authorization that tool returns, two requests at a time and in order within a
   trace, confirms every span's receipt, and resumes from `progress.json` after an interruption. No
   project key is involved.
@@ -474,7 +477,6 @@ refuses to publish a version without a matching entry below.
 - The World client names, `WorldModelClient` and instance methods use the canonical World,
   World model and instance routes. The environment module
   and its HTTP paths remain supported. The handoff's legacy `worldId` still identifies an instance.
-
 
 ### [0.19.1] - 2026-10-16
 
@@ -876,7 +878,7 @@ budget or wire change.
   `ConnectionFailed`. `TypedError.class` lets a runner of your own that completes an execution
   with a `type` of its own say which class Hue files it under.
 - `traceNotAccepted: "pending"` on `runExperiment` and `runSimulation`, and `hue eval
-  --trace-not-accepted pending`: a case whose telemetry Hue did not accept in time completes in
+--trace-not-accepted pending`: a case whose telemetry Hue did not accept in time completes in
   its true state with `traceEvidence: "pending"` and the count of spans the case ended
   (`traceSpanCount`), so Hue scores the sealed world at once and attaches the trace once it holds
   every span, or records the evidence omitted a day later. Such cases are listed in
@@ -970,7 +972,7 @@ variables to the agent.
   too, which refused `--read-only` without `--auth key` before. A sign-in configuration still
   refuses any other `read_only` value in `--url`. `cursor`, `vscode`, `windsurf` and `gemini` still
   use a key. The command names its choice, and how to change it, in one line on stderr; `--auth
-  key` configures a key.
+key` configures a key.
 - Without `--auth` and outside a terminal (CI, an agent's shell tool), `codex` and `conductor`
   print `codex mcp add` instead of running it: it signs in at once and waits up to 5 minutes for the
   browser. When a Codex sign-in does not finish but Codex registered the server, the command no
@@ -1136,7 +1138,7 @@ This release changes two defaults of `hue mcp install` (see Breaking), so it is 
   allows. Migration: pass `--toolsets all` to keep the whole catalog, or remove `?toolsets=observe`
   from `.cursor/mcp.json`.
 - `hue mcp install --client gemini` runs `gemini mcp add --scope user --transport http hue URL
-  --header 'Authorization: Bearer ${HUE_MCP_KEY}'`, the form in Hue's connection guide, so the
+--header 'Authorization: Bearer ${HUE_MCP_KEY}'`, the form in Hue's connection guide, so the
   server is registered for the user in every project; before, it wrote a project-scope entry with
   `-H '… $HUE_MCP_KEY'`. Migration: an earlier project entry keeps working and takes precedence in
   that project; remove it with `gemini mcp remove hue` there to use the user entry.
@@ -1203,7 +1205,7 @@ These three entries were added after 0.11.0 was published; 0.11.0 already behave
   and `sk-`, Stripe, Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`,
   `Basic` or `Token`, an `Authorization` header's whole value and the value of a credential-named
   `key=value` or `key: value` pair (a key such as `--token` or `_authToken` included, as is `API
-  key:`; the value quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a
+key:`; the value quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a
   pair inside another pair's value). The `redact` hook sees the text as `status.message`. Without
   content capture the span keeps `error.type` only. **Wire**
 
@@ -2074,7 +2076,6 @@ No registry release is claimed until publication and registry acceptance complet
 - The World client names, `WorldModelClient` and instance methods use the canonical World,
   World model and instance routes. The environment module
   and its HTTP paths remain supported. The handoff's legacy `worldId` still identifies an instance.
-
 
 ### [0.12.1] - 2026-10-16
 
