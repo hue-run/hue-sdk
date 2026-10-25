@@ -17,7 +17,7 @@ import requests
 from opentelemetry import trace
 from opentelemetry.context import attach, detach
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
-from opentelemetry.trace import SpanKind
+from opentelemetry.trace import NonRecordingSpan, SpanContext, SpanKind, TraceFlags
 
 from hue_sdk import Hue
 from hue_sdk._otel_compat import export_context
@@ -53,7 +53,10 @@ def app():
         def do_POST(self):
             self.respond()
 
-        def respond(self):
+        def do_HEAD(self):
+            self.respond(head=True)
+
+        def respond(self, head=False):
             if self.headers.get("Transfer-Encoding") == "chunked":
                 chunks = []
                 while size := int(self.rfile.readline().split(b";", 1)[0], 16):
@@ -65,6 +68,8 @@ def app():
                 body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             state.requests.append((self.path, dict(self.headers), body))
             result = state.routes.get(urlsplit(self.path).path, state.body)
+            if state.status in (204, 304):
+                result = b""
             if self.path.startswith("/gzip"):
                 result = gzip.compress(result, mtime=0)
             redirected = state.redirects.get(urlsplit(self.path).path)
@@ -87,6 +92,8 @@ def app():
             self.end_headers()
             if state.body_gate is not None:
                 state.body_gate.wait(timeout=5)
+            if head:
+                return
             try:
                 for offset in range(0, len(result), 8192):
                     chunk = result[offset : offset + 8192]
@@ -296,6 +303,22 @@ def test_configured_hue_origin_is_excluded_from_http_capture(receiver):
     assert receiver.spans() == []
 
 
+def test_hue_control_requests_are_suppressed_across_different_client_origins(receiver, app):
+    control = Hue(receiver.url, "synthetic-http-key", capture_http=False, live_spans=False)
+    observer = Hue(app.url, "synthetic-http-key", live_spans=False)
+    try:
+        control.validate_project()
+        assert observer.force_flush()
+        assert control.force_flush()
+    finally:
+        observer.shutdown_safe()
+        control.shutdown_safe()
+    assert len(receiver.requests) == 1
+    assert receiver.requests[0][0] == "/api/v1/projects/current"
+    assert app.requests == []
+    assert receiver.spans() == []
+
+
 @pytest.mark.parametrize("kind", tuple(kind for kind in TRANSPORTS if kind != "urllib"))
 def test_non_success_status_preserves_the_response(receiver, app, kind):
     app.status = 503
@@ -327,6 +350,34 @@ def test_original_transport_exception_is_raised_once(receiver, app, monkeypatch)
             assert hue.force_flush()
     (span,) = http_spans(receiver)
     assert span.status.code == 2
+    assert app.requests == []
+
+
+def test_failing_current_span_metadata_preserves_original_transport_exception(
+    receiver, app, monkeypatch
+):
+    class AppSpan(NonRecordingSpan):
+        @property
+        def attributes(self):
+            raise RuntimeError("synthetic-current-span-metadata-failure")
+
+    error = requests.ConnectionError("synthetic-transport-failure")
+    calls = []
+
+    def fail(*_args, **_kwargs):
+        calls.append(True)
+        raise error
+
+    with monkeypatch.context() as patch:
+        patch.setattr(requests.adapters.HTTPAdapter, "send", fail)
+        with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+            span = AppSpan(SpanContext(1, 2, False, TraceFlags(1)))
+            with trace.use_span(span):
+                with pytest.raises(requests.ConnectionError) as caught:
+                    requests.get(app.url + "/metadata-failure")
+            assert caught.value is error
+            assert calls == [True]
+            assert hue.export_status.instrumentation_failures >= 1
     assert app.requests == []
 
 
@@ -559,6 +610,24 @@ def test_oversized_request_uses_the_same_bounded_marker(receiver, app):
     assert receiver.blob_requests == 0
 
 
+def test_oversized_string_request_keeps_its_wire_byte_size(receiver, app):
+    body = "x" * (1024 * 1024 + 41)
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        response = requests.post(
+            app.url + "/large-string", data=body, headers={"Content-Type": "text/plain"}
+        )
+        assert response.content == BODY
+        assert hue.force_flush()
+    fields = attributes(http_spans(receiver)[0])
+    assert app.requests[0][2] == body.encode()
+    assert fields["http.request.body.size"] == len(body.encode())
+    assert fields["input.value"] == {
+        "hue.truncated": True,
+        "hue.truncated_bytes": len(body.encode()),
+    }
+    assert "input.value" in fields["hue.truncated"]
+
+
 @pytest.mark.parametrize("kind", TRANSPORTS)
 def test_oversized_body_is_marked_without_losing_http_identity(receiver, app, kind):
     app.body = b"x" * (1024 * 1024 + 71)
@@ -655,6 +724,20 @@ def test_declared_latin1_request_and_response_capture_actual_text(receiver, app)
     fields = attributes(http_spans(receiver)[0])
     assert json.loads(fields["input.value"]) == {"body": "café"}
     assert json.loads(fields["output.value"]) == "café"
+
+
+def test_declared_form_charset_controls_percent_decoding(receiver, app):
+    body = b"q=caf%E9"
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        response = requests.post(
+            app.url + "/latin1-form",
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded; charset=iso-8859-1"},
+        )
+        assert response.content == BODY
+        assert hue.force_flush()
+    fields = attributes(http_spans(receiver)[0])
+    assert json.loads(fields["input.value"]) == {"q": "café"}
 
 
 @pytest.mark.parametrize(
@@ -1119,6 +1202,39 @@ def test_aiohttp_multipart_stream_is_not_misrepresented_as_an_empty_request(rece
     assert fields["http.request.method"] == "POST"
     assert "input.value" not in fields
     assert json.loads(fields["output.value"]) == PAYLOAD
+
+
+def test_aiohttp_simultaneous_empty_responses_finish_independently_without_reads(receiver, app):
+    import aiohttp
+
+    async def run(hue):
+        async with aiohttp.ClientSession() as client:
+            app.status = 204
+            first = await client.get(app.url + "/empty-one")
+            second = await client.get(app.url + "/empty-two")
+            app.status = 200
+            head = await client.head(app.url + "/head")
+            try:
+                assert first.content is second.content
+                assert hue.force_flush()
+                spans = http_spans(receiver)
+                assert len(spans) == 3
+                recorded = {attributes(span)["url.full"]: attributes(span) for span in spans}
+                assert recorded[app.url + "/empty-one"]["http.response.status_code"] == 204
+                assert recorded[app.url + "/empty-two"]["http.response.status_code"] == 204
+                assert recorded[app.url + "/head"]["http.request.method"] == "HEAD"
+                for fields in recorded.values():
+                    assert fields["http.response.body.size"] == 0
+                    assert json.loads(fields["output.value"]) == ""
+                assert await first.read() == await second.read() == await head.read() == b""
+            finally:
+                first.release()
+                second.release()
+                head.release()
+
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        asyncio.run(run(hue))
+    assert len(app.requests) == 3
 
 
 def test_google_api_client_httplib2_and_authorized_session(receiver, app):

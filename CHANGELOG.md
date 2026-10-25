@@ -2003,8 +2003,8 @@ No registry release is claimed until publication and registry acceptance complet
   `http.request.body.size` and `http.response.body.size`; a body over 1 MiB records the existing
   structured OTLP `hue.truncated` placeholder instead of body text. The affected key is also
   listed in the span's `hue.truncated` attribute. Binary bodies record size only.
-- HTTP observation adds no runtime dependencies or request headers. Hue's export requests and
-  requests within model spans are excluded, nested supported clients share one Hue HTTP span,
+- HTTP observation adds no runtime dependencies or request headers. Requests to the configured
+  Hue origin and requests within model spans are excluded, nested supported clients share one Hue HTTP span,
   and shutdown removes Hue's observation when the last client stops. Streaming capture observes
   application reads without consuming extra bytes. Unread and incomplete streams cannot provide
   complete response bodies. Calls use the client's existing owned or borrowed tracer provider.

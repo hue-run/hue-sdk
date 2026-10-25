@@ -77,9 +77,9 @@ def _headers(value: Any) -> dict[str, str]:
     return {str(key).lower(): str(item) for key, item in (value or {}).items()}
 
 
-def _query(text: str) -> dict[str, Any]:
+def _query(text: str, encoding: str = "utf-8") -> dict[str, Any]:
     result: dict[str, Any] = {}
-    for key, value in parse_qsl(text, keep_blank_values=True):
+    for key, value in parse_qsl(text, keep_blank_values=True, encoding=encoding):
         if key not in result:
             result[key] = value
         elif isinstance(result[key], list):
@@ -126,8 +126,9 @@ def _byte_size(text: str) -> int:
 def _parse(data: bytes, mime: str) -> Any:
     content_type = Message()
     content_type["content-type"] = mime
+    encoding = content_type.get_content_charset() or "utf-8"
     try:
-        text = data.decode(content_type.get_content_charset() or "utf-8")
+        text = data.decode(encoding)
     except (UnicodeError, LookupError):
         return _ABSENT
     base = mime.partition(";")[0].strip().lower()
@@ -137,7 +138,7 @@ def _parse(data: bytes, mime: str) -> Any:
         except (ValueError, RecursionError):
             return text
     if base == "application/x-www-form-urlencoded":
-        return _query(text)
+        return _query(text, encoding)
     return text
 
 
@@ -281,7 +282,7 @@ class Exchange:
                         self.span.set_attribute(
                             "http.request.header." + key.replace("-", "_"), clean
                         )
-            self._input(request, query)
+            client._instrument(lambda: self._input(request, query))
 
     def _value(self, key: str, value: Any, *, cut: bool = False) -> None:
         def record() -> None:
@@ -456,20 +457,20 @@ def _begin(kind: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Exchange
     client = _client()
     if client is None:
         return None
-    current = trace.get_current_span()
-    attributes = getattr(current, "attributes", None) or {}
-    operation = attributes.get("gen_ai.operation.name")
-    if client._model_scope.get() is not None or operation in {
-        "chat",
-        "text_completion",
-        "generate_content",
-        "embeddings",
-        "image_generation",
-        "speech",
-        "transcription",
-    }:
-        return None
     try:
+        current = trace.get_current_span()
+        attributes = getattr(current, "attributes", None) or {}
+        operation = attributes.get("gen_ai.operation.name")
+        if client._model_scope.get() is not None or operation in {
+            "chat",
+            "text_completion",
+            "generate_content",
+            "embeddings",
+            "image_generation",
+            "speech",
+            "transcription",
+        }:
+            return None
         request = _request(kind, args, kwargs)
         parent = _exchange.get()
         identity, _ = _identity(request.url, request.method)

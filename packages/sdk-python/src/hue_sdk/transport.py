@@ -236,7 +236,11 @@ class SafeSession(requests.Session):
         if self.cancelled is not None and self.cancelled():
             raise requests.RequestException("Hue telemetry request stopped.")
         if not self.signal:
-            return self._request(method, url, **kwargs)
+            token = attach(export_context())
+            try:
+                return self._request(method, url, **kwargs)
+            finally:
+                detach(token)
         # requests' read timeout is inactivity-based. Bound the exporter caller
         # by a wall clock deadline, retaining at most ONE network worker per
         # signal if a peer trickles bytes or a system call cannot be cancelled.

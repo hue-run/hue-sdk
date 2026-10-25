@@ -353,22 +353,25 @@ hue = Hue(api_key=os.environ["HUE_API_KEY"], capture_http_bodies=False)
 ```
 
 These options are constructor arguments. The SDK does not read them from environment variables.
-`enabled=False` disables all Hue tracing. Hue's export traffic and requests inside a model span are
-excluded. Requests nested through supported clients produce one Hue HTTP span for an exchange.
+`enabled=False` disables all Hue tracing. Requests to the configured `base_url` origin, including
+Hue's export and control requests, and requests inside a model span are excluded. Requests nested
+through supported clients produce one Hue HTTP span for an exchange.
 An existing matching HTTP CLIENT parent can receive the observed content instead. Third-party
 instrumentors that create their spans inside a Hue wrapper can still produce duplicate spans.
 
 Identity includes method, scheme, host, port, path and response status. `url.full` omits URL userinfo,
 query strings and fragments. Captured content passes through Hue's credential filtering and the
 existing `redactor`, called with `input.value` or `output.value`. Authorization and cookie headers
-are never captured. Query values are content: `input.value` holds query parameters, with repeated
+are never captured. Ordinary header containers and known pagination cursors remain available,
+with credential fields inside them redacted. Query values are content: `input.value` holds query parameters, with repeated
 names as arrays, merged with a JSON-object or form body. Other text bodies appear under `body`.
 An empty request records `{}`. `output.value` is the parsed JSON response body, or its text for
 other eligible content types. Status and allowed response headers are separate span attributes.
 Captured headers include supported API behavior headers such as `notion-version`, recorded as
 `http.request.header.notion_version` and `http.response.header.notion_version`. Content types use
 `input.mime_type` and `output.mime_type`. Eligible content types are JSON, text, XML and URL-encoded
-forms. Binary bodies record size only. HTTP 5xx responses mark the span as an error. Network
+forms. Text uses its declared charset, or UTF-8 when none is declared. Unknown charsets and invalid
+text omit the body. Binary and unrecognized content types record size only. HTTP 5xx responses mark the span as an error. Network
 failures record the exception type without its message.
 
 Each body is bounded to 1 MiB. A body over the cap records a structured OTLP `hue.truncated`
@@ -376,14 +379,15 @@ placeholder and its observed byte count rather than body text. The span also lis
 content key in its `hue.truncated` attribute. The span remains present. HTTP bodies are not uploaded
 as oversized span values.
 
-Capture never reads an application stream ahead of its consumer. `requests` and `httpx` capture
+Unbuffered request streams are not consumed for telemetry and record no request body. Capture
+never reads a response stream ahead of its consumer. `requests` and `httpx` capture
 already-buffered responses, and `httplib2` captures the returned bytes. `urllib3` captures preloaded
 content. Streaming capture is limited to bytes the application reads through supported response
 methods. A complete output is recorded at EOF. An unread response has no captured response body,
 and an early close marks partial content as truncated. The HTTP span ends at EOF, close or client
 shutdown. Raw compressed reads record size without decoded content. Finish or close responses
-before flushing and shutting Hue down. Raw
-`http.client`, custom socket transports, gRPC, WebSockets and requests made by other processes are
+before flushing and shutting Hue down. Raw `http.client`, custom socket transports, gRPC,
+WebSockets and requests made by other processes are
 outside this capture.
 
 ## Existing instrumentation

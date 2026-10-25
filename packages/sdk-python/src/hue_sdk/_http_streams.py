@@ -254,6 +254,10 @@ def _aio_eof(original: Callable[..., Any]) -> Any:
 
 def _install_aio(response: Any, exchange: Any) -> None:
     stream = response.content
+    # aiohttp shares one EmptyStreamReader across responses; there are no bytes to observe.
+    if stream.at_eof():
+        exchange.finish(complete=True)
+        return
     with _lock:
         cls = type(stream)
         if not callable(getattr(cls, "_read_nowait_chunk", None)):
