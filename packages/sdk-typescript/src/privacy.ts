@@ -633,10 +633,12 @@ export function redactSpan(
           parsed = scrubHttpUrl(parsed);
         }
       }
+      // URL serialization can expand a permitted Unicode callback result beyond the receiver cap.
+      if (Buffer.byteLength(parsed.href) > budget.valueBytes)
+        throw new Error("HTTP URL exceeds receiver value cap");
       if (
-        Buffer.byteLength(parsed.href) <= budget.valueBytes &&
-        (limits.httpIdentity.attributeValueLengthLimit === undefined ||
-          parsed.href.length <= limits.httpIdentity.attributeValueLengthLimit)
+        limits.httpIdentity.attributeValueLengthLimit === undefined ||
+        parsed.href.length <= limits.httpIdentity.attributeValueLengthLimit
       )
         httpUrls = {
           "url.full": parsed.href,

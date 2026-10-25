@@ -152,14 +152,21 @@ This driver uses the real instrumentor. Check one bodyful span per physical fetc
 request, delayed bodies, concurrent identical URLs with distinct inputs and reversed responses,
 retries, metadata-only mode and restart. Its generic reservation cases check creation context,
 pending-span privacy, single-use claims, ambiguous and expired candidates, and overflow fallback.
-Existing providers,
-other exporters' naming and URL policy, and the request's headers must remain unchanged.
+The reservation child also ends a borrowed span at response headers, then checks full capture
+after a body delayed over one second. Explicit flush and shutdown must return with incomplete
+output omitted and leave the response unread for the caller. Check one final Hue copy with the
+original span ID and no later mutation of the ended vendor span. Existing providers, other
+exporters' naming and URL policy, and the request's headers must remain unchanged.
 
-The Vercel driver automatically runs `verify-http-capture-limits.mjs` in 12 isolated policy
+The Vercel driver automatically runs `verify-http-capture-limits.mjs` in 17 isolated policy
 cases: value limits 4, 16 and 64, count limits 8, 1 and 0, value limit 0 as unlimited, and the
 receiver's 256 KiB cap. Check final and live structured cuts, absent dropped attributes, URL
 redactor/count policy, and unmatched Vercel CLIENT names and URI aliases under value limits
-4, 16 and 64.
+4, 16 and 64. Four cases repeat early-ended capture under short value limits and count limits,
+including count 0.
+The shared-provider case checks direct transport and processor shutdown: the stopped
+transport delivers its incomplete copy while the remaining transport captures the full body,
+with the original span ID and vendor lifecycle preserved.
 
 Inspect exported CLIENT spans for scrubbed HTTP identity, query arguments in `input.value`,
 request bodies merged with those arguments, parsed JSON or text response bodies in `output.value`,
@@ -180,7 +187,8 @@ borrowed-span export snapshot in both content modes, including live placeholders
 unmatched CLIENT names containing HTTP URLs. Recognized credential path segments are redacted
 while ordinary resource IDs retain their spelling. Canonical URL redaction hooks must run,
 their answers must be sanitized again, and invalid or receiver-over-limit answers must omit
-URI fields and report an instrumentation failure. Provider-policy URI omissions do not report
+URI fields and report an instrumentation failure, including Unicode answers whose serialized
+URL exceeds the receiver cap. Provider-policy URI omissions do not report
 a capture failure. Confirm delayed `setHeader` and `flushHeaders` capture the headers
 actually sent, with creator parent, model-content policy, session and user metadata preserved
 when another scope writes later. No SDK `data` or `readable` listener may be added.

@@ -38,7 +38,10 @@ refuses to publish a version without a matching entry below.
 - Existing HTTP CLIENT spans can receive capture without duplication, including spans created
   beside the active context. Correlation uses the same provider, creation context and one physical
   request per span. Concurrent identical requests keep their own bodies. Other exporters retain
-  their span names, URLs, status and lifecycle.
+  their span names, URLs, status and lifecycle. If an application ends its span before the body
+  completes, Hue keeps a bounded private copy for late body capture. An explicit flush or shutdown
+  seals only that transport's incomplete copy without draining the response. Other transports
+  sharing the provider continue capturing.
 - HTTP identity on Hue's export path removes recognized credentials in URL paths, including
   capability URLs, and applies the URL redactor to stable and legacy aliases in both content
   modes, including an HTTP URL-valued span `resource.name`. Unmatched CLIENT spans have HTTP

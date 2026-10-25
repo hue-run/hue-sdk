@@ -881,6 +881,14 @@ It uses an active matching span or one matching span started synchronously under
 provider and parent. Each span is used once, so concurrent requests and retries keep separate
 exchanges. Ambiguous matches receive a Hue HTTP span.
 
+If the application ends a reused span before its response completes, Hue keeps a private copy
+within its queue budget. Other exporters receive the original span with its original end time.
+Hue publishes its copy when the exchange completes. An explicit flush, processor `forceFlush()`
+or shutdown publishes available evidence without reading an unfinished response. Incomplete
+response content is omitted. Read the response before flushing to capture its full body.
+When transports share a provider, flushing or shutting down one seals only its own copy.
+The remaining transports continue capturing the response.
+
 Each body is bounded by the receiver's value cap, 1 MiB by default. A body over the cap records
 Hue's existing truncation marker instead of a partial JSON value. The span's `hue.truncated`
 array names the affected `input.value` or `output.value`; a cut body is incomplete evidence,

@@ -369,6 +369,9 @@ export class HueTransport {
   private shutdownPromise?: Promise<ExportReport>;
   private httpCapture?: ReturnType<typeof startHttpCapture>;
   private httpIdentities = new WeakMap<ReadableSpan, ObservedHttpIdentity>();
+  // Ended application spans awaiting bytes already flowing through the consumer's response.
+  // Each owns an admitted queue snapshot; an explicit drain seals it without reading the body.
+  private deferredHttp = new Map<ReadableSpan, () => void>();
   /** The latest flush's send of its records; the next flush's send starts after it. */
   private sendPromise?: Promise<unknown>;
   /** Set while a flush sends its records: the processors leave the uploads to that flush, which
@@ -540,6 +543,17 @@ export class HueTransport {
           if (httpIdentity) this.httpIdentities.set(admitted, httpIdentity);
           this.protectMedia(admitted);
           this.countEnded(admitted);
+          const snapshot = admitted;
+          const deferred = this.httpCapture?.defer(span, snapshot.attributes, () => {
+            this.deferredHttp.delete(snapshot);
+            this.publishDeferredHttp(snapshot, spans);
+          });
+          if (deferred) {
+            this.httpIdentities.set(snapshot, deferred.identity);
+            this.deferredHttp.set(snapshot, deferred.seal);
+            this.protectDelivery(snapshot);
+            return;
+          }
           spans.onEnd(admitted);
           this.protectDelivery(admitted);
         } catch {
@@ -558,6 +572,7 @@ export class HueTransport {
       // The spans are sent first, then the uploads queued so far are waited for, unless a
       // flush sends them: that flush waits for the uploads after its send.
       forceFlush: async () => {
+        this.sealDeferredHttp();
         const finish = this.beginSpanDrain();
         try {
           await spans.forceFlush();
@@ -570,6 +585,7 @@ export class HueTransport {
         }
       },
       shutdown: async () => {
+        this.sealDeferredHttp();
         this.httpCapture?.stop();
         this.stopLiveSpans();
         try {
@@ -745,6 +761,72 @@ export class HueTransport {
         traceIds,
       );
       return undefined;
+    }
+  }
+
+  private sealDeferredHttp(): void {
+    for (const seal of this.deferredHttp.values()) seal();
+  }
+
+  /** Re-admit a completed HTTP snapshot so late attributes are charged to the same queue budget. */
+  private publishDeferredHttp(record: ReadableSpan, processor: BatchSpanProcessor): void {
+    const cohort = this.deliveries.get(record);
+    this.deliveries.delete(record);
+    this.pendingBytes -= this.spans.get(record) ?? 0;
+    this.spans.delete(record);
+    const held = this.held.get(record);
+    if (held) {
+      this.heldBytes -= held;
+      this.held.delete(record);
+    }
+    let admitted: ReadableSpan | undefined;
+    let transferred = false;
+    try {
+      admitted = this.enqueue("traces", record) as ReadableSpan | undefined;
+      if (!admitted) {
+        this.releaseMedia(record);
+        return;
+      }
+      if (cohort) {
+        const replacementCohort = this.deliveries.get(admitted);
+        this.deliveries.set(admitted, cohort);
+        transferred = true;
+        if (replacementCohort) this.finishDelivery(replacementCohort);
+      }
+      const identity = this.httpIdentities.get(record);
+      if (identity) this.httpIdentities.set(admitted, identity);
+      const cuts = this.admissionCuts.get(record);
+      if (cuts)
+        this.admissionCuts.set(
+          admitted,
+          new Set([...cuts, ...(this.admissionCuts.get(admitted) ?? [])]),
+        );
+      const digests = this.admissionDigests.get(record);
+      if (digests)
+        this.admissionDigests.set(
+          admitted,
+          new Map([...digests, ...(this.admissionDigests.get(admitted) ?? [])]),
+        );
+      for (const map of [this.admissionInspected, this.admissionLarge]) {
+        const previous = map.get(record);
+        if (previous) map.set(admitted, new Set([...previous, ...(map.get(admitted) ?? [])]));
+      }
+      processor.onEnd(admitted);
+      this.protectDelivery(admitted);
+    } catch {
+      if (admitted) this.finish("traces", [admitted]);
+      else this.releaseMedia(record);
+      this.issue(
+        "traces",
+        "invalid",
+        1,
+        "Telemetry processor could not accept a completed HTTP record",
+        undefined,
+        traceIdsOf([record]),
+      );
+    } finally {
+      // Successful replacement inherits the original slot, even after an export sealed its cohort.
+      if (cohort && !transferred) this.finishDelivery(cohort);
     }
   }
 
@@ -1643,6 +1725,7 @@ export class HueTransport {
    */
   shutdown(): Promise<ExportReport> {
     this.shutdownPromise ??= (async () => {
+      this.sealDeferredHttp();
       this.httpCapture?.stop();
       this.closed = true;
       try {

@@ -43,10 +43,19 @@ if (process.argv.includes("--reservation")) {
     response.setHeader("Hue-Pending-Spans", "1");
     response.end();
   });
+  const heldResponses = new Map();
   const app = http.createServer(async (request, response) => {
     const body = await read(request);
     response.setHeader("content-type", "application/json");
-    if (request.url.startsWith("/pending")) {
+    if (request.url === "/ended-at-headers") {
+      response.statusCode = 201;
+      response.flushHeaders();
+      setTimeout(() => response.end(body), 1250);
+    } else if (request.url === "/flush-unread" || request.url === "/shutdown-unread") {
+      response.statusCode = 201;
+      heldResponses.set(request.url, () => response.end(body));
+      response.flushHeaders();
+    } else if (request.url.startsWith("/pending")) {
       response.flushHeaders();
       setTimeout(() => response.end(body), 2600);
     } else response.end(body);
@@ -63,7 +72,12 @@ if (process.argv.includes("--reservation")) {
     onStart() {},
     onEnd(span) {
       if (span.name.startsWith("padding ")) return;
-      recorded.push({ name: span.name, attrs: { ...span.attributes }, status: span.status });
+      recorded.push({
+        id: span.spanContext().spanId,
+        name: span.name,
+        attrs: { ...span.attributes },
+        status: { ...span.status },
+      });
     },
     async forceFlush() {},
     async shutdown() {},
@@ -183,6 +197,86 @@ if (process.argv.includes("--reservation")) {
     console.log(
       "http-capture ambiguous, expired and overflowing candidates never claim another request: ok",
     );
+    const earlyEnded = async (mode) => {
+      const path = mode === "normal" ? "/ended-at-headers" : `/${mode}-unread`;
+      const url = appUrl.replace("/same", path);
+      const body = { request: `early-${mode}` };
+      const span = tracer.startSpan(`manual early ${mode}`, {
+        kind: SpanKind.CLIENT,
+        attributes: { "http.request.method": "POST", "url.full": url },
+      });
+      const id = Buffer.from(span.spanContext().spanId, "hex").toString("base64");
+      const from = exported.length;
+      const response = await context.with(trace.setSpan(context.active(), span), () =>
+        fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      );
+      assert.equal(response.status, 201);
+      span.end();
+      assert.ok(
+        recorded.some((item) => item.id === span.spanContext().spanId),
+        "other processors observe end immediately at headers",
+      );
+      const vendor = { attributes: { ...span.attributes }, status: { ...span.status } };
+      assert.ok(
+        hue.getReport().pendingSpans > 0 && hue.getReport().pendingBytes > 0,
+        "the deferred copy owns an accounted queue reservation",
+      );
+      try {
+        if (mode !== "normal") {
+          const settle = mode === "shutdown" ? hue.shutdown() : hue.flush();
+          await Promise.race([
+            settle,
+            delay(2000).then(() => {
+              throw new Error(`${mode} waited for an unread HTTP body`);
+            }),
+          ]);
+          assert.equal(response.bodyUsed, false, `${mode} cannot consume the application response`);
+          heldResponses.get(path)();
+        }
+        assert.deepEqual(await response.json(), body);
+        if (mode !== "shutdown") {
+          await provider.forceFlush();
+          await hue.flush();
+        }
+        const copies = exported
+          .slice(from)
+          .filter(
+            (item) =>
+              item.spanId === id &&
+              !item.attributes?.some((attribute) => attribute.key === "hue.span_type"),
+          );
+        assert.equal(copies.length, 1, "one final Hue copy preserves the original span ID");
+        const attributes = Object.fromEntries(
+          copies[0].attributes.map(({ key, value }) => [key, value.stringValue ?? value.intValue]),
+        );
+        assert.equal(Number(attributes["http.response.status_code"]), 201);
+        assert.deepEqual(JSON.parse(attributes["input.value"]), body);
+        if (mode === "normal") assert.deepEqual(JSON.parse(attributes["output.value"]), body);
+        else
+          assert.equal(
+            attributes["output.value"],
+            undefined,
+            "a sealed incomplete copy never adds later response content",
+          );
+        assert.deepEqual(
+          span.attributes,
+          vendor.attributes,
+          "body observation cannot mutate the ended vendor span",
+        );
+        assert.deepEqual(span.status, vendor.status);
+      } finally {
+        heldResponses.get(path)?.();
+      }
+      console.log(
+        `http-capture header-ended manual span ${mode}: original vendor lifecycle, bounded Hue copy`,
+      );
+    };
+    await earlyEnded("normal");
+    await earlyEnded("flush");
     live = createHue({
       apiKey: "synthetic-live-key",
       serviceName: "live-url",
@@ -224,6 +318,9 @@ if (process.argv.includes("--reservation")) {
       "pending and final Hue spans cannot expose credential query values or names",
     );
     console.log("http-capture pending HTTP placeholders preserve URL and name privacy: ok");
+    await live.shutdownSafe();
+    live = undefined;
+    await earlyEnded("shutdown");
   } finally {
     await live?.shutdownSafe();
     await hue.shutdown();
@@ -505,7 +602,16 @@ try {
     ],
   );
   for (const captureContent of [true, false])
-    for (const mode of ["default", "resource", "target", "path", "invalid", "throw", "custom"]) {
+    for (const mode of [
+      "default",
+      "resource",
+      "target",
+      "path",
+      "invalid",
+      "throw",
+      "encoding",
+      "custom",
+    ]) {
       await transport.shutdown();
       const hooks = new Map();
       const replacement =
@@ -531,6 +637,8 @@ try {
             return "file:///synthetic-invalid";
           if (mode === "throw" && path === "attributes.url.path")
             throw new Error("synthetic path callback failure");
+          if (mode === "encoding" && path === "attributes.url.path")
+            return "https://example.test/" + "é".repeat(200000);
           return value;
         },
       });
@@ -588,7 +696,7 @@ try {
         assert.equal(attributes["output.value"], undefined);
         assert.ok(!JSON.stringify(exported).includes("synthetic-uri-business"));
       }
-      if (mode === "invalid" || mode === "throw") {
+      if (mode === "invalid" || mode === "throw" || mode === "encoding") {
         for (const key of ["url.full", "http.url", "http.target", "url.path", "resource.name"])
           assert.equal(attributes[key], undefined, "failed URI callbacks remove all aliases");
         assert.equal(report.instrumentationFailures, 1);

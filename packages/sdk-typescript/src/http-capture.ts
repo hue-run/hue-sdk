@@ -9,6 +9,8 @@ import {
   SpanKind,
   SpanStatusCode,
   type Context,
+  type Attributes,
+  type AttributeValue,
   type Span,
   type Tracer,
 } from "@opentelemetry/api";
@@ -29,6 +31,17 @@ export interface ObservedHttpIdentity {
 }
 interface HttpObservation extends ObservedHttpIdentity {
   contentCuts: Map<HttpContentKey, number>;
+}
+interface DeferredHttpTarget {
+  attributes: Attributes;
+  ready: () => void;
+  policy: { keys: Set<string>; count: number; length: number };
+  identity: HttpObservation;
+  cuts: Set<string>;
+}
+interface DeferredHttpCapture {
+  seal: () => void;
+  identity: ObservedHttpIdentity;
 }
 
 export interface HttpCaptureSource {
@@ -331,6 +344,7 @@ interface Owner {
 const owners = new Set<Owner>();
 const claimedHttpSpans = new WeakSet<object>();
 const observedHttpIdentities = new WeakMap<object, HttpObservation>();
+const observedHttpExchanges = new WeakMap<object, Exchange>();
 const MAX_HTTP_CANDIDATES = 2048;
 
 /** OTel exposes no Span API for limits; both supported SDK implementations store these values. */
@@ -410,6 +424,8 @@ class Exchange {
   private restorers: (() => void)[] = [];
   private ended = false;
   private readonly cuts = new Set<string>();
+  private deferred: DeferredHttpTarget[] = [];
+  private target?: DeferredHttpTarget;
   constructor(
     readonly owner: Owner,
     readonly source: HttpCaptureSource,
@@ -422,6 +438,7 @@ class Exchange {
     this.input = new Body(owner.options.valueBytes());
     this.output = new Body(owner.options.valueBytes());
     owner.pending.add(this);
+    observedHttpExchanges.set(spanSource(span), this);
     for (const [name, value] of requestHeaders)
       if (behaviorHeaders.has(name) || name === "content-type")
         span.setAttribute(`http.request.header.${name.replaceAll("-", "_")}`, value);
@@ -436,34 +453,91 @@ class Exchange {
   private safe(work: () => void): void {
     safely(this.owner, work);
   }
+  /** An ended application span stays ended; only Hue's accounted snapshots receive later bytes. */
+  defer(attributes: Attributes, ready: () => void): DeferredHttpCapture | undefined {
+    if (this.ended || this.ownsSpan) return;
+    const identity = observedHttpIdentities.get(spanSource(this.span));
+    if (
+      identity?.attributeValueLengthLimit === undefined ||
+      identity.attributeCountLimit === undefined
+    )
+      return;
+    const target: DeferredHttpTarget = {
+      attributes,
+      ready,
+      policy: {
+        keys: new Set(Object.keys(spanAttributes(this.span) ?? {})),
+        count: identity.attributeCountLimit,
+        length: identity.attributeValueLengthLimit,
+      },
+      identity: { ...identity, contentCuts: new Map(identity.contentCuts) },
+      cuts: new Set(),
+    };
+    this.deferred.push(target);
+    return { seal: () => this.seal(target), identity: target.identity };
+  }
+  private seal(target: DeferredHttpTarget): void {
+    if (this.ended || !this.deferred.includes(target)) return;
+    this.capture(false, undefined, target);
+    this.deferred = this.deferred.filter((entry) => entry !== target);
+    this.safe(target.ready);
+    if (!this.deferred.length) this.finish(false, undefined, true);
+  }
+  stop(): void {
+    if (!this.ownsSpan && this.deferred.length) return;
+    this.finish(false, undefined, true);
+  }
+  private setAttribute(key: string, value: AttributeValue): void {
+    const policy = this.target?.policy;
+    if (!policy) {
+      this.span.setAttribute(key, value);
+      return;
+    }
+    if (!policy.keys.has(key) && policy.keys.size >= policy.count) return;
+    const stored =
+      typeof value === "string"
+        ? value.slice(0, policy.length)
+        : Array.isArray(value) &&
+            value.every(
+              (item): item is string | null | undefined =>
+                typeof item === "string" || item === null || item === undefined,
+            )
+          ? value.map((item) => (typeof item === "string" ? item.slice(0, policy.length) : item))
+          : value;
+    policy.keys.add(key);
+    if (this.target) this.target.attributes[key] = stored;
+  }
+  private attributes(): Record<string, unknown> | undefined {
+    return this.target?.attributes ?? spanAttributes(this.span);
+  }
   private content(key: HttpContentKey, value: unknown, cut: boolean, bytes: number): void {
     const encoded = encodeBoundedContent(value, contentLimitsOf(this.owner.options.valueBytes()));
     // A prefix may split a credential before the export redactor sees it. HTTP keeps no prefix.
     const intended = encoded.truncated ? JSON.stringify(truncatedMarker(bytes)) : encoded.text;
-    this.span.setAttribute(key, intended);
-    const stored = spanAttributes(this.span)?.[key];
+    this.setAttribute(key, intended);
+    const stored = this.attributes()?.[key];
     if (cut || encoded.truncated || stored !== intended) {
-      this.cuts.add(key);
-      observedHttpIdentities.get(spanSource(this.span))?.contentCuts.set(key, bytes);
+      (this.target?.cuts ?? this.cuts).add(key);
+      (this.target?.identity ?? observedHttpIdentities.get(spanSource(this.span)))?.contentCuts.set(
+        key,
+        bytes,
+      );
       // Other exporters retain the provider's limit too, without a customer-content prefix.
       if (typeof stored === "string" && stored !== intended)
-        this.span.setAttribute(key, JSON.stringify(truncatedMarker(bytes)));
+        this.setAttribute(key, JSON.stringify(truncatedMarker(bytes)));
     }
   }
-  finish(complete: boolean, error?: unknown, stopped = false): void {
-    if (this.ended) return;
-    this.ended = true;
-    this.owner.pending.delete(this);
+  private capture(complete: boolean, error?: unknown, target?: DeferredHttpTarget): void {
+    const previous = this.target;
+    this.target = target;
     try {
-      if (stopped && !this.ownsSpan) return;
       this.safe(() => {
         const requestType = this.requestHeaders.get("content-type");
-        if (requestType) this.span.setAttribute("http.request.header.content_type", requestType);
-        if (this.status !== undefined)
-          this.span.setAttribute("http.response.status_code", this.status);
+        if (requestType) this.setAttribute("http.request.header.content_type", requestType);
+        if (this.status !== undefined) this.setAttribute("http.response.status_code", this.status);
         for (const [name, value] of this.responseHeaders)
           if (behaviorHeaders.has(name) || name === "content-type")
-            this.span.setAttribute(`http.response.header.${name.replaceAll("-", "_")}`, value);
+            this.setAttribute(`http.response.header.${name.replaceAll("-", "_")}`, value);
         if (this.ownsSpan && (error !== undefined || !complete)) {
           this.span.setAttribute(
             "error.type",
@@ -473,10 +547,8 @@ class Exchange {
         } else if (this.ownsSpan && this.status !== undefined && this.status >= 400)
           this.span.setStatus({ code: SpanStatusCode.ERROR });
         if (this.bodies) {
-          if (this.requestComplete)
-            this.span.setAttribute("http.request.body.size", this.input.size);
-          if (this.responseComplete)
-            this.span.setAttribute("http.response.body.size", this.output.size);
+          if (this.requestComplete) this.setAttribute("http.request.body.size", this.input.size);
+          if (this.responseComplete) this.setAttribute("http.response.body.size", this.output.size);
           const queryBytes = Buffer.byteLength(this.url.search);
           const query = queryBytes > this.input.cap ? undefined : queryOf(this.url.searchParams);
           if (this.requestComplete && (this.input.size === 0 || textual(this.requestHeaders))) {
@@ -492,7 +564,7 @@ class Exchange {
                     ? { ...query, ...body }
                     : { ...query, body };
             this.content("input.value", input, cut, queryBytes + this.input.size);
-            this.span.setAttribute("input.mime_type", "application/json");
+            this.setAttribute("input.mime_type", "application/json");
           }
           if (
             complete &&
@@ -502,21 +574,38 @@ class Exchange {
             const body = this.output.value(this.responseHeaders);
             const cut = this.output.size > this.output.cap;
             this.content("output.value", body ?? null, cut, this.output.size);
-            this.span.setAttribute("output.mime_type", "application/json");
+            this.setAttribute("output.mime_type", "application/json");
           }
-          if (this.cuts.size)
-            this.span.setAttribute(
+          const cuts = this.target?.cuts ?? this.cuts;
+          if (cuts.size)
+            this.setAttribute(
               TRUNCATED_KEY,
-              withTruncatedKeys(spanAttributes(this.span)?.[TRUNCATED_KEY], [...this.cuts]),
+              withTruncatedKeys(this.attributes()?.[TRUNCATED_KEY], [...cuts]),
             );
         }
       });
+    } finally {
+      this.target = previous;
+    }
+  }
+  finish(complete: boolean, error?: unknown, stopped = false): void {
+    if (this.ended) return;
+    this.ended = true;
+    this.owner.pending.delete(this);
+    observedHttpExchanges.delete(spanSource(this.span));
+    try {
+      if (stopped && !this.ownsSpan && !this.deferred.length) return;
+      if (this.deferred.length)
+        for (const target of this.deferred) this.capture(complete, error, target);
+      else this.capture(complete, error);
     } finally {
       this.input.clear();
       this.output.clear();
       for (const restore of this.restorers) this.safe(restore);
       this.restorers = [];
       if (this.ownsSpan) this.safe(() => this.span.end());
+      for (const target of this.deferred) this.safe(target.ready);
+      this.deferred = [];
     }
   }
 }
@@ -775,8 +864,10 @@ function nodeCreated(message: unknown): void {
           request.getHeaders(),
           reserved,
         );
-        if (exchange) exchange.registerRestorer(restoreRequest);
-        else restoreRequest();
+        if (exchange) {
+          owner.observers.delete(restoreRequest);
+          exchange.registerRestorer(restoreRequest);
+        } else restoreRequest();
       }),
     );
     starting = false;
@@ -1134,6 +1225,7 @@ export function startHttpCapture(options: CaptureOptions): {
   spanStarted(span: Span, parent: Context): void;
   identity(span: object): ObservedHttpIdentity | undefined;
   spanEnded(span: object): ObservedHttpIdentity | undefined;
+  defer(span: object, attributes: Attributes, ready: () => void): DeferredHttpCapture | undefined;
 } {
   const fallback: HttpCaptureSource = {
     tracer: trace.getTracer(HUE_SCOPE),
@@ -1164,9 +1256,11 @@ export function startHttpCapture(options: CaptureOptions): {
     safely(owner, installFetch);
   }
   owners.add(owner);
+  const deferred = new Set<{ source: HttpCaptureSource; seal: () => void }>();
   const finish = (source?: HttpCaptureSource) => {
+    for (const target of deferred) if (!source || target.source === source) target.seal();
     for (const exchange of owner.pending)
-      if (!source || exchange.source === source) exchange.finish(false, undefined, true);
+      if (!source || exchange.source === source) exchange.stop();
     for (const [restore, registered] of owner.observers)
       if (!source || registered === source) safely(owner, restore);
     for (const [span, candidate] of owner.candidates)
@@ -1215,6 +1309,19 @@ export function startHttpCapture(options: CaptureOptions): {
     spanEnded(span) {
       owner.candidates.delete(span);
       return observedHttpIdentities.get(span);
+    },
+    defer(span, attributes, ready) {
+      if (!owners.has(owner)) return;
+      let target: { source: HttpCaptureSource; seal: () => void } | undefined;
+      const capture = observedHttpExchanges.get(span)?.defer(attributes, () => {
+        if (target) deferred.delete(target);
+        ready();
+      });
+      if (capture) {
+        target = { source: owner.source, seal: capture.seal };
+        deferred.add(target);
+      }
+      return capture;
     },
     use(source) {
       if (!owners.has(owner)) return () => {};
