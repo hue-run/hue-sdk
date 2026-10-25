@@ -27,7 +27,7 @@ Preconditions:
   python3 scripts/release-artifacts.py inspect python "$VER" "$V"/python
   ```
 
-  Expected: `Inspected hue_run-<VER>-py3-none-any.whl: 33 files` and `Inspected hue_run-<VER>.tar.gz: 38 files` (counts change only when you add or remove files).
+  Expected: `Inspected hue_run-<VER>-py3-none-any.whl: 47 files` and `Inspected hue_run-<VER>.tar.gz: 52 files` (counts change only when you add or remove files).
 - **Installed consumer.** The python-agent drive in [verify-examples](../../verify-examples/features/python-agent.md) installs this wheel into a fresh venv and exports to the loopback stub (a fake Hue API) in a few seconds.
 - **Standalone wheel acceptance** (about 3 min, CI): `cd packages/sdk-python && uv run --frozen --all-groups pytest tests/test_wheel.py -q`.
 
