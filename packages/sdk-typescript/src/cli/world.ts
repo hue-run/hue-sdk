@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
@@ -109,11 +109,20 @@ description, or both, and prints its URL and World version once it is ready.
   --composio-user ID     The Composio user id your agent sends
   --composio-account ID  Its Linear connected account. Hue's World answers the Composio calls
                          that name both
-  --pipedream-user ID    Read the one --export-from app through a Pipedream Connect account
-  --pipedream-account ID instead of its credentials: the account's external user id and
-                         account id, with PIPEDREAM_CLIENT_ID, PIPEDREAM_CLIENT_SECRET,
-                         PIPEDREAM_PROJECT_ID and PIPEDREAM_PROJECT_ENVIRONMENT (default
-                         production). Salesforce still needs SALESFORCE_INSTANCE_URL
+  --pipedream-user ID    The external user id of the Pipedream Connect accounts below
+  --pipedream-account LIST
+                         Read these --export-from apps through Pipedream Connect accounts
+                         instead of their credentials: app=account pairs
+                         (linear=apn_1,slack=apn_2), or one account for the one --export-from
+                         app. Apps not listed use their own credentials. Needs
+                         PIPEDREAM_CLIENT_ID, PIPEDREAM_CLIENT_SECRET, PIPEDREAM_PROJECT_ID
+                         and PIPEDREAM_PROJECT_ENVIRONMENT (default production). Salesforce
+                         still needs SALESFORCE_INSTANCE_URL
+  --slack-archived       Read archived Slack conversations in full; by default they are
+                         listed and not read
+  --save-to DIR          Save the export to DIR/<app>/ (owner-only files, never overwritten)
+                         instead of creating a World; --files DIR uploads it later. Needs no
+                         HUE_API_KEY
   --dry-run              Show what Hue would make, with a description's outline and estimate;
                          create and upload nothing
   --wait SECONDS         How long to wait for the World to be ready (default ${DEFAULT_WAIT_SECONDS}); 0 returns
@@ -220,18 +229,25 @@ async function loadEnv(
   return withEnvFile(named, cwd, DEFAULT_ENV_FILE);
 }
 
-/** The Hue origin and project key every subcommand needs. */
-async function connect(
-  ctx: Context,
-  values: { origin?: string | undefined; "env-file"?: string | undefined; "env-path"?: string },
-): Promise<{ origin: string; apiKey: string; env: NodeJS.ProcessEnv }> {
+type EnvValues = { "env-file"?: string | undefined; "env-path"?: string | undefined };
+
+/** The environment with the named env file and `./.env.hue` loaded. */
+async function environment(ctx: Context, values: EnvValues): Promise<NodeJS.ProcessEnv> {
   let file: string | undefined;
   try {
     file = envFileArgument(values, ctx.cwd);
   } catch (error) {
     throw new UsageError((error as Error).message);
   }
-  const env = await loadEnv(ctx.env, ctx.cwd, file);
+  return loadEnv(ctx.env, ctx.cwd, file);
+}
+
+/** The Hue origin and project key every subcommand that calls Hue needs. */
+async function connect(
+  ctx: Context,
+  values: EnvValues & { origin?: string | undefined },
+): Promise<{ origin: string; apiKey: string; env: NodeJS.ProcessEnv }> {
+  const env = await environment(ctx, values);
   const origin = parseHueOrigin(values.origin ?? (env.HUE_BASE_URL?.trim() || DEFAULT_ORIGIN));
   if (!origin)
     throw new UsageError(
@@ -314,6 +330,8 @@ function parseCreateArguments(argv: string[]) {
         "composio-account": { type: "string" },
         "pipedream-user": { type: "string" },
         "pipedream-account": { type: "string" },
+        "slack-archived": { type: "boolean", default: false },
+        "save-to": { type: "string" },
         "dry-run": { type: "boolean", default: false },
         wait: { type: "string" },
         origin: { type: "string" },
@@ -359,34 +377,46 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
       "--composio-user and --composio-account name the Linear connection --export-from linear reads",
     );
   const pipedreamUser = values["pipedream-user"];
-  const pipedreamAccount = values["pipedream-account"];
-  if ((pipedreamUser === undefined) !== (pipedreamAccount === undefined))
+  const pipedreamAccounts = pipedreamAccountsOf(values["pipedream-account"], exportFrom);
+  if ((pipedreamUser === undefined) !== (pipedreamAccounts === undefined))
     throw new UsageError("Pass both --pipedream-user and --pipedream-account");
-  if (pipedreamUser !== undefined && exportFrom.length !== 1)
-    throw new UsageError(
-      "--pipedream-user and --pipedream-account name the account of one --export-from app",
-    );
-  if (pipedreamUser !== undefined && composioUser !== undefined)
-    throw new UsageError("Read through Composio or Pipedream, not both");
-  for (const value of [composioUser, composioAccount, pipedreamUser, pipedreamAccount])
+  if (composioUser !== undefined && pipedreamAccounts?.has("linear"))
+    throw new UsageError("Read Linear through Composio or Pipedream, not both");
+  for (const value of [composioUser, composioAccount, pipedreamUser])
     if (value !== undefined && (!value || value.length > 256 || /\s/u.test(value)))
       throw new UsageError("Composio and Pipedream ids are 1 to 256 characters without spaces");
+  if (values["slack-archived"] && !exportFrom.includes("slack"))
+    throw new UsageError("--slack-archived goes with --export-from slack");
+  const saveTo = values["save-to"];
+  if (saveTo !== undefined) {
+    if (!exportFrom.length) throw new UsageError("--save-to saves what --export-from reads");
+    if (values.files !== undefined || description || values["dry-run"])
+      throw new UsageError(
+        "--save-to only saves the export; create the World from the saved files with --files",
+      );
+  }
   if (values["dry-run"] && exportFrom.length)
     throw new UsageError("--dry-run reads nothing; run the export without it");
   const wait = values.wait === undefined ? DEFAULT_WAIT_SECONDS : Number(values.wait);
   if (!/^\d{1,6}$/u.test(values.wait ?? "0"))
     throw new UsageError("--wait must be a whole number of seconds");
-  const { origin, apiKey, env } = await connect(ctx, values);
+  // Saving the export calls nothing in Hue, so it needs no project key.
+  const { origin, apiKey, env } =
+    saveTo === undefined
+      ? await connect(ctx, values)
+      : { origin: "", apiKey: "", env: await environment(ctx, values) };
   const exporters = exportersFor(ctx, env, exportFrom, {
     composio:
       composioUser === undefined
         ? undefined
         : { userId: composioUser, accountId: composioAccount! },
     pipedream:
-      pipedreamUser === undefined
+      pipedreamUser === undefined || pipedreamAccounts === undefined
         ? undefined
-        : { externalUserId: pipedreamUser, accountId: pipedreamAccount! },
+        : { externalUserId: pipedreamUser, accounts: pipedreamAccounts },
+    slackArchived: values["slack-archived"],
   });
+  if (saveTo !== undefined) await refuseSavedFiles(ctx, saveTo, exportFrom);
 
   const removeInterrupt = (io.onInterrupt ?? defaultOnInterrupt)(() => ctx.stopping.abort());
   let url: string | undefined;
@@ -408,6 +438,13 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
           bytes: async () => bytes,
         }),
       );
+    }
+    if (saveTo !== undefined) {
+      await save(ctx, saveTo, uploads);
+      ctx.out(
+        `Saved ${uploads.length} ${uploads.length === 1 ? "file" : "files"}. Create the World from them with: hue world create --apps ${apps.join(",")} --files ${saveTo}`,
+      );
+      return 0;
     }
     const groups = new Map<string, Upload[]>();
     for (const upload of uploads)
@@ -519,6 +556,78 @@ function list(value: string | undefined): string[] {
   ];
 }
 
+/**
+ * The Pipedream Connect account of each app `--pipedream-account` names: `app=account` pairs,
+ * comma-separated, or one account for the one `--export-from` app. Undefined without the option.
+ */
+function pipedreamAccountsOf(
+  value: string | undefined,
+  exportFrom: string[],
+): Map<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (!exportFrom.length)
+    throw new UsageError("--pipedream-account names the accounts --export-from apps read through");
+  const pairs = list(value);
+  const accounts = new Map<string, string>();
+  if (!pairs.length)
+    throw new UsageError("Composio and Pipedream ids are 1 to 256 characters without spaces");
+  if (pairs.length === 1 && !pairs[0]!.includes("=")) {
+    if (exportFrom.length !== 1)
+      throw new UsageError(
+        "With several --export-from apps, name each one's account: --pipedream-account linear=apn_1,slack=apn_2",
+      );
+    accounts.set(exportFrom[0]!, pairs[0]!);
+  } else
+    for (const pair of pairs) {
+      const [app, account, ...rest] = pair.split("=");
+      if (!app || !account || rest.length)
+        throw new UsageError(`--pipedream-account takes app=account pairs; ${pair} is not one`);
+      if (!exportFrom.includes(app))
+        throw new UsageError(`--pipedream-account names ${app}, which --export-from does not read`);
+      if (accounts.has(app))
+        throw new UsageError(`--pipedream-account names ${app} twice; name one account an app`);
+      accounts.set(app, account);
+    }
+  for (const account of accounts.values())
+    if (account.length > 256 || /\s/u.test(account))
+      throw new UsageError("Composio and Pipedream ids are 1 to 256 characters without spaces");
+  return accounts;
+}
+
+/** The path each app's first export file is saved at. */
+const savedPath = (directory: string, app: string, index: number) =>
+  join(directory, app, `${app}-export-${index}.json`);
+
+/** Refuses a save that would overwrite an earlier one, before the export spends its time. */
+async function refuseSavedFiles(ctx: Context, directory: string, apps: string[]) {
+  for (const app of apps)
+    if (existsSync(resolve(ctx.cwd, savedPath(directory, app, 1))))
+      throw new UsageError(
+        `${savedPath(directory, app, 1)} exists already; save to another directory`,
+      );
+}
+
+/** Writes each exported file to `<directory>/<app>/`, the layout `--files` reads: owner-only, as
+ * the files hold the app's data, and never over an existing file. */
+async function save(ctx: Context, directory: string, uploads: Upload[]) {
+  for (const upload of uploads) {
+    const shown = join(directory, upload.app, upload.name);
+    const path = resolve(ctx.cwd, shown);
+    try {
+      await mkdir(resolve(ctx.cwd, directory, upload.app), { recursive: true, mode: 0o700 });
+      await writeFile(path, await upload.bytes(), { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? "unwritable";
+      throw new WorldCommandError(
+        code === "EEXIST"
+          ? `${shown} exists already; save to another directory`
+          : `Unable to write ${shown}: ${code}`,
+      );
+    }
+    ctx.note(`Saved ${shown} (${upload.byteSize} bytes)`);
+  }
+}
+
 type Exporter = (transport: Transport) => Promise<JsonObject[]>;
 
 /** Each `--export-from` app's reader with its credentials, checked before anything is sent. A
@@ -530,7 +639,9 @@ function exportersFor(
   apps: string[],
   via: {
     composio: { userId: string; accountId: string } | undefined;
-    pipedream: { externalUserId: string; accountId: string } | undefined;
+    /** The Pipedream Connect account of each app read through Pipedream. */
+    pipedream: { externalUserId: string; accounts: Map<string, string> } | undefined;
+    slackArchived: boolean;
   },
 ): Map<string, Exporter> {
   const secret = (name: string) => {
@@ -539,9 +650,9 @@ function exportersFor(
     return value;
   };
   const pipedream = " or a Pipedream Connect account with --pipedream-user and --pipedream-account";
-  /** The app's credential, which the proxy supplies when the export reads through Pipedream. */
-  const credential = (name: string, refusal: string) => {
-    if (via.pipedream) return "";
+  /** The app's credential, which the proxy supplies when the app is read through Pipedream. */
+  const credential = (app: string, name: string, refusal: string) => {
+    if (via.pipedream?.accounts.has(app)) return "";
     const value = secret(name);
     if (!value) throw new UsageError(`${refusal},${pipedream}`);
     return value;
@@ -563,18 +674,22 @@ function exportersFor(
       );
     } else if (app === "linear") {
       const apiKey = credential(
+        app,
         "LINEAR_API_KEY",
         "--export-from linear reads LINEAR_API_KEY (a Linear API key), COMPOSIO_API_KEY with --composio-user and --composio-account",
       );
       exporters.set(app, (transport) => exportLinear(linearApi(apiKey, transport), report));
     } else if (app === "slack") {
       const token = credential(
+        app,
         "SLACK_TOKEN",
         "--export-from slack reads SLACK_TOKEN, a Slack token",
       );
-      exporters.set(app, (transport) => exportSlack(token, transport, ctx.note));
+      const options = { archived: via.slackArchived };
+      exporters.set(app, (transport) => exportSlack(token, transport, ctx.note, options));
     } else if (app === "gmail") {
       const token = credential(
+        app,
         "GMAIL_ACCESS_TOKEN",
         "--export-from gmail reads GMAIL_ACCESS_TOKEN, an OAuth access token with gmail.readonly",
       );
@@ -586,6 +701,7 @@ function exportersFor(
           "--export-from salesforce reads SALESFORCE_INSTANCE_URL, the org's https://<name>.my.salesforce.com, with SALESFORCE_ACCESS_TOKEN or a Pipedream Connect account",
         );
       const accessToken = credential(
+        app,
         "SALESFORCE_ACCESS_TOKEN",
         "--export-from salesforce reads SALESFORCE_ACCESS_TOKEN, the exporting user's access token",
       );
@@ -595,34 +711,35 @@ function exportersFor(
     }
   }
   if (!via.pipedream) return exporters;
-  const account = {
-    ...via.pipedream,
+  const { externalUserId, accounts } = via.pipedream;
+  const project = {
     clientId: secret("PIPEDREAM_CLIENT_ID"),
     clientSecret: secret("PIPEDREAM_CLIENT_SECRET"),
     projectId: env.PIPEDREAM_PROJECT_ID?.trim() ?? "",
     environment: env.PIPEDREAM_PROJECT_ENVIRONMENT?.trim() || "production",
   };
-  if (!account.clientId || !account.clientSecret || !account.projectId)
+  if (!project.clientId || !project.clientSecret || !project.projectId)
     throw new UsageError(
       "--pipedream-account needs PIPEDREAM_CLIENT_ID, PIPEDREAM_CLIENT_SECRET and PIPEDREAM_PROJECT_ID: your Pipedream project's OAuth client and its id",
     );
-  const { environment } = account;
-  if (environment !== "development" && environment !== "production")
+  if (project.environment !== "development" && project.environment !== "production")
     throw new UsageError("PIPEDREAM_PROJECT_ENVIRONMENT must be development or production");
+  const environment: "development" | "production" = project.environment;
   return new Map(
-    [...exporters].map(([app, read]) => [
-      app,
-      async (transport: Transport) => {
-        ctx.note(
-          `${EXPORTERS[app]}: reading through Pipedream Connect account ${account.accountId}.`,
-        );
-        const proxy = pipedreamTransport({ ...account, environment }, transport, (token) =>
-          ctx.secrets.push(token),
-        );
-        await proxy.ready();
-        return read(proxy.transport);
-      },
-    ]),
+    [...exporters].map(([app, read]) => {
+      const accountId = accounts.get(app);
+      if (accountId === undefined) return [app, read];
+      const account = { ...project, environment, externalUserId, accountId };
+      return [
+        app,
+        async (transport: Transport) => {
+          ctx.note(`${EXPORTERS[app]}: reading through Pipedream Connect account ${accountId}.`);
+          const proxy = pipedreamTransport(account, transport, (token) => ctx.secrets.push(token));
+          await proxy.ready();
+          return read(proxy.transport);
+        },
+      ];
+    }),
   );
 }
 

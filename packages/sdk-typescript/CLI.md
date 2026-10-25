@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.25.0`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.26.0`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -335,12 +335,15 @@ A World is filled from your files, from a description, or both:
 - `--describe "<text>"` asks Hue to generate the apps' data from the description.
   `--dry-run` prints the outline and estimate Hue answers and creates nothing.
 - `--export-from <list>` reads the named apps on your machine with your own access and uploads
-  what they answer as each app's files, at most 25 MiB each. The app must also be in `--apps`.
+  what they answer as each app's files, at most 25 MiB each, all into the one World. Each app
+  must also be in `--apps`. `--save-to <dir>` saves the export to `<dir>/<app>/<app>-export-<n>.json`
+  instead (owner-only files, never over an existing one) and creates nothing in Hue, so it needs
+  no `HUE_API_KEY`; `hue world create --apps <list> --files <dir>` uploads it later.
 
 | App | Credentials | What is read |
 | --- | --- | --- |
 | `linear` | `LINEAR_API_KEY`, or `COMPOSIO_API_KEY` with `--composio-user` and `--composio-account` | The queries of Hue's world-import guide, every page, with each nested list completed past 50 records. A field Linear refuses for the key is dropped from its query and named. Each object is kept as Linear returns it, `__typename` included. |
-| `slack` | `SLACK_TOKEN` (a user token reads the most) | `auth.test`, `team.info`, `users.list`, `conversations.list` and `users.conversations`; per conversation `conversations.info`, `conversations.members` (not for a DM), `conversations.history` and the `conversations.replies` of each thread; `pins.list` and `bookmarks.list` per channel; `files.list`; `reactions.list` and `users.profile.get` for the token's own user; and `dnd.teamInfo` for every member, 50 users a call. |
+| `slack` | `SLACK_TOKEN` (a user token reads the most) | `auth.test`, `team.info`, `users.list`, `conversations.list` and `users.conversations`; per conversation `conversations.info`, `conversations.members` (not for a DM), `conversations.history` and the `conversations.replies` of each thread; `pins.list` and `bookmarks.list` per channel; `files.list`; `reactions.list` and `users.profile.get` for the token's own user; and `dnd.teamInfo` for every member, 50 users a call. Archived conversations are listed and not read, so the World answers their history, replies, info, members, pins and bookmarks as unknown; `--slack-archived` reads them in full. |
 | `salesforce` | `SALESFORCE_ACCESS_TOKEN` and `SALESFORCE_INSTANCE_URL` (the org's `https://<name>.my.salesforce.com`) | REST API v67.0: the token's user, `sobjects`, and for each standard object Hue simulates (`Account`, `Contact`, `Lead`, `Opportunity`, `Case`, `Task` and the rest of its list) and each queryable custom object, its describe and every page of `queryAll` (or `query` when it has no `IsDeleted` field) over its fields except base64, address and location ones. An object whose query URL would pass 12 KB is read in field groups under that size, each the same full listing with `Id` (and `IsDeleted`), so Salesforce's URL limit never drops its records; the export names each object it split and into how many groups. |
 | `gmail` | `GMAIL_ACCESS_TOKEN`, an OAuth access token with `gmail.readonly` | `profile`, `labels`, every page of `messages` with spam and trash, each message in `full` format and again in `raw` format when it has an attachment and is at most 190,000 bytes, and every page of `drafts`. Messages are read four at a time. |
 
@@ -361,8 +364,11 @@ travel only in request headers, are never recorded and are replaced with `[redac
 Rate limits are waited out as the app's answer asks, and a 5xx or a dropped connection is tried
 again after 1, 2, 4 and 8 seconds.
 
-`--pipedream-user <external user id>` and `--pipedream-account <account id>` read the one
-`--export-from` app through a Pipedream Connect account instead of the app's own credentials.
+`--pipedream-user <external user id>` and `--pipedream-account <app=account,...>` read
+`--export-from` apps through Pipedream Connect accounts instead of the apps' own credentials:
+each listed app through its account, every other app with its own credentials, in one run
+(`--pipedream-account linear=apn_1,gmail=apn_2`). With one `--export-from` app, a bare
+`--pipedream-account <account id>` names its account.
 They need `PIPEDREAM_CLIENT_ID`, `PIPEDREAM_CLIENT_SECRET` and `PIPEDREAM_PROJECT_ID` (the
 project's OAuth client and its id) and `PIPEDREAM_PROJECT_ENVIRONMENT` (`development` or
 `production`, the default). The command gets a client-credentials token, renewed before it
@@ -506,8 +512,8 @@ and Hue never receives or stores them. The command is part of the `hue` executab
 #   LANGFUSE_PUBLIC_KEY=pk-lf-...
 #   LANGFUSE_SECRET_KEY=sk-lf-...
 #   LANGFUSE_BASE_URL=https://cloud.langfuse.com
-npx -y @hue-run/sdk@0.25.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.25.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.26.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.26.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` come from the environment or `--env-path`
@@ -1052,7 +1058,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.25.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.26.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -1063,7 +1069,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.25.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.26.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -1105,10 +1111,10 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.25.0 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.25.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.25.0 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.25.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.26.0 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.26.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.26.0 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.26.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 One invocation creates one run holding every selected case; it prints the run URL
@@ -1146,7 +1152,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.25.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.26.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.

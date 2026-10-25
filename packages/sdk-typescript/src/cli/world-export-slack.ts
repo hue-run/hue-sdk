@@ -37,6 +37,7 @@ export async function exportSlack(
   token: string,
   transport: Transport,
   progress: (line: string) => void,
+  options: { archived: boolean } = { archived: false },
 ): Promise<JsonObject[]> {
   const exchanges: JsonObject[] = [];
   /** The calls Slack refused, by method and error: kept as Slack answered them, and named. */
@@ -137,7 +138,14 @@ export async function exportSlack(
   progress(`Slack: ${conversations.size} conversations`);
 
   let messages = 0;
+  let archived = 0;
   for (const [channel, conversation] of conversations) {
+    // An archived conversation is listed and, unless asked for, not read: a large workspace holds
+    // thousands, and reading each takes Slack's rate limits hours.
+    if (conversation.is_archived === true && !options.archived) {
+      archived++;
+      continue;
+    }
     await call("conversations.info", { channel });
     if (conversation.is_im !== true)
       await pages("conversations.members", { channel, limit: "1000" });
@@ -160,6 +168,10 @@ export async function exportSlack(
     }
   }
   progress(`Slack: ${messages} messages`);
+  if (archived)
+    progress(
+      `Slack: listed ${archived} archived ${archived === 1 ? "conversation" : "conversations"} without reading ${archived === 1 ? "it" : "them"}; the World answers ${archived === 1 ? "its" : "their"} history, replies, info, members, pins and bookmarks as unknown. --slack-archived reads them.`,
+    );
 
   let files = 0;
   for (let page = 1; ; page++) {
