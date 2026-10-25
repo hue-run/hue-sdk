@@ -1359,7 +1359,8 @@ hue eval --set gia-d1-citation --set-version 1 --scorer gia-d1-citation ./hue-ag
 For each case the command is spawned once **inside a private case directory** with
 `HUE_CASE_DIR`, `HUE_CASE_INPUTS`, `HUE_CASE_OUTPUT_DIR`, `HUE_CASE_ID`, `HUE_CASE_KEY`,
 `HUE_EXECUTION_ID` and `TRACEPARENT` (the execution's trace context, so an agent that
-honors W3C trace context joins its own spans to the execution) in its environment
+honors W3C trace context joins its own spans to the execution; an inherited `TRACESTATE` is
+dropped with it) in its environment
 (`{"inputs","config"}` is also written to stdin):
 
 ```text

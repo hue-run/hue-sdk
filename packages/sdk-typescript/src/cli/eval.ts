@@ -779,7 +779,7 @@ function commandAdapter(
       HUE_CASE_DIR: layout.caseDirectory,
       HUE_CASE_INPUTS: layout.inputsPath,
       HUE_CASE_OUTPUT_DIR: layout.outputDirectory,
-      ...(trace ? { TRACEPARENT: caseTraceparent(trace) } : {}),
+      ...(trace ? { TRACEPARENT: caseTraceparent(trace), TRACESTATE: undefined } : {}),
     };
     // The token-bearing file is written inside a private directory registered before any of it
     // exists, so a forced exit at any point removes it.
@@ -851,7 +851,9 @@ function directCommandAdapter(
         HUE_CASE_ID: context.item.id,
         HUE_CASE_KEY: context.item.externalKey,
         HUE_EXECUTION_ID: context.executionId,
-        ...(context.trace ? { TRACEPARENT: caseTraceparent(context.trace) } : {}),
+        ...(context.trace
+          ? { TRACEPARENT: caseTraceparent(context.trace), TRACESTATE: undefined }
+          : {}),
       },
       stdin: JSON.stringify({ inputs, config: context.config }),
       timeoutSeconds,

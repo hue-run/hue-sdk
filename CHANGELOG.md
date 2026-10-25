@@ -19,7 +19,7 @@ refuses to publish a version without a matching entry below.
 #### Added
 
 - `hue eval --command` exports `TRACEPARENT` (the execution's trace context) to direct, answer-only
-  cases alongside `HUE_CASE_*` and `HUE_EXECUTION_ID`.
+  cases alongside `HUE_CASE_*` and `HUE_EXECUTION_ID`, and drops an inherited `TRACESTATE`.
 - `hue eval` prints `Run id: <id> (MCP get_run, list_run_items)` and, with the verdicts,
   `Scoring run id: <id>`, in place of `Experiment: <id>`. `--json` output is unchanged.
 

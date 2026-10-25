@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { request } from "node:http";
 import { brotliCompressSync, deflateSync, gzipSync } from "node:zlib";
 import { createHue, createHueTransport, type HueOptions } from "../src/index.js";
+import { MAX_CONTENT_BYTES } from "../src/config.js";
 import { apiKey, attr, receiver } from "./sdk-receiver.js";
 
 function provider() {
@@ -18,9 +19,11 @@ function provider() {
 }
 
 const compressors = { gzip: gzipSync, br: brotliCompressSync, deflate: deflateSync } as const;
-function compressedProvider(encoding: keyof typeof compressors) {
-  const payload = { ok: true, text: "synthetic ".repeat(400) };
-  const wire = compressors[encoding](JSON.stringify(payload));
+function compressedProvider(
+  encoding: keyof typeof compressors,
+  payload: unknown = { ok: true, text: "synthetic ".repeat(400) },
+  wire: ReturnType<typeof gzipSync> = compressors[encoding](JSON.stringify(payload)),
+) {
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -165,6 +168,41 @@ describe("default outbound HTTP capture", () => {
           expect(attr(span, "http.response.body.size")?.intValue).toBeDefined();
           expect(attr(span, "hue.truncated")).toBeUndefined();
         }
+      } finally {
+        await hue.shutdownSafe();
+        await target.server.stop(true);
+        await endpoint.server.stop(true);
+      }
+    },
+  );
+
+  test.each([
+    ["corrupt gzip bytes", Buffer.from("not a gzip member")],
+    ["a gzip body over the value cap once decoded", gzipSync("x".repeat(MAX_CONTENT_BYTES + 1))],
+  ])(
+    "records a truncation marker for %s while the node:http caller sees the wire bytes",
+    async (_label, wire) => {
+      const endpoint = receiver();
+      const target = compressedProvider("gzip", undefined, wire);
+      const hue = createHue({
+        apiKey,
+        baseUrl: endpoint.url,
+        serviceName: "http-compressed-undecodable",
+        liveSpans: false,
+      });
+      try {
+        const raw = await nodeHttpGet(target.url);
+        expect(raw.body.equals(wire)).toBe(true);
+        await hue.flush();
+        const records = endpoint.accepted().filter((span) => attr(span, "http.request.method"));
+        expect(records).toHaveLength(1);
+        expect(attr(records[0]!, "output.value")?.kvlistValue?.values).toEqual([
+          { key: "hue.truncated", value: { boolValue: true } },
+          { key: "hue.truncated_bytes", value: { intValue: String(wire.byteLength) } },
+        ]);
+        expect(attr(records[0]!, "hue.truncated")?.arrayValue?.values).toEqual([
+          { stringValue: "output.value" },
+        ]);
       } finally {
         await hue.shutdownSafe();
         await target.server.stop(true);
