@@ -3,12 +3,19 @@ import { once } from "node:events";
 import { resolve } from "node:path";
 import { strict as assert } from "node:assert";
 import { randomUUID } from "node:crypto";
+import { verifyHttpPolicy } from "./http-policy.mjs";
 
 // Run from an installed standalone chatbot. Supply HUE_API_KEY/HUE_BASE_URL in the
 // process environment; this script never writes or prints the key.
 const cwd = resolve(process.argv[2] ?? ".");
 const evidence = [];
-for (const captureContent of ["true", "false"]) {
+const httpPolicies = [];
+for (const [captureContent, captureHttp, captureHttpBodies] of [
+  ["true", "true", "true"],
+  ["false", "true", "true"],
+  ["true", "true", "false"],
+  ["true", "false", "true"],
+]) {
   const child = spawn(process.execPath, ["dist/server.js"], {
     cwd,
     env: {
@@ -16,6 +23,8 @@ for (const captureContent of ["true", "false"]) {
       PORT: "0",
       HUE_CHAT_MODE: "synthetic",
       HUE_CAPTURE_CONTENT: captureContent,
+      HUE_CAPTURE_HTTP: captureHttp,
+      HUE_CAPTURE_HTTP_BODIES: captureHttpBodies,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -43,6 +52,11 @@ for (const captureContent of ["true", "false"]) {
     const config = await fetch(`${ready.url}/config`).then((response) => response.json());
     assert.equal(config.captureContent, captureContent === "true");
     assert.equal(config.mode, "synthetic");
+    assert.equal(config.captureHttp, captureHttp === "true");
+    assert.equal(
+      config.captureHttpBodies,
+      captureContent === "true" && captureHttp === "true" && captureHttpBodies === "true",
+    );
     const sessionId = randomUUID();
     for (const mode of ["chat", "controlled-error"]) {
       const response = await fetch(`${ready.url}/chat`, {
@@ -86,7 +100,15 @@ for (const captureContent of ["true", "false"]) {
         assert.ok(events.some((event) => event.name === "text"));
         assert.ok(!events.some((event) => event.name === "error"));
       } else assert.ok(events.some((event) => event.name === "error"));
-      evidence.push({ captureContent, mode, traceId, sessionId, report: telemetry.report });
+      evidence.push({
+        captureContent,
+        captureHttp,
+        captureHttpBodies,
+        mode,
+        traceId,
+        sessionId,
+        report: telemetry.report,
+      });
     }
   } finally {
     if (child.exitCode === null && child.signalCode === null) {
@@ -96,5 +118,8 @@ for (const captureContent of ["true", "false"]) {
     }
   }
   assert.equal(stderr, "", "Chatbot wrote server or telemetry diagnostics");
+  httpPolicies.push(
+    await verifyHttpPolicy({ cwd, captureContent, captureHttp, captureHttpBodies }),
+  );
 }
-console.log(JSON.stringify({ node: process.version, evidence }, null, 2));
+console.log(JSON.stringify({ node: process.version, evidence, httpPolicies }, null, 2));

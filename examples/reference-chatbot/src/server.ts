@@ -5,21 +5,29 @@ import { createHue, HueExportError } from "@hue-run/sdk";
 import { chatModelIdentity, createChatAgent } from "./agent.js";
 
 const mode = process.env.HUE_CHAT_MODE;
-const capture = process.env.HUE_CAPTURE_CONTENT ?? "true";
+function envBoolean(name: string, fallback: boolean): boolean {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  if (value !== "true" && value !== "false") throw new Error(`Choose ${name}=true or false`);
+  return value === "true";
+}
+const capture = envBoolean("HUE_CAPTURE_CONTENT", true);
+const captureHttp = envBoolean("HUE_CAPTURE_HTTP", true);
+const captureHttpBodies = envBoolean("HUE_CAPTURE_HTTP_BODIES", capture);
 if (mode !== "synthetic" && mode !== "live")
   throw new Error("Choose HUE_CHAT_MODE=synthetic or live");
-if (capture !== "true" && capture !== "false")
-  throw new Error("Choose HUE_CAPTURE_CONTENT=true or false");
 if (!process.env.HUE_API_KEY) throw new Error("Set HUE_API_KEY to a project service key");
 if (mode === "live" && (!process.env.AI_GATEWAY_API_KEY || !process.env.HUE_CHAT_MODEL))
   throw new Error("Live mode requires AI_GATEWAY_API_KEY and HUE_CHAT_MODEL (provider/model)");
 // Message records name the inference they belong to, as the agent's model spans do.
 const chatModel = chatModelIdentity(mode, process.env.HUE_CHAT_MODEL);
-const hue = createHue({
+export const hue = createHue({
   apiKey: process.env.HUE_API_KEY,
   baseUrl: process.env.HUE_BASE_URL,
   serviceName: "hue-reference-chatbot",
-  captureContent: capture === "true",
+  captureContent: capture,
+  captureHttp,
+  captureHttpBodies,
   onExportIssue: (issue) => console.error(JSON.stringify({ telemetryIssue: issue })),
 });
 const project = await hue.checkConnection();
@@ -72,7 +80,9 @@ const server = createServer(async (request, response) => {
     response.end(
       JSON.stringify({
         mode,
-        captureContent: capture === "true",
+        captureContent: capture,
+        captureHttp,
+        captureHttpBodies: capture && captureHttp && captureHttpBodies,
         project: { id: project.id, name: project.name },
       }),
     );
@@ -166,7 +176,9 @@ server.listen(port, "127.0.0.1", () => {
       ready: true,
       url: `http://127.0.0.1:${typeof address === "object" ? address?.port : port}`,
       mode,
-      captureContent: capture === "true",
+      captureContent: capture,
+      captureHttp,
+      captureHttpBodies: capture && captureHttp && captureHttpBodies,
       projectId: project.id,
     }),
   );

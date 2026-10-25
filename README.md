@@ -139,6 +139,7 @@ The [tracing reliability contract](./RELIABILITY.md) maps failure isolation and 
 | Example | What it verifies |
 | --- | --- |
 | [Reference chatbot](./examples/reference-chatbot) | Streaming, a real tool, controlled errors, session grouping and explicit content policies. Synthetic mode needs no model credits. |
+| [Gmail summary tools](./examples/gmail-summary-tool) | TypeScript and Python helpers return summaries while HTTP children record Gmail list/get responses. Offline checks use synthetic Gmail and OTLP receivers. |
 | [Python agent](./examples/python-agent) | Public wheel imports, model/tool spans, correlated logs and optional instrumented OpenAI calls. |
 | [Python evaluation](./examples/python-evaluation) | Frozen datasets, local targets/scorers, resumable uploads and historical rescoring. |
 

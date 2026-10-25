@@ -1,0 +1,265 @@
+{
+  "name": "canonical-gmail-v1",
+  "list": {
+    "messages": [
+      {
+        "id": "synthetic-1",
+        "threadId": "thread-1"
+      },
+      {
+        "id": "synthetic-2",
+        "threadId": "thread-2"
+      },
+      {
+        "id": "synthetic-3",
+        "threadId": "thread-3"
+      },
+      {
+        "id": "synthetic-4",
+        "threadId": "thread-4"
+      },
+      {
+        "id": "synthetic-5",
+        "threadId": "thread-5"
+      }
+    ],
+    "resultSizeEstimate": 5
+  },
+  "messages": [
+    {
+      "id": "synthetic-1",
+      "threadId": "thread-1",
+      "labelIds": [
+        "INBOX",
+        "UNREAD"
+      ],
+      "snippet": "Synthetic message 1 for the canonical Gmail fixture.",
+      "historyId": "100",
+      "internalDate": "1792915200000",
+      "payload": {
+        "partId": "",
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [
+          {
+            "name": "Subject",
+            "value": "Synthetic subject 1"
+          },
+          {
+            "name": "From",
+            "value": "sender1@example.test"
+          },
+          {
+            "name": "To",
+            "value": "reader@example.test"
+          },
+          {
+            "name": "Date",
+            "value": "Sun, 25 Oct 2026 08:00:00 +0000"
+          },
+          {
+            "name": "MIME-Version",
+            "value": "1.0"
+          },
+          {
+            "name": "Content-Type",
+            "value": "text/plain; charset=UTF-8"
+          }
+        ],
+        "body": {
+          "size": 54,
+          "data": "U3ludGhldGljIG1lc3NhZ2UgMSBmb3IgdGhlIGNhbm9uaWNhbCBHbWFpbCBmaXh0dXJlLg0K"
+        }
+      },
+      "sizeEstimate": 238
+    },
+    {
+      "id": "synthetic-2",
+      "threadId": "thread-2",
+      "labelIds": [
+        "INBOX",
+        "UNREAD"
+      ],
+      "snippet": "Synthetic message 2 for the canonical Gmail fixture.",
+      "historyId": "100",
+      "internalDate": "1792915140000",
+      "payload": {
+        "partId": "",
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [
+          {
+            "name": "Subject",
+            "value": "Synthetic subject 2"
+          },
+          {
+            "name": "From",
+            "value": "sender2@example.test"
+          },
+          {
+            "name": "To",
+            "value": "reader@example.test"
+          },
+          {
+            "name": "Date",
+            "value": "Sun, 25 Oct 2026 07:59:00 +0000"
+          },
+          {
+            "name": "MIME-Version",
+            "value": "1.0"
+          },
+          {
+            "name": "Content-Type",
+            "value": "text/plain; charset=UTF-8"
+          }
+        ],
+        "body": {
+          "size": 54,
+          "data": "U3ludGhldGljIG1lc3NhZ2UgMiBmb3IgdGhlIGNhbm9uaWNhbCBHbWFpbCBmaXh0dXJlLg0K"
+        }
+      },
+      "sizeEstimate": 238
+    },
+    {
+      "id": "synthetic-3",
+      "threadId": "thread-3",
+      "labelIds": [
+        "INBOX",
+        "UNREAD"
+      ],
+      "snippet": "Synthetic message 3 for the canonical Gmail fixture.",
+      "historyId": "100",
+      "internalDate": "1792915080000",
+      "payload": {
+        "partId": "",
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [
+          {
+            "name": "Subject",
+            "value": "Synthetic subject 3"
+          },
+          {
+            "name": "From",
+            "value": "sender3@example.test"
+          },
+          {
+            "name": "To",
+            "value": "reader@example.test"
+          },
+          {
+            "name": "Date",
+            "value": "Sun, 25 Oct 2026 07:58:00 +0000"
+          },
+          {
+            "name": "MIME-Version",
+            "value": "1.0"
+          },
+          {
+            "name": "Content-Type",
+            "value": "text/plain; charset=UTF-8"
+          }
+        ],
+        "body": {
+          "size": 54,
+          "data": "U3ludGhldGljIG1lc3NhZ2UgMyBmb3IgdGhlIGNhbm9uaWNhbCBHbWFpbCBmaXh0dXJlLg0K"
+        }
+      },
+      "sizeEstimate": 238
+    },
+    {
+      "id": "synthetic-4",
+      "threadId": "thread-4",
+      "labelIds": [
+        "INBOX",
+        "UNREAD"
+      ],
+      "snippet": "Synthetic message 4 for the canonical Gmail fixture.",
+      "historyId": "100",
+      "internalDate": "1792915020000",
+      "payload": {
+        "partId": "",
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [
+          {
+            "name": "Subject",
+            "value": "Synthetic subject 4"
+          },
+          {
+            "name": "From",
+            "value": "sender4@example.test"
+          },
+          {
+            "name": "To",
+            "value": "reader@example.test"
+          },
+          {
+            "name": "Date",
+            "value": "Sun, 25 Oct 2026 07:57:00 +0000"
+          },
+          {
+            "name": "MIME-Version",
+            "value": "1.0"
+          },
+          {
+            "name": "Content-Type",
+            "value": "text/plain; charset=UTF-8"
+          }
+        ],
+        "body": {
+          "size": 54,
+          "data": "U3ludGhldGljIG1lc3NhZ2UgNCBmb3IgdGhlIGNhbm9uaWNhbCBHbWFpbCBmaXh0dXJlLg0K"
+        }
+      },
+      "sizeEstimate": 238
+    },
+    {
+      "id": "synthetic-5",
+      "threadId": "thread-5",
+      "labelIds": [
+        "INBOX",
+        "UNREAD"
+      ],
+      "snippet": "Synthetic message 5 for the canonical Gmail fixture.",
+      "historyId": "100",
+      "internalDate": "1792914960000",
+      "payload": {
+        "partId": "",
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [
+          {
+            "name": "Subject",
+            "value": "Synthetic subject 5"
+          },
+          {
+            "name": "From",
+            "value": "sender5@example.test"
+          },
+          {
+            "name": "To",
+            "value": "reader@example.test"
+          },
+          {
+            "name": "Date",
+            "value": "Sun, 25 Oct 2026 07:56:00 +0000"
+          },
+          {
+            "name": "MIME-Version",
+            "value": "1.0"
+          },
+          {
+            "name": "Content-Type",
+            "value": "text/plain; charset=UTF-8"
+          }
+        ],
+        "body": {
+          "size": 54,
+          "data": "U3ludGhldGljIG1lc3NhZ2UgNSBmb3IgdGhlIGNhbm9uaWNhbCBHbWFpbCBmaXh0dXJlLg0K"
+        }
+      },
+      "sizeEstimate": 238
+    }
+  ]
+}

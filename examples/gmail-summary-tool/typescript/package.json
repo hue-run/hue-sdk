@@ -1,0 +1,20 @@
+{
+  "name": "hue-gmail-summary-tool",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "offline": "node scripts/offline.mjs",
+    "start": "node dist/main.js --live"
+  },
+  "dependencies": {
+    "@hue-run/sdk": "0.26.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "protobufjs": "8.8.1",
+    "typescript": "7.0.2"
+  },
+  "engines": { "node": ">=22.12" }
+}

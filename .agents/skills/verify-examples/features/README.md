@@ -22,3 +22,5 @@ The maintained source for proving changes to `examples/`. Read this index, then 
 - [reference-chatbot](./reference-chatbot.md): streaming chat, tool call, controlled error and telemetry acknowledgement.
 - [python-agent](./python-agent.md): synthetic streamed model call, tool and handled tool failure.
 - [python-evaluation](./python-evaluation.md): dataset, scorers, experiments and checkpoints through the evaluation API.
+
+- [gmail-summary-tool](./gmail-summary-tool.md): summary-only tools with captured Gmail list/get responses and HTTP/content capture controls.

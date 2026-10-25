@@ -3,7 +3,7 @@ name: hue
 description: "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction."
 metadata:
   author: hue-run
-  version: "0.8.23"
+  version: "0.8.24"
 ---
 
 # Hue
@@ -94,6 +94,55 @@ Follow [Traces and spans](https://docs.hue.run/guides/traces). Instrument every 
 - **Tool spans:** `tool()` around each tool call, with the arguments and the result the agent actually read. When wrapping MCP tools, pass `mcp: client.getServerVersion()` in TypeScript or `mcp=` in Python so the span names the server; do not infer the server from a generic tool name.
 - **Composio and Pipedream calls:** when the application calls `composio.tools.execute`, a Tool Router `session.execute` or `pipedream.actions.run`, wrap the client once with `instrumentComposio(hue, composio)` or `instrumentPipedream(hue, pipedream)` from `@hue-run/sdk` (since TypeScript `0.25.1`). Each platform call then records its own `execute_tool` span with the tool slug or component key, the REST request fields (`user_id`, `connected_account_id`, `external_user_id`, `configured_props`) and the SDK's response, even inside a wrapper tool. The Python SDK has no equivalent; record those calls with `tool()`.
 - **Context:** preserve propagated parent context, use `inject` / `extract` across processes, and keep spans from existing instrumentation under the request span.
+
+### Outbound HTTP calls
+
+Since TypeScript `0.26.0` and Python `0.14.0`, Hue records supported outbound HTTP calls as
+OpenTelemetry CLIENT spans by default. With content capture on, the spans also record request
+parameters and bodies as `input.value` and response content as `output.value`. An ordinary helper
+can return a summary while its HTTP children preserve what the app API returned. Keep that helper's
+arguments and result unchanged. Do not add a tool marker, endpoint option or raw-response return
+only to make HTTP capture work.
+
+Check the installed version first. Create Hue before API clients on Node 22 and Bun, where the
+fetch fallback cannot observe a fetch reference saved before initialization. Calls in another
+process need tracing in that process. Provider-hosted tools do not make their requests in the
+application process. Hue excludes its export traffic. Direct model-provider HTTP inside a
+recognized model span keeps HTTP identity but suppresses both request and response bodies.
+An ordinary `hue.tool` nested inside that span resumes app HTTP body capture under the normal
+content controls. Inherited model metadata stays available to the nested work.
+
+| Option in TypeScript | Option in Python | Default and effect |
+| --- | --- | --- |
+| `captureHttp` | `capture_http` | `true`: records supported outbound HTTP calls. `false`: disables automatic HTTP capture. |
+| `captureHttpBodies` | `capture_http_bodies` | Follows content capture. `false`: keeps HTTP identity without request parameters or bodies. Content capture off always disables bodies. |
+
+The SDK reads no application environment variables. If the application needs environment switches,
+wire them at initialization, using its existing boolean validation:
+
+```ts
+captureHttp: (process.env.HUE_CAPTURE_HTTP ?? "true") === "true",
+captureHttpBodies: (process.env.HUE_CAPTURE_HTTP_BODIES ?? "true") === "true",
+```
+
+```python
+capture_http=os.environ.get("HUE_CAPTURE_HTTP", "true") == "true",
+capture_http_bodies=os.environ.get("HUE_CAPTURE_HTTP_BODIES", "true") == "true",
+```
+
+These are constructor options, alongside `captureContent` or `capture_content`. HTTP bodies pass
+through the SDK's credential filtering and content redactor. Review that policy for app data such
+as email text. Text and JSON capture is bounded by the receiver's value limit, 1 MiB by default;
+binary or streaming content may be unavailable. Truncated capture is incomplete evidence. Inspect
+the exported spans before claiming a complete exchange or a replayable World. Standard HTTP
+instrumentation in a different OpenTelemetry setup normally records identity only; body capture
+needs a hook or the application's normal read path that can safely observe the bytes. An undici
+`responseHook` exposes status and headers, not the response body.
+
+The [Gmail summary tools](https://github.com/hue-run/hue-sdk/tree/main/examples/gmail-summary-tool) run against synthetic Gmail
+and loopback OTLP receivers from installed packages, with HTTP-off, identity-only and metadata-only
+controls. Their checks prove local capture and acknowledgement. Stored trace and World verification
+remain separate steps.
 
 ### HTTP tool endpoint evidence
 

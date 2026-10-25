@@ -1,6 +1,6 @@
 ---
 name: verify-examples
-description: "Verify a change to the runnable examples under examples/: the reference-chatbot (Node/Bun HTTP chat app on @hue-run/sdk), python-agent and python-evaluation. Use before opening a PR that touches examples/ or SDK behavior those examples show to users."
+description: "Verify a change to the runnable examples under examples/: the reference-chatbot (Node/Bun HTTP chat app on @hue-run/sdk), python-agent, python-evaluation and Gmail summary tools. Use before opening a PR that touches examples/ or SDK behavior those examples show to users."
 ---
 
 # Verify the examples
@@ -29,6 +29,7 @@ Then follow the feature file for the example you changed.
 | [python-agent](features/python-agent.md) | run `main.py` from an installed wheel against the stub | about 5 s |
 | [reference-chatbot](features/reference-chatbot.md) | install the packed SDK, start the server, `curl` `/chat` | about 10 s |
 | [python-evaluation](features/python-evaluation.md) | ruff + `--help` (needs a Hue project to run fully) | 2 s |
+| [gmail-summary-tool](features/gmail-summary-tool.md) | run TypeScript and Python installed consumers against their own synthetic Gmail and OTLP servers | about 10 s |
 | Python examples lint | `ruff check` / `ruff format --check` on `examples/python-*` | 1 s |
 
 ## Evidence
