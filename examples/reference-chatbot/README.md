@@ -27,6 +27,8 @@ using an ignored `.env` file or your secret manager:
 ```sh
 HUE_API_KEY=<project service key>
 HUE_CAPTURE_CONTENT=true
+HUE_CAPTURE_HTTP=true
+HUE_CAPTURE_HTTP_BODIES=true
 HUE_CHAT_MODE=synthetic
 PORT=3401
 ```
@@ -35,6 +37,12 @@ PORT=3401
 `HUE_CAPTURE_CONTENT=true` records prompts, responses and tool inputs/outputs so you can inspect
 full traces in Hue; explicit `false` sends metadata only, for when a policy forbids sending that
 content. Set
+`HUE_CAPTURE_HTTP=false` to stop automatic outbound HTTP spans, or
+`HUE_CAPTURE_HTTP_BODIES=false` to keep HTTP identity without request and response content.
+Both HTTP options default on; disabling content also disables HTTP body capture.
+These environment names belong to this app. The SDK receives explicit options and reads no
+application environment variables. With a published TypeScript SDK that supports HTTP capture,
+create Hue before API clients on Node 22 and Bun so the fetch fallback can observe them. Set
 `HUE_BASE_URL` only for a different Hue deployment; omitting it uses
 `https://app.hue.run`. Start with `node --env-file=.env dist/server.js` or provide the
 variables in your process environment and run `node dist/server.js`. Open the

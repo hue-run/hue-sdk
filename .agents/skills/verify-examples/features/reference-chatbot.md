@@ -6,7 +6,7 @@ A Node HTTP app (`examples/reference-chatbot`) serving a chat page at `/`, its s
 
 - `chat-stream` streams `trace`, tool call, tool result, text deltas and `done`.
 - `chat-error` reports a controlled error separately from telemetry.
-- `chat-capture` honors `HUE_CAPTURE_CONTENT=false` (metadata only).
+- `chat-capture` honors `HUE_CAPTURE_CONTENT=false` (metadata only), `HUE_CAPTURE_HTTP=false`, and `HUE_CAPTURE_HTTP_BODIES=false`. The app validates and passes these options to the SDK.
 - `chat-telemetry` waits for both trace and log acknowledgements before reporting `accepted`.
 
 ## How to get to it (user POV)
@@ -31,7 +31,7 @@ Preconditions:
 - **Chat.** `curl -sN http://127.0.0.1:3401/chat -H 'content-type: application/json' -d "{\"sessionId\":\"$(python3 -c 'import uuid;print(uuid.uuid4())')\",\"messages\":[{\"role\":\"user\",\"content\":\"count the words in hello world\"}]}"`. Expected: SSE `trace`, a `textStatistics` tool call and result, text deltas, a telemetry event with `accepted`, then `done`. The stub log gains `POST /api/v1/otlp/v1/traces` and `/v1/logs` with status 200.
 - **Controlled error.** Same request with `,"mode":"controlled-error"` in the body. Expected: an `error` event and telemetry still `accepted`.
 - **Print the export evidence.** `cat "$V"/stub.log "$V"/server.log`.
-- **Both capture policies at once** (about 10 s). `node "$V"/chatbot/scripts/acceptance.mjs "$V"/chatbot` runs the server for `HUE_CAPTURE_CONTENT=true` and `false` against `HUE_BASE_URL` (the stub) and prints its JSON report.
+- **Content and HTTP policies at once** (about 10 s). `node "$V"/chatbot/scripts/acceptance.mjs "$V"/chatbot` runs four combinations of content and HTTP settings against `HUE_BASE_URL` (the stub) and prints its JSON report.
 
 ## Gotchas
 

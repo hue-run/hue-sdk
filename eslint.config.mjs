@@ -15,6 +15,7 @@ export default tseslint.config(
       "**/dist/**",
       "**/.venv/**",
       "examples/reference-chatbot/**",
+      "examples/gmail-summary-tool/**",
       "eslint.config.mjs",
     ],
   },

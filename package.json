@@ -5,8 +5,8 @@
   "description": "Lint and formatting tooling for the repository; not published.",
   "scripts": {
     "lint": "eslint .",
-    "format:check": "prettier --check \"packages/sdk-typescript/{src,tests,scripts}/**/*.{ts,mjs}\" \"examples/reference-chatbot/{src,scripts}/**/*.{ts,mjs}\"",
-    "format": "prettier --write \"packages/sdk-typescript/{src,tests,scripts}/**/*.{ts,mjs}\" \"examples/reference-chatbot/{src,scripts}/**/*.{ts,mjs}\"",
+    "format:check": "prettier --check \"packages/sdk-typescript/{src,tests,scripts}/**/*.{ts,mjs}\" \"examples/reference-chatbot/{src,scripts}/**/*.{ts,mjs}\" \"examples/gmail-summary-tool/typescript/{src,scripts}/**/*.{ts,mjs}\"",
+    "format": "prettier --write \"packages/sdk-typescript/{src,tests,scripts}/**/*.{ts,mjs}\" \"examples/reference-chatbot/{src,scripts}/**/*.{ts,mjs}\" \"examples/gmail-summary-tool/typescript/{src,scripts}/**/*.{ts,mjs}\"",
     "docs:typescript": "typedoc --emit none",
     "docs:typescript:html": "typedoc",
     "docs:contract": "python3 scripts/generate-docs-contract.py",
