@@ -113,6 +113,7 @@ export type EnvironmentTargetProgress =
       type: "world_preparing";
       /** How long Hue asked the run to wait before asking again, in milliseconds. */
       retryAfterMs?: number;
+      /** Hue's bounded preparation progress, when its refusal carried one. */
       preparation?: WorldPreparationProgress;
     }
   | {

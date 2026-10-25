@@ -129,6 +129,7 @@ export type SimulationProgress =
       caseId: string;
       /** How long Hue asked the run to wait before asking again, in milliseconds. */
       retryAfterMs?: number;
+      /** Hue's bounded preparation progress, when its refusal carried one. */
       preparation?: WorldPreparationProgress;
     }
   | {
