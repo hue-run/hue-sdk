@@ -155,10 +155,11 @@ pending-span privacy, single-use claims, ambiguous and expired candidates, and o
 Existing providers,
 other exporters' naming and URL policy, and the request's headers must remain unchanged.
 
-The Vercel driver automatically runs `verify-http-capture-limits.mjs` in 11 isolated policy
+The Vercel driver automatically runs `verify-http-capture-limits.mjs` in 12 isolated policy
 cases: value limits 4, 16 and 64, count limits 8, 1 and 0, value limit 0 as unlimited, and the
 receiver's 256 KiB cap. Check final and live structured cuts, absent dropped attributes, URL
-redactor/count policy, and unmatched Vercel CLIENT names under value limits 4 and 16.
+redactor/count policy, and unmatched Vercel CLIENT names and URI aliases under value limits
+4, 16 and 64.
 
 Inspect exported CLIENT spans for scrubbed HTTP identity, query arguments in `input.value`,
 request bodies merged with those arguments, parsed JSON or text response bodies in `output.value`,

@@ -906,9 +906,10 @@ Recorded URLs also redact recognized credential path segments, including credent
 slots such as `/token/<value>`, bot-token segments and Slack incoming-webhook secrets. Ordinary
 resource IDs keep their spelling. For a borrowed span, Hue sanitizes its export snapshot's name,
 URL, legacy URL aliases and HTTP URL-valued span attribute `resource.name`. Custom resource
-labels remain unchanged. Hue also scrubs HTTP URLs embedded in CLIENT span names when the
-request cannot be matched. Other exporters keep the application's existing naming and URL
-policy. Live HTTP placeholders use the same sanitization.
+labels remain unchanged. For unmatched CLIENT spans, Hue scrubs HTTP URLs in names and
+sanitizes URI aliases already present. Those aliases are filtered before and after redaction
+within their stored lengths; missing attributes remain absent. Other exporters keep the
+application's existing naming and URL policy. Live HTTP placeholders use the same sanitization.
 
 HTTP URL redaction runs in both content modes. The canonical hooks are `attributes.url.full`
 and any present `attributes.http.url`, `attributes.http.target` or `attributes.url.path` alias.

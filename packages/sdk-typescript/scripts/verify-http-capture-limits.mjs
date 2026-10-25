@@ -23,6 +23,7 @@ if (!scenario) {
     "0:128:receiver",
     "vercel:4",
     "vercel:16",
+    "vercel:64",
   ];
   async function run(value) {
     await new Promise((done, fail) => {

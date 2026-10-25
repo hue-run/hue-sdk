@@ -522,6 +522,42 @@ export function redactSpan(
     ...(hosted.failed ? { "error.type": "mcp_error" } : {}),
     ...span.attributes,
   };
+  // A provider can clip URL attributes before correlation. Sanitize only the surviving copy;
+  // never reconstruct identity or grow a replacement beyond the provider-accepted value.
+  const unmatchedUris = new Map<string, number>();
+  if (span.kind === SpanKind.CLIENT && !limits.httpIdentity) {
+    const http =
+      typeof source["http.request.method"] === "string" ||
+      typeof source["http.method"] === "string" ||
+      ["url.full", "http.url", "resource.name"].some(
+        (key) => typeof source[key] === "string" && /^https?:/i.test(source[key]),
+      );
+    if (http) {
+      for (const key of ["url.full", "http.url", "http.target", "url.path", "resource.name"])
+        if (
+          typeof source[key] === "string" &&
+          (key !== "resource.name" || /^https?:/i.test(source[key]))
+        )
+          unmatchedUris.set(key, source[key].length);
+      delete source["url.query"];
+    }
+  }
+  const scrubUnmatchedUris = (values: Attributes): void => {
+    for (const [key, cap] of unmatchedUris) {
+      const value = values[key];
+      if (typeof value !== "string") continue;
+      try {
+        const path = key === "http.target" || key === "url.path";
+        const parsed = scrubHttpUrl(path ? new URL(value, "http://http-capture.invalid") : value);
+        const safe = path ? parsed.pathname : parsed.href;
+        if (safe.length <= cap) values[key] = safe;
+        else delete values[key];
+      } catch {
+        delete values[key];
+      }
+    }
+  };
+  scrubUnmatchedUris(source);
   if (limits.httpIdentity) {
     const { contentCuts, attributeValueLengthLimit } = limits.httpIdentity;
     const keys: string[] = [];
@@ -660,6 +696,7 @@ export function redactSpan(
     attributes(source, options, "attributes", budget, "", true),
     budget,
   );
+  scrubUnmatchedUris(redactedAttributes);
   Object.assign(redactedAttributes, httpUrls);
   if (limits.httpIdentity) {
     const { attributeValueLengthLimit, attributeCountLimit, contentCuts } = limits.httpIdentity;
