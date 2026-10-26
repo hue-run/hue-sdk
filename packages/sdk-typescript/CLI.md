@@ -439,9 +439,10 @@ Hue could not finish or report the instance. Both exit `2` for a usage error.
 
 `hue listen` delivers a simulated world's events to a receiver on your machine, so an event-driven
 agent such as a Slack bot can be tested without a public URL, the way `stripe listen --forward-to`
-delivers webhooks. Hue signs each request as the provider does (Slack Events API requests today);
-the command pulls them, forwards each one unchanged to `--forward-to` and reports the bot's answer
-to Hue. It needs a **listen** event subscription on the world or on a connection key, and the bot
+delivers webhooks. Hue signs each request as the provider does (Slack Events API requests, slash
+commands and interactivity payloads today); the command pulls them, forwards each one unchanged to
+`--forward-to` and reports the bot's answer to Hue. Every kind goes to the same `--forward-to` URL,
+as with a Bolt app whose request URLs all end in `/slack/events`. It needs a **listen** event subscription on the world or on a connection key, and the bot
 configured with that subscription's signing secret where `SLACK_SIGNING_SECRET` went. Event
 subscriptions are not yet available on `https://app.hue.run`; until the origin offers them, the
 command exits `1` with the refusal it receives.
@@ -463,8 +464,11 @@ verifies as it would in production; only `Host`, `Content-Length` and connection
 local request's own, and Hue's credential is never forwarded. No redirect is followed: a `3xx` is
 reported as the answer. An answer counts only within three seconds, Slack's acknowledgement window;
 a later one is a timeout. A failing answer with `x-slack-no-retry: 1` is reported so Hue stops
-retrying it. Only a successful URL verification answer's body (at most 4 KiB, for its challenge) is
-sent to Hue; any other answer body stays on this machine. Each pull waits for at most 20 seconds and
+retrying it. A successful answer to a slash command or an interaction sends its body to Hue (at most
+64 KiB, cut at a character boundary): it is the immediate reply Slack would show, such as `text`,
+`blocks` or `response_type`. A failing answer to one sends an empty body. A successful URL
+verification answer sends its body (at most 4 KiB, for its challenge). An event's answer body and
+any other failing answer's body stay on this machine. Each pull waits for at most 20 seconds and
 leases up to `--max` deliveries (1 to 10, default 10), which are forwarded concurrently; the next
 pull starts once they are acknowledged, and a delivery beyond `--max` is never forwarded. A waiting
 pull that forwarded something is not repeated until 50 ms after it began, and one that answers at
@@ -479,8 +483,9 @@ at most 30 seconds.
 name is refused unless every address it resolves to is a loopback address. `--allow-remote-forward`
 permits another host over HTTPS only, because every request carries the subscription's verification
 token and a valid signature; plain HTTP still reaches only loopback addresses. Credentials and
-fragments in the URL are refused. Output is one line per delivery (time, event id, retry number, the
-bot's status and duration, and the state Hue recorded), never a body, a signature or a credential;
+fragments in the URL are refused. Output is one line per delivery (time, event id and retry number
+or the kind, such as `slash_command`, the bot's status and duration, and the state Hue recorded),
+never a body, a signature or a credential;
 credentials in error messages are replaced with `[redacted]`.
 
 Ctrl+C or `SIGTERM` stops pulling (a waiting pull is cancelled), finishes the deliveries in flight

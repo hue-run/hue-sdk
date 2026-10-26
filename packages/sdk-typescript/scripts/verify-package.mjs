@@ -609,24 +609,28 @@ if (typeof zlib.zstdCompressSync === "function") {
       `Installed hue login --env-path did not create a new env file: ${login.stderr}`,
     );
 }
-// The installed `hue listen` under Node: one leased delivery reaches a loopback receiver unchanged,
-// is acknowledged with the receiver's answer, and SIGINT then stops the client cleanly.
+// The installed `hue listen` under Node: an event and a slash command reach a loopback receiver
+// unchanged, each is acknowledged with the receiver's answer (the command's with its reply), and
+// SIGINT then stops the client cleanly.
 {
   const token = `hue_world_eyJwYWNrYWdlIjoiY2hlY2sifQ.${"t".repeat(43)}`;
   const subscription = "0f8e3c2a-5b7d-4e1f-9a6c-2d4b8e0f1a3c";
   const deliveryId = "6a1c9e4f-2b3d-4c5e-8f7a-9b0c1d2e3f4a";
+  const commandId = "8c3e1a6b-4d5f-4e7a-9b8c-1d2e3f4a5b6c";
   const body = JSON.stringify({ type: "event_callback", event_id: "Ev0PACKAGE01", event: {} });
+  const commandBody = "token=package&command=%2Fquote&text=hello";
+  const reply = JSON.stringify({ response_type: "ephemeral", text: "Quote ready" });
   const received = [];
   const receiver = createServer((request, response) => {
     let raw = "";
     request.on("data", (chunk) => (raw += chunk));
     request.on("end", () => {
       received.push({ signature: request.headers["x-slack-signature"], raw });
-      response.end("");
+      response.end(raw === commandBody ? reply : "");
     });
   });
   await new Promise((listening) => receiver.listen(0, "127.0.0.1", listening));
-  const acks = [];
+  const acks = {};
   let pulled = false;
   const standIn = createServer((request, response) => {
     let raw = "";
@@ -639,6 +643,7 @@ if (typeof zlib.zstdCompressSync === "function") {
       }
       const base = `/api/v1/event-subscriptions/${subscription}/deliveries`;
       if (request.url === `${base}/pull`) {
+        const leaseExpiresAt = new Date(Date.now() + 30_000).toISOString();
         const deliveries = pulled
           ? []
           : [
@@ -649,11 +654,28 @@ if (typeof zlib.zstdCompressSync === "function") {
                 eventId: "Ev0PACKAGE01",
                 kind: "event_callback",
                 retryNum: 0,
-                leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+                leaseExpiresAt,
                 request: {
                   method: "POST",
                   headers: { "content-type": "application/json", "x-slack-signature": "v0=abc" },
                   body,
+                },
+              },
+              {
+                deliveryId: commandId,
+                subscriptionId: subscription,
+                worldId: null,
+                eventId: null,
+                kind: "slash_command",
+                retryNum: 0,
+                leaseExpiresAt,
+                request: {
+                  method: "POST",
+                  headers: {
+                    "content-type": "application/x-www-form-urlencoded",
+                    "x-slack-signature": "v0=def",
+                  },
+                  body: commandBody,
                 },
               },
             ];
@@ -664,8 +686,9 @@ if (typeof zlib.zstdCompressSync === "function") {
           deliveries.length ? 0 : 200,
         );
       }
-      if (request.url === `${base}/${deliveryId}/ack`) {
-        acks.push(JSON.parse(raw));
+      const acked = [deliveryId, commandId].find((id) => request.url === `${base}/${id}/ack`);
+      if (acked) {
+        acks[acked] = JSON.parse(raw);
         return response.end(JSON.stringify({ state: "acknowledged" }));
       }
       response.statusCode = 404;
@@ -703,7 +726,7 @@ if (typeof zlib.zstdCompressSync === "function") {
     });
     const deadline = Date.now() + 20_000;
     const poll = setInterval(() => {
-      if (acks.length > 0 || Date.now() > deadline) {
+      if (Object.keys(acks).length === 2 || Date.now() > deadline) {
         clearInterval(poll);
         child.kill("SIGINT");
       }
@@ -711,15 +734,21 @@ if (typeof zlib.zstdCompressSync === "function") {
   });
   receiver.close();
   standIn.close();
+  const event = received.find((entry) => entry.raw === body);
+  const command = received.find((entry) => entry.raw === commandBody);
   if (
     listen.status !== 0 ||
-    acks.length !== 1 ||
-    acks[0].outcome !== "response" ||
-    acks[0].status !== 200 ||
-    received.length !== 1 ||
-    received[0].raw !== body ||
-    received[0].signature !== "v0=abc" ||
-    listen.output.includes(token)
+    acks[deliveryId]?.outcome !== "response" ||
+    acks[deliveryId].status !== 200 ||
+    "body" in acks[deliveryId] ||
+    acks[commandId]?.outcome !== "response" ||
+    acks[commandId].status !== 200 ||
+    acks[commandId].body !== reply ||
+    received.length !== 2 ||
+    event?.signature !== "v0=abc" ||
+    command?.signature !== "v0=def" ||
+    listen.output.includes(token) ||
+    listen.output.includes("Quote ready")
   )
     throw new Error(
       `Installed hue listen did not forward and acknowledge under Node: ${listen.output}`,

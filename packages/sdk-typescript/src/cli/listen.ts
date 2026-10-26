@@ -48,8 +48,14 @@ const MAX_BATCH = 10;
 const LEASE_MS = 30_000;
 /** Slack's acknowledgement window: a receiver that has not answered by then timed out. */
 const FORWARD_TIMEOUT_MS = 3_000;
-/** The most answer body an acknowledgement carries; only the URL verification reads it. */
-const MAX_ACK_BODY_BYTES = 4_096;
+/** The most answer body an acknowledgement carries, by kind; an event's answer is never read. A
+ * slash command's or interaction's answer is the reply Slack shows the user. */
+const MAX_ACK_BODY_BYTES = {
+  url_verification: 4_096,
+  event_callback: 0,
+  slash_command: 64 * 1024,
+  interactivity: 64 * 1024,
+} as const;
 const MAX_PULL_RESPONSE_BYTES = 16 * 1024 * 1024;
 const MAX_ACK_RESPONSE_BYTES = 64 * 1024;
 const MAX_DELIVERY_BODY_BYTES = 1024 * 1024;
@@ -99,9 +105,10 @@ export const LISTEN_USAGE = `Usage: hue listen --subscription ID --forward-to UR
                   [--credential world-token|connection-key] [--max N] [--allow-remote-forward]
 
 Deliver a simulated world's events to a receiver on this machine. Hue's signed requests (Slack
-Events API requests today) are pulled with the subscription's own credential, forwarded unchanged
-to --forward-to, and acknowledged with the receiver's answer. Press Ctrl+C to stop: pulls stop,
-deliveries in flight are finished and acknowledged, and nothing unanswered is acknowledged.
+Events API requests, slash commands and interactivity payloads today) are pulled with the
+subscription's own credential, forwarded unchanged to --forward-to, and acknowledged with the
+receiver's answer. Press Ctrl+C to stop: pulls stop, deliveries in flight are finished and
+acknowledged, and nothing unanswered is acknowledged.
 
 The credential is read from the environment, never from the command line:
   HUE_WORLD_TOKEN     the world token, for a subscription on one world
@@ -124,7 +131,7 @@ class UsageError extends Error {}
 interface Delivery {
   deliveryId: string;
   eventId: string | null;
-  kind: "url_verification" | "event_callback";
+  kind: keyof typeof MAX_ACK_BODY_BYTES;
   retryNum: number;
   /** The lease's end as the server stated it, or null when absent. */
   leaseExpiresAt: number | null;
@@ -256,8 +263,9 @@ function clampUtf8(text: string, limit: number): string {
 /**
  * Sends one delivery to the receiver and reports its answer, or null when `signal` abandoned it.
  * The body bytes and every header go out unchanged (the provider's signature covers them), no
- * redirect is followed, and the answer counts only inside `timeoutMs`. Only a URL verification's
- * successful answer body is read.
+ * redirect is followed, and the answer counts only inside `timeoutMs`. Only a successful answer to
+ * a URL verification, slash command or interaction has its body read; the last two always carry a
+ * body, empty when the answer failed.
  */
 export function forwardDelivery(
   target: URL,
@@ -332,23 +340,25 @@ export function forwardDelivery(
           ...(noRetry ? { noRetry } : {}),
           ...(text !== undefined ? { body: text } : {}),
         });
-      // Only a successful handshake answer can verify, so only its body is read; a failing
-      // answer's page stays on this machine.
-      if (delivery.kind !== "url_verification" || status < 200 || status > 299) {
+      // Slack reads only a successful answer (a handshake's challenge, a command's or an
+      // interaction's reply), so only its body is read; a failing answer's page stays here.
+      const limit = MAX_ACK_BODY_BYTES[delivery.kind];
+      if (limit === 0 || status < 200 || status > 299) {
         response.on("error", () => undefined);
-        answered();
+        answered(
+          delivery.kind === "slash_command" || delivery.kind === "interactivity" ? "" : undefined,
+        );
         return;
       }
-      // The handshake's answer carries the challenge; read at most what an acknowledgement holds.
+      // Read at most what an acknowledgement of this kind holds.
       const chunks: Buffer[] = [];
       let size = 0;
-      const done = () =>
-        answered(clampUtf8(Buffer.concat(chunks).toString("utf8"), MAX_ACK_BODY_BYTES));
+      const done = () => answered(clampUtf8(Buffer.concat(chunks).toString("utf8"), limit));
       response.on("data", (chunk: Buffer) => {
-        if (size >= MAX_ACK_BODY_BYTES) return;
-        chunks.push(chunk.subarray(0, MAX_ACK_BODY_BYTES - size));
-        size += Math.min(chunk.byteLength, MAX_ACK_BODY_BYTES - size);
-        if (size >= MAX_ACK_BODY_BYTES) done();
+        if (size >= limit) return;
+        chunks.push(chunk.subarray(0, limit - size));
+        size += Math.min(chunk.byteLength, limit - size);
+        if (size >= limit) done();
       });
       response.on("end", done);
       response.on("error", done);
@@ -372,7 +382,7 @@ export function parseDelivery(value: unknown, subscriptionId: string): Delivery 
   if (typeof deliveryId !== "string" || !UUID.test(deliveryId)) return null;
   if (typeof owner !== "string" || owner.toLowerCase() !== subscriptionId.toLowerCase())
     return null;
-  if (kind !== "url_verification" && kind !== "event_callback") return null;
+  if (typeof kind !== "string" || !Object.hasOwn(MAX_ACK_BODY_BYTES, kind)) return null;
   if (eventId !== null && (typeof eventId !== "string" || !EVENT_ID.test(eventId))) return null;
   if (!Number.isInteger(retryNum) || (retryNum as number) < 0 || (retryNum as number) > 100)
     return null;
@@ -397,7 +407,7 @@ export function parseDelivery(value: unknown, subscriptionId: string): Delivery 
   return {
     deliveryId: deliveryId.toLowerCase(),
     eventId: eventId as string | null,
-    kind,
+    kind: kind as Delivery["kind"],
     retryNum: retryNum as number,
     leaseExpiresAt: Number.isFinite(leaseEnd) ? leaseEnd : null,
     request: { headers: copied, body },
@@ -873,9 +883,9 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
         signal: forced.signal,
       }));
     const name =
-      delivery.kind === "url_verification"
-        ? "url_verification"
-        : `${delivery.eventId ?? "event"}${delivery.retryNum ? ` retry ${delivery.retryNum}` : ""}`;
+      delivery.kind === "event_callback"
+        ? `${delivery.eventId ?? "event"}${delivery.retryNum ? ` retry ${delivery.retryNum}` : ""}`
+        : delivery.kind;
     if (answer === null) {
       out(
         `${new Date().toISOString()}  ${name} -> abandoned; not acknowledged, the lease lapses into a timeout`,

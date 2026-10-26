@@ -18,6 +18,12 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
+- **Wire.** `hue listen` forwards Slack slash command (`slash_command`) and interactivity
+  (`interactivity`) deliveries unchanged, to the same `--forward-to` URL as events. Their
+  acknowledgement carries the receiver's answer body, the immediate reply Slack would show, cut to
+  64 KiB at a character boundary, or an empty body when the answer failed. Events and URL
+  verifications are acknowledged as before. Earlier clients skip these deliveries and leave their
+  leases to lapse.
 - `hue eval --command` exports `TRACEPARENT` (the execution's trace context) to direct, answer-only
   cases alongside `HUE_CASE_*` and `HUE_EXECUTION_ID`, and drops an inherited `TRACESTATE`.
 - `hue eval` prints `Run id: <id> (MCP get_run, list_run_items)` and, with the verdicts,
