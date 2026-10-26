@@ -1326,6 +1326,13 @@ describe("hue listen delivery safety", () => {
     expect(Buffer.byteLength(long!.body!)).toBeLessThanOrEqual(65_536);
     expect(Buffer.byteLength(long!.body!)).toBeGreaterThan(65_530);
     expect(long!.body!.replaceAll("✓", "")).toBe("");
+    // A cut one byte short of a four-byte character drops it rather than ending in U+FFFD.
+    reply = (response) => {
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end(`a${"😀".repeat(20_000)}`);
+    };
+    const emoji = await forwardDelivery(target, command);
+    expect(emoji!.body).toBe(`a${"😀".repeat(16_383)}`);
     reply = (response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end('{"text":"Approved"}');

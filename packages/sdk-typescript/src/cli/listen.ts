@@ -4,6 +4,7 @@ import { request as httpRequest, type ClientRequest, type OutgoingHttpHeaders } 
 import { request as httpsRequest } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
 import { resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { parseArgs, parseEnv } from "node:util";
 import { HUE_CONTROL_PLANE_VARIABLES } from "../world/world.js";
 import { scrubCredentialText } from "../tool-definitions.js";
@@ -353,7 +354,9 @@ export function forwardDelivery(
       // Read at most what an acknowledgement of this kind holds.
       const chunks: Buffer[] = [];
       let size = 0;
-      const done = () => answered(clampUtf8(Buffer.concat(chunks).toString("utf8"), limit));
+      // The decoder drops a character the cut split rather than writing U+FFFD in its place.
+      const done = () =>
+        answered(clampUtf8(new StringDecoder("utf8").write(Buffer.concat(chunks)), limit));
       response.on("data", (chunk: Buffer) => {
         if (size >= limit) return;
         chunks.push(chunk.subarray(0, limit - size));
