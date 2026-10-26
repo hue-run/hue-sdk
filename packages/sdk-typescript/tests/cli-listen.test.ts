@@ -62,7 +62,7 @@ function sign(body: string, timestamp: string): string {
 
 interface Queued {
   deliveryId: string;
-  kind: "url_verification" | "event_callback";
+  kind: "url_verification" | "event_callback" | "slash_command" | "interactivity";
   eventId: string | null;
   retryNum: number;
   headers: Record<string, string>;
@@ -106,6 +106,45 @@ function slackDelivery(kind: Queued["kind"], options: { retryNum?: number; text?
     headers["x-slack-retry-reason"] = "http_timeout";
   }
   return { deliveryId: randomUUID(), kind, eventId, retryNum, headers, body } satisfies Queued;
+}
+
+/** A slash command or an interaction as Hue queues it: Slack's signed form body, never retried. */
+function slackInteraction(kind: "slash_command" | "interactivity") {
+  const fields: Record<string, string> =
+    kind === "slash_command"
+      ? {
+          token: VERIFICATION_TOKEN,
+          team_id: "T0SYNTHETIC",
+          channel_id: "C0SYNTHETIC",
+          user_id: "U0SYNTHETIC",
+          command: "/quote",
+          text: `${BODY_CANARY} “quoted” ✓`,
+          trigger_id: "1790000000.1.synthetic",
+        }
+      : {
+          payload: JSON.stringify({
+            type: "block_actions",
+            token: VERIFICATION_TOKEN,
+            user: { id: "U0SYNTHETIC" },
+            actions: [{ action_id: "approve", value: BODY_CANARY }],
+            trigger_id: "1790000000.2.synthetic",
+          }),
+        };
+  const body = new URLSearchParams(fields).toString();
+  const timestamp = "1790000000";
+  const headers = {
+    "content-type": "application/x-www-form-urlencoded",
+    "x-slack-request-timestamp": timestamp,
+    "x-slack-signature": sign(body, timestamp),
+  };
+  return {
+    deliveryId: randomUUID(),
+    kind,
+    eventId: null,
+    retryNum: 0,
+    headers,
+    body,
+  } satisfies Queued;
 }
 
 /** A queued delivery as a pull answer carries it. */
@@ -316,6 +355,9 @@ async function mockHue(options: MockOptions = {}) {
         return send(400, {}, "invalid_body");
       }
       const { outcome, status, durationMs, noRetry, body: answer } = body;
+      // A slash command's or interaction's answer always carries the reply, up to 64 KiB.
+      const replies =
+        lease.delivery.kind === "slash_command" || lease.delivery.kind === "interactivity";
       if (
         Object.keys(body).some((key) => !ACK_FIELDS.has(key)) ||
         !["response", "timeout", "connection_failed", "tls_error"].includes(outcome as string) ||
@@ -328,7 +370,8 @@ async function mockHue(options: MockOptions = {}) {
         (noRetry !== undefined && typeof noRetry !== "boolean") ||
         (answer !== undefined &&
           answer !== null &&
-          (typeof answer !== "string" || Buffer.byteLength(answer) > 4096))
+          (typeof answer !== "string" || Buffer.byteLength(answer) > (replies ? 65_536 : 4096))) ||
+        (replies && outcome === "response" && typeof answer !== "string")
       )
         return send(400, {}, "invalid_body");
       acks.push({ at: Date.now(), deliveryId: ack![2]!, status: 0, body });
@@ -743,6 +786,56 @@ describe("hue listen forwarding", () => {
     expect(output).not.toContain(event.headers["x-slack-signature"]!);
   });
 
+  test("forwards a slash command and an interaction unchanged and acknowledges each with the bot's reply", async () => {
+    const hue = await mockHue();
+    const verifications: boolean[] = [];
+    const replies = {
+      slash_command: JSON.stringify({ response_type: "in_channel", text: `Quote ${BODY_CANARY}` }),
+      interactivity: JSON.stringify({ replace_original: true, text: "Approved ✓" }),
+    };
+    const bot = await receiver((request, response) => {
+      const raw = request.body.toString("utf8");
+      const timestamp = String(request.headers["x-slack-request-timestamp"]);
+      verifications.push(request.headers["x-slack-signature"] === sign(raw, timestamp));
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        new URLSearchParams(raw).has("payload") ? replies.interactivity : replies.slash_command,
+      );
+    });
+    const command = slackInteraction("slash_command");
+    const interaction = slackInteraction("interactivity");
+    hue.queue.push(command, interaction);
+    const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => hue.acks.length === 2);
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+
+    expect(verifications).toEqual([true, true]);
+    for (const delivery of [command, interaction]) {
+      const received = bot.requests.find(
+        (request) => request.body.toString("utf8") === delivery.body,
+      )!;
+      expect(received.url).toBe("/slack/events");
+      for (const [name, value] of Object.entries(delivery.headers))
+        expect(received.headers[name]).toBe(value);
+      const ack = hue.acks.find((entry) => entry.deliveryId === delivery.deliveryId)!;
+      expect(ack.status).toBe(200);
+      expect(ack.body).toEqual({
+        outcome: "response",
+        status: 200,
+        durationMs: expect.any(Number),
+        body: replies[delivery.kind],
+      });
+    }
+    expect(hue.refusals).toEqual([]);
+    const output = listen.output();
+    expect(output).toContain("slash_command -> 200");
+    expect(output).toContain("interactivity -> 200");
+    expect(output).toContain("Hue: acknowledged");
+    for (const secret of [WORLD_TOKEN, BODY_CANARY, SIGNING_SECRET, VERIFICATION_TOKEN, "Approved"])
+      expect(output).not.toContain(secret);
+  });
+
   test("pulls with a connection key for a key's subscription", async () => {
     const hue = await mockHue({ credential: CONNECTION_KEY });
     const bot = await receiver();
@@ -1093,6 +1186,9 @@ describe("hue listen delivery safety", () => {
       { ...base, subscriptionId: randomUUID() },
       { ...base, deliveryId: "../../5b0f6a52-3c1e-4d7a-9e55-0c2b8f1d9a11" },
       { ...base, kind: "block_actions" },
+      { ...base, kind: "__proto__" },
+      { ...base, kind: "toString" },
+      { ...base, kind: 42 },
       { ...base, retryNum: -1 },
       { ...base, eventId: "Ev\u001b[31m" },
       { ...base, request: { ...base.request, method: "GET" } },
@@ -1102,6 +1198,18 @@ describe("hue listen delivery safety", () => {
       headers({ "Content-Type": "application/json", "content-type": "text/plain" }),
     ];
     for (const value of refused) expect(parseDelivery(value, SUBSCRIPTION)).toBeNull();
+    for (const kind of ["slash_command", "interactivity"] as const) {
+      const interaction = slackInteraction(kind);
+      // As Hue sends them: the world's id beside, no event id, never a retry.
+      expect(parseDelivery(wire(interaction), SUBSCRIPTION)).toEqual({
+        deliveryId: interaction.deliveryId,
+        eventId: null,
+        kind,
+        retryNum: 0,
+        leaseExpiresAt: expect.any(Number),
+        request: { headers: interaction.headers, body: interaction.body },
+      });
+    }
     // Header names keep the spelling Hue sent; HTTP compares them case-insensitively.
     const mixed = parseDelivery(
       headers({ "Content-Type": "application/json", "X-Slack-Signature": "v0=1" }),
@@ -1201,6 +1309,56 @@ describe("hue listen delivery safety", () => {
     const failed = await forwardDelivery(target, handshake);
     expect(failed).toMatchObject({ outcome: "response", status: 500 });
     expect(failed!.body).toBeUndefined();
+  });
+
+  test("sends a slash command's or interaction's answer body, empty when it failed, cut to 64 KiB", async () => {
+    let reply: (response: ServerResponse) => void = () => undefined;
+    const bot = await receiver((_request, response) => reply(response));
+    const target = new URL(`http://127.0.0.1:${bot.port}/slack/events`);
+    const command = parseDelivery(wire(slackInteraction("slash_command")), SUBSCRIPTION)!;
+    const interaction = parseDelivery(wire(slackInteraction("interactivity")), SUBSCRIPTION)!;
+    reply = (response) => {
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("✓".repeat(30_000));
+    };
+    const long = await forwardDelivery(target, command);
+    expect(long).toMatchObject({ outcome: "response", status: 200 });
+    expect(Buffer.byteLength(long!.body!)).toBeLessThanOrEqual(65_536);
+    expect(Buffer.byteLength(long!.body!)).toBeGreaterThan(65_530);
+    expect(long!.body!.replaceAll("✓", "")).toBe("");
+    // A cut one byte short of a four-byte character drops it rather than ending in U+FFFD.
+    reply = (response) => {
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end(`a${"😀".repeat(20_000)}`);
+    };
+    const emoji = await forwardDelivery(target, command);
+    expect(emoji!.body).toBe(`a${"😀".repeat(16_383)}`);
+    reply = (response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"text":"Approved"}');
+    };
+    expect(await forwardDelivery(target, interaction)).toMatchObject({
+      status: 200,
+      body: '{"text":"Approved"}',
+    });
+    // An event's answer body is still never read.
+    const event = parseDelivery(wire(slackDelivery("event_callback")), SUBSCRIPTION)!;
+    expect((await forwardDelivery(target, event))!.body).toBeUndefined();
+    reply = (response) => {
+      response.writeHead(200);
+      response.end();
+    };
+    expect((await forwardDelivery(target, interaction))!.body).toBe("");
+    reply = (response) => {
+      response.writeHead(500);
+      response.end("stack trace with a secret");
+    };
+    for (const delivery of [command, interaction])
+      expect(await forwardDelivery(target, delivery)).toMatchObject({
+        outcome: "response",
+        status: 500,
+        body: "",
+      });
   });
 
   test("loads the credential from --env-path", async () => {

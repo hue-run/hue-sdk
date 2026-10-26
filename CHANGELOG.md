@@ -15,9 +15,18 @@ refuses to publish a version without a matching entry below.
 - HTTP capture decodes gzip, deflate and br responses before applying the text and size policy,
   so a compressed JSON or text response records `output.value` instead of its size only. The
   application still receives its usual bytes. Undecodable bytes record a truncation marker.
+- `hue listen` drops a character split by the acknowledgement body's byte cap instead of ending
+  the body in U+FFFD.
 
 #### Added
 
+- **Wire.** `hue listen` forwards Slack slash command (`slash_command`) and interactivity
+  (`interactivity`) deliveries unchanged, to the same `--forward-to` URL as events. Their
+  acknowledgement carries the receiver's answer body, the immediate reply Slack would show, cut to
+  64 KiB at a character boundary, or an empty body when the answer failed. Events and URL
+  verifications are acknowledged as before. The new kinds need a Hue server that sends them;
+  against one that does not, the client behaves as before. Earlier clients skip these deliveries
+  and leave their leases to lapse.
 - `hue eval --command` exports `TRACEPARENT` (the execution's trace context) to direct, answer-only
   cases alongside `HUE_CASE_*` and `HUE_EXECUTION_ID`, and drops an inherited `TRACESTATE`.
 - `hue eval` prints `Run id: <id> (MCP get_run, list_run_items)` and, with the verdicts,
