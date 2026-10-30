@@ -62,7 +62,7 @@ compatibility = [
     "google-auth==2.62.0",
     "httplib2==0.32.0",
     "httpx==0.28.1",
-    "httpx2==2.13.1",
+    "httpx2==2.14.0",
     "openai==3.34.0",
     "openinference-instrumentation-openai==0.1.65",
     "pipedream==2.3.0",
