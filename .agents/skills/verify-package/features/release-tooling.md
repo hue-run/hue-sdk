@@ -21,11 +21,12 @@ Preconditions:
 
 - Python 3.11+. No network or registry credentials needed.
 
-- **One script's tests** (under 0.5 s). `python3 -m unittest scripts.test_release_artifacts`. Expected: exit 0 and a final `OK`; keep the full output if it fails. Test modules: `test_release_policy`, `test_verify_prepared_release`, `test_wait_for_registry`, `test_npm_release_tags`, `test_changelog`, `test_check_doc_versions`, `test_generate_docs_contract`, `test_docs_drift`, `test_skill_gate`, `test_ci_consumers`, `test_repository_links`.
+- **One script's tests** (under 0.5 s). `python3 -m unittest scripts.test_release_artifacts`. Expected: exit 0 and a final `OK`; keep the full output if it fails. Test modules: `test_release_policy`, `test_verify_prepared_release`, `test_wait_for_registry`, `test_npm_release_tags`, `test_changelog`, `test_check_doc_versions`, `test_generate_docs_contract`, `test_docs_drift`, `test_check_reference_coverage`, `test_skill_gate`, `test_ci_consumers`, `test_repository_links`.
 - **All script tests** (0.6 s). `python3 -m unittest discover -s scripts -p 'test_*.py'`. Expected: `OK`.
 - **Docs files** (0.3 s). `python3 scripts/check-doc-versions.py && python3 scripts/generate-docs-contract.py --check`. Expected: `0 stale mention(s)` and `docs-contract.json is current`. After an intended API change run `bun run docs:contract` and commit the result.
 
 ## Gotchas
 
 - `scripts/check-docs-drift.py` fetches the hosted docs over the network and runs on a schedule, not per PR. A failure there reflects the live site, not your branch.
+- `scripts/check-reference-coverage.py` also runs on that schedule. When this tree's TypeScript version matches npm but its public exports differ from the `typescript-v<version>` tag, the check requires the tag's names on docs.hue.run. A failure means a published export is missing from the hosted reference.
 - Do not edit `.github/workflows/` or release steps without maintainer authorization (AGENTS.md).
