@@ -61,6 +61,12 @@ routes, identical request bodies, runtime IDs, account tokens and opaque model c
 installed-package verifier runs the same file against the packed exports. World APIs in this
 checkout remain subject to the release boundary in `WORLDS.md`.
 
+Each `WorldSurface` may carry `connection` (`WorldSurfaceConnection`, `WorldClientHint`). Run
+`bun test tests/world.test.ts -t "connection reaches the handoff"` from `packages/sdk-typescript`
+and `uv run --frozen --all-groups pytest tests/test_environment.py -q -k surface_connection` from
+`packages/sdk-python`: the handoff keeps it as the World API states it, as its own copy, and
+invents none for an older Hue.
+
 Run `bun test tests/world-readiness.test.ts tests/world-models.test.ts` from
 `packages/sdk-typescript` and `uv run --frozen --all-groups pytest
 tests/test_world_readiness.py tests/test_world_preparation.py -q` from `packages/sdk-python`

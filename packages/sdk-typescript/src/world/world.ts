@@ -20,7 +20,7 @@ export function worldHandoff(run: EnvironmentRun): WorldHandoff | null {
     traceparent: run.traceparent ?? null,
     baggage: run.baggage ?? `hue-world=${id}`,
     now: run.now ?? run.env.HUE_WORLD_NOW ?? null,
-    surfaces: run.surfaces.map((surface) => ({ ...surface })),
+    surfaces: run.surfaces.map((surface) => structuredClone(surface)),
     env: { ...run.env },
     mcpConfig: {
       mcpServers: Object.fromEntries(

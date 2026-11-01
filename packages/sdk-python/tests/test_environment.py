@@ -128,6 +128,39 @@ def test_handoff_copies_the_gateway_fields_and_is_absent_for_legacy_worlds():
     assert world_handoff(legacy) is None
 
 
+def test_handoff_keeps_each_surface_connection_as_stated():
+    connection = {
+        "replaces": "https://gmail.googleapis.com/gmail/v1",
+        "root": {
+            "url": "https://app.hue.test/api/sim/gmail.googleapis.com",
+            "replaces": "https://gmail.googleapis.com",
+        },
+        "auth": [{"header": "Authorization", "scheme": "bearer", "format": "Bearer <world token>"}],
+        "clients": [
+            {
+                "package": "google-api-python-client",
+                "language": "python",
+                "credential": "credentials",
+                "options": [
+                    {
+                        "name": "client_options.api_endpoint",
+                        "value": "https://app.hue.test/api/sim/gmail.googleapis.com/",
+                    }
+                ],
+            }
+        ],
+    }
+    run = gateway_run()
+    run["surfaces"][1]["connection"] = connection
+    world = world_handoff(run)
+    assert world is not None
+    assert world["surfaces"][1]["connection"] == connection
+    world["surfaces"][1]["connection"]["root"]["url"] = "changed"
+    assert run["surfaces"][1]["connection"]["root"]["url"].endswith("/gmail.googleapis.com")
+    # An older Hue states none, and the handoff invents none.
+    assert "connection" not in world["surfaces"][0]
+
+
 def test_handoff_carries_the_worlds_now_and_world_now_reads_it_where_an_agent_reads_the_clock():
     world = world_handoff(gateway_run())
     assert world is not None
