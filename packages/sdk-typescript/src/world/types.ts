@@ -340,6 +340,99 @@ export interface WorldSurface {
   token?: string;
   /** Alias-host URL, or null while unavailable. */
   alias: string | null;
+  /** How a client reaches the surface beyond its URL; absent from a Hue that predates it. */
+  connection?: WorldSurfaceConnection;
+}
+/** How a client reaches one surface. It never carries a credential: `<world token>` stands for
+ * the surface's own `token` where it has one, else the world's. */
+export interface WorldSurfaceConnection {
+  /** The provider's own base `url` stands in for; absent for a host of Hue's own. */
+  replaces?: string;
+  /** `url` less the provider path it ends with: the base a path the provider documents from its
+   * host joins. */
+  root: WorldSurfaceRoot;
+  /** Each accepted placement of the world token, in the order the surface reads them. */
+  auth: WorldSurfaceAuth[];
+  /** Identifiers the surface's calls name, with this world's values. */
+  accountIds?: WorldAccountId[];
+  /** The API versions every call accepts, by the request header that selects one. */
+  versions?: WorldSurfaceVersions;
+  /** Request headers a call needs beyond the credential and the version. */
+  headers?: WorldRequiredHeader[];
+  /** How common clients are configured to reach the surface. */
+  clients?: WorldClientHint[];
+}
+/** The mirror of a provider's origin. */
+export interface WorldSurfaceRoot {
+  /** Mirror URL of the provider's origin. */
+  url: string;
+  /** The provider origin it stands in for; absent for a host of Hue's own. */
+  replaces?: string;
+}
+/** One placement of the world token. */
+export interface WorldSurfaceAuth {
+  /** Request header, such as `Authorization`. */
+  header: string;
+  /** How the header carries the token. */
+  scheme: "bearer" | "basic" | "raw";
+  /** The header's value: `Bearer <world token>`, `Basic base64(<any username>:<world token>)` or
+   * the bare token. */
+  format: string;
+}
+/** An identifier a surface's calls name. */
+export interface WorldAccountId {
+  /** The provider's name for it, such as `realmId`. */
+  name: string;
+  /** This world's value. */
+  value: string;
+  /** Where calls name it. */
+  description: string;
+  /** On a platform route, the provider instance whose binding names it. */
+  providerInstanceKey?: string;
+  /** On a platform route, the app dialect of that binding. */
+  dialect?: string;
+  /** On a platform route, the binding it belongs to: a call names one binding's values together. */
+  binding?: number;
+}
+/** API versions selected by a request header. */
+export interface WorldSurfaceVersions {
+  /** Request header, such as `Notion-Version`. */
+  header: string;
+  /** The values every call is served at; another is refused, or served for a few calls alone. */
+  served: string[];
+  /** Whether a call without the header is refused rather than served at the first version. */
+  required: boolean;
+}
+/** A request header a call needs. */
+export interface WorldRequiredHeader {
+  /** Header name. */
+  name: string;
+  /** Header value. */
+  value: string;
+  /** What it changes, and any alternative. */
+  description?: string;
+}
+/** One client's configuration for a surface, as the client spells its options. */
+export interface WorldClientHint {
+  /** Package name in its registry, such as `stripe` or `@notionhq/client`. */
+  package: string;
+  /** The client's language. */
+  language: "javascript" | "python";
+  /** The option or argument the world token goes in. */
+  credential: string;
+  /** The client's other options. */
+  options: {
+    /** The option as the client spells it; a dotted name sets a nested option. */
+    name: string;
+    /** Its value for this world. */
+    value: string | number | boolean;
+  }[];
+  /** What the options cannot say. */
+  note?: string;
+  /** Why the hint cannot be followed here: the client takes a hostname and no alias host is
+   * served, the world holds no single value of an identifier it names, or the client reaches the
+   * surface over https alone and it is served over http. */
+  unavailable?: "alias_host" | "account_id" | "https_only";
 }
 /** The headers an MCP client sends the mirror. */
 export interface WorldMcpHeaders {

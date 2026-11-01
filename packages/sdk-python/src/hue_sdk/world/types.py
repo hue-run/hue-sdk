@@ -85,12 +85,100 @@ WorldFlag = Literal["no_calls", "fingerprint_differs"]
 WorldEvidenceSection = Literal["all", "start", "end", "diff", "ledger"]
 
 
+class WorldSurfaceAuth(TypedDict):
+    """One placement of the world token: ``Bearer <world token>``, ``Basic
+    base64(<any username>:<world token>)`` or the bare token, in ``header``."""
+
+    header: str
+    scheme: Literal["bearer", "basic", "raw"]
+    format: str
+
+
+class _WorldAccountIdOptional(TypedDict, total=False):
+    providerInstanceKey: str
+    dialect: str
+    binding: int
+
+
+class WorldAccountId(_WorldAccountIdOptional):
+    """An identifier a surface's calls name, with this world's value. On a platform route,
+    ``providerInstanceKey``, ``dialect`` and ``binding`` say which binding it belongs to: a call
+    names one binding's values together."""
+
+    name: str
+    value: str
+    description: str
+
+
+class WorldSurfaceVersions(TypedDict):
+    """The API versions every call accepts, by the request header that selects one."""
+
+    header: str
+    served: list[str]
+    required: bool
+
+
+class _WorldRequiredHeaderOptional(TypedDict, total=False):
+    description: str
+
+
+class WorldRequiredHeader(_WorldRequiredHeaderOptional):
+    name: str
+    value: str
+
+
+class WorldClientOption(TypedDict):
+    name: str
+    value: str | int | float | bool
+
+
+class _WorldClientHintOptional(TypedDict, total=False):
+    note: str
+    unavailable: Literal["alias_host", "account_id", "https_only"]
+
+
+class WorldClientHint(_WorldClientHintOptional):
+    """One client's configuration for a surface, as the client spells its options (a dotted name
+    sets a nested option)."""
+
+    package: str
+    language: Literal["javascript", "python"]
+    credential: str
+    options: list[WorldClientOption]
+
+
+class _WorldSurfaceRootOptional(TypedDict, total=False):
+    replaces: str
+
+
+class WorldSurfaceRoot(_WorldSurfaceRootOptional):
+    url: str
+
+
+class _WorldSurfaceConnectionOptional(TypedDict, total=False):
+    replaces: str
+    accountIds: list[WorldAccountId]
+    versions: WorldSurfaceVersions
+    headers: list[WorldRequiredHeader]
+    clients: list[WorldClientHint]
+
+
+class WorldSurfaceConnection(_WorldSurfaceConnectionOptional):
+    """How a client reaches one surface. It never carries a credential: ``<world token>`` stands
+    for the surface's own ``token`` where it has one, else the world's."""
+
+    root: WorldSurfaceRoot
+    auth: list[WorldSurfaceAuth]
+
+
 class _WorldSurfaceOptional(TypedDict, total=False):
     token: str
+    connection: WorldSurfaceConnection
 
 
 class WorldSurface(_WorldSurfaceOptional):
-    """One pinned provider surface of one provider instance, as a mirror URL."""
+    """One pinned provider surface of one provider instance, as a mirror URL; ``connection`` says
+    how a client reaches it and is absent from a Hue that predates it."""
 
     provider: str
     surface: str
