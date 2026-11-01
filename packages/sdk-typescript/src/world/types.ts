@@ -420,8 +420,13 @@ export interface WorldClientHint {
   language: "javascript" | "python";
   /** The option or argument the world token goes in. */
   credential: string;
-  /** The client's other options; a dotted name sets a nested option. */
-  options: { name: string; value: string | number | boolean }[];
+  /** The client's other options. */
+  options: {
+    /** The option as the client spells it; a dotted name sets a nested option. */
+    name: string;
+    /** Its value for this world. */
+    value: string | number | boolean;
+  }[];
   /** What the options cannot say. */
   note?: string;
   /** Why the hint cannot be followed here: the client takes a hostname and no alias host is
