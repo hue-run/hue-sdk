@@ -10,6 +10,16 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Added
+
+- `WorldSurface.connection` types how a client reaches each surface of a World instance:
+  where the world token goes (`auth`), the provider base the mirror URL stands in for
+  (`replaces`, `root`), the identifiers its calls name with the world's values (`accountIds`),
+  the API versions every call accepts (`versions`), required `headers` and common clients'
+  options (`clients`). It is optional, so a Hue that does not send it is read as before.
+  `worldHandoff` copies each surface whole, so changing a handoff's `connection` leaves the run
+  as the World API answered it.
+
 #### Fixed
 
 - HTTP capture decodes gzip, deflate and br responses before applying the text and size policy,
@@ -2041,6 +2051,15 @@ No registry release is claimed until publication and registry acceptance complet
 - Documented runtime and integration matrix, including dependency-resolution and cross-language content and delivery boundaries; verified release archives and registry bytes.
 
 ## hue-run (Python)
+
+### Unreleased
+
+#### Added
+
+- `WorldSurface` takes an optional `connection` (`WorldSurfaceConnection`): where the world token
+  goes, the provider base the mirror URL stands in for, the identifiers its calls name with the
+  world's values, the API versions every call accepts, required headers and common clients'
+  options. A Hue that does not send it is read as before.
 
 ### [0.14.0] - 2026-10-25
 
