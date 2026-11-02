@@ -3,7 +3,7 @@ name: hue
 description: "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction."
 metadata:
   author: hue-run
-  version: "0.8.24"
+  version: "0.8.25"
 ---
 
 # Hue
@@ -104,10 +104,11 @@ can return a summary while its HTTP children preserve what the app API returned.
 arguments and result unchanged. Do not add a tool marker, endpoint option or raw-response return
 only to make HTTP capture work.
 
-Check the installed version first. Create Hue before API clients on Node 22 and Bun, where the
-fetch fallback cannot observe a fetch reference saved before initialization. Calls in another
-process need tracing in that process. Provider-hosted tools do not make their requests in the
-application process. Hue excludes its export traffic. Direct model-provider HTTP inside a
+Check the installed version first. Node.js HTTP clients and fetch use diagnostics. On Bun,
+create Hue before API clients that save a reference to native fetch. Its wrapper cannot observe
+a reference saved before initialization. Calls in another process need tracing in that process.
+Provider-hosted tools do not make their requests in the application process. Hue excludes its
+export traffic. Direct model-provider HTTP inside a
 recognized model span keeps HTTP identity but suppresses both request and response bodies.
 An ordinary `hue.tool` nested inside that span resumes app HTTP body capture under the normal
 content controls. Inherited model metadata stays available to the nested work.

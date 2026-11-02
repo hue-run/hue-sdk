@@ -41,8 +41,9 @@ content. Set
 `HUE_CAPTURE_HTTP_BODIES=false` to keep HTTP identity without request and response content.
 Both HTTP options default on; disabling content also disables HTTP body capture.
 These environment names belong to this app. The SDK receives explicit options and reads no
-application environment variables. With a published TypeScript SDK that supports HTTP capture,
-create Hue before API clients on Node 22 and Bun so the fetch fallback can observe them. Set
+application environment variables. Node.js HTTP clients and fetch use diagnostics. On Bun,
+create Hue before API clients that save a reference to native fetch. Its wrapper cannot observe
+a reference saved before initialization. Set
 `HUE_BASE_URL` only for a different Hue deployment; omitting it uses
 `https://app.hue.run`. Start with `node --env-file=.env dist/server.js` or provide the
 variables in your process environment and run `node dist/server.js`. Open the

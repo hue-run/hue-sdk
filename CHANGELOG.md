@@ -8,6 +8,31 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Added
+
+- `WorldSurface.connection` types how a client reaches each surface of a World instance:
+  where the world token goes (`auth`), the provider base the mirror URL stands in for
+  (`replaces`, `root`), the identifiers its calls name with the world's values (`accountIds`),
+  the API versions every call accepts (`versions`), required `headers` and common clients'
+  options (`clients`). It is optional, so a Hue that does not send it is read as before.
+  `worldHandoff` copies each surface whole, so changing a handoff's `connection` leaves the run
+  as the World API answered it.
+
+#### Fixed
+
+- HTTP capture decodes gzip, deflate and br responses before applying the text and size policy,
+  so a compressed JSON or text response records `output.value` instead of its size only. The
+  application still receives its usual bytes. Undecodable bytes record a truncation marker.
+
+#### Added
+
+- `hue eval --command` exports `TRACEPARENT` (the execution's trace context) to direct, answer-only
+  cases alongside `HUE_CASE_*` and `HUE_EXECUTION_ID`, and drops an inherited `TRACESTATE`.
+- `hue eval` prints `Run id: <id> (MCP get_run, list_run_items)` and, with the verdicts,
+  `Scoring run id: <id>`, in place of `Experiment: <id>`. `--json` output is unchanged.
+
 ### [0.26.0] - 2026-10-25
 
 #### Breaking
@@ -2026,6 +2051,15 @@ No registry release is claimed until publication and registry acceptance complet
 - Documented runtime and integration matrix, including dependency-resolution and cross-language content and delivery boundaries; verified release archives and registry bytes.
 
 ## hue-run (Python)
+
+### Unreleased
+
+#### Added
+
+- `WorldSurface` takes an optional `connection` (`WorldSurfaceConnection`): where the world token
+  goes, the provider base the mirror URL stands in for, the identifiers its calls name with the
+  world's values, the API versions every call accepts, required headers and common clients'
+  options. A Hue that does not send it is read as before.
 
 ### [0.14.0] - 2026-10-25
 

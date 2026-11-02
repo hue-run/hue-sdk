@@ -1115,7 +1115,9 @@ process.stdout.write(JSON.stringify({ inputs, config, cwd: process.cwd(),
   staleMirror: process.env.HUE_SIM_NOTION_MCP_URL ?? null,
   environmentRunId: process.env.HUE_ENVIRONMENT_RUN_ID ?? null,
   hueKey: process.env.HUE_API_KEY ?? null,
-  mcpKey: process.env.HUE_MCP_KEY ?? null }));
+  mcpKey: process.env.HUE_MCP_KEY ?? null,
+  traceparent: /^00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]$/u.test(process.env.TRACEPARENT ?? ""),
+  tracestate: process.env.TRACESTATE ?? null }));
 `;
 
 async function workerWorkspace() {
@@ -1911,6 +1913,7 @@ describe("hue eval command workers", () => {
               ...inheritedWorld,
               HUE_BASE_URL: standIn.baseUrl,
               WORKER_INVOCATIONS: join(cwd, "calls.txt"),
+              TRACESTATE: "vendor=synthetic",
             },
           });
           expect(result.status).toBe(0);
@@ -1945,6 +1948,8 @@ describe("hue eval command workers", () => {
               staleMirror: null,
               hueKey: null,
               mcpKey: null,
+              traceparent: kind === "direct",
+              tracestate: kind === "direct" ? null : "vendor=synthetic",
               descriptorKeys: [
                 "config",
                 "executionId",
@@ -2100,7 +2105,16 @@ describe("hue eval command workers", () => {
           output: {
             mode: "direct",
             itemKeys: ["externalKey", "id"],
-            keys: ["config", "executionId", "files", "item", "mode", "outputDirectory", "signal"],
+            keys: [
+              "config",
+              "executionId",
+              "files",
+              "item",
+              "mode",
+              "outputDirectory",
+              "signal",
+              "trace",
+            ],
           },
         });
         expect(standIn.worlds.size).toBe(0);

@@ -69,7 +69,9 @@ HTTPS is required except for loopback HTTP or the explicit
 [`allowInsecureHttp`](#local-development-without-a-hue-account) opt-in. Redirects are refused for both
 project checks and exports.
 
-The setup CLI shipped in TypeScript `0.4.0` also prepares the `hue` executable. The unreleased
+The setup CLI shipped in TypeScript `0.4.0` also prepares the `hue` executable; without the
+install, invoke it as `npx -y @hue-run/sdk@<version> <command>` (the npm package named `hue` is
+unrelated). The unreleased
 `npx --yes @hue-run/sdk@latest setup --agent` path supports Express with npm, Express with Bun, and
 Flask with uv in one application package with an unambiguous entrypoint and existing GET route. It
 installs the runtime, wires the application, makes one request and verifies that request's exact
@@ -893,7 +895,8 @@ Each body is bounded by the receiver's value cap, 1 MiB by default. A body over 
 Hue's existing truncation marker instead of a partial JSON value. The span's `hue.truncated`
 array names the affected `input.value` or `output.value`; a cut body is incomplete evidence,
 and trace reconstruction can refuse it. Observed byte counts use `http.request.body.size` and
-`http.response.body.size`. Binary and compressed bodies keep size only. Hue does not add
+`http.response.body.size`. A gzip, deflate or br response is decoded for capture; the cap applies
+to the decoded body. Binary bodies and other encodings keep size only. Hue does not add
 `traceparent` or change application request headers.
 
 Borrowed providers keep their attribute value and count policies. Captured content that a

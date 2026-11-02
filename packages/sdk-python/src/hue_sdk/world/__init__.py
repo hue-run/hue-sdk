@@ -46,6 +46,7 @@ from .types import (
     SealedRun,
     Step,
     StepPage,
+    WorldClientHint,
     WorldEvidenceSection,
     WorldFlag,
     WorldHandoff,
@@ -53,6 +54,7 @@ from .types import (
     WorldMcpConfig,
     WorldMcpServer,
     WorldSurface,
+    WorldSurfaceConnection,
 )
 from .types import (
     EnvironmentCoverage as WorldCoverage,
@@ -115,6 +117,7 @@ __all__ = [
     "SealedRun",
     "Step",
     "StepPage",
+    "WorldClientHint",
     "WorldEvidenceSection",
     "WorldFlag",
     "WorldHandoff",
@@ -122,6 +125,7 @@ __all__ = [
     "WorldMcpConfig",
     "WorldMcpServer",
     "WorldSurface",
+    "WorldSurfaceConnection",
     "agent_environment",
     "is_hue_control_plane_credential",
     "legacy_mcp_capability",

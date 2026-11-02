@@ -245,6 +245,34 @@ describe("world handoff helpers", () => {
     );
   });
 
+  test("a surface's connection reaches the handoff as the World API states it", () => {
+    const connection = {
+      replaces: "https://gmail.googleapis.com/gmail/v1",
+      root: { url: rest.replace(/\/gmail\/v1$/, ""), replaces: "https://gmail.googleapis.com" },
+      auth: [
+        { header: "Authorization", scheme: "bearer" as const, format: "Bearer <world token>" },
+      ],
+      clients: [
+        {
+          package: "google-api-python-client",
+          language: "python" as const,
+          credential: "credentials",
+          options: [{ name: "client_options.api_endpoint", value: rest.replace(/gmail\/v1$/, "") }],
+        },
+      ],
+    };
+    const run = gatewayRun();
+    run.surfaces![1] = { ...run.surfaces![1]!, connection };
+    const world = worldHandoff(run)!;
+    expect(world.surfaces[1]!.connection).toEqual(connection);
+    // The handoff is a copy: changing it leaves the run as the World API answered it.
+    const answered = connection.root.url;
+    world.surfaces[1]!.connection!.root.url = "changed";
+    expect(run.surfaces![1]!.connection!.root.url).toBe(answered);
+    // An older Hue states none, and the handoff invents none.
+    expect(worldHandoff(gatewayRun())!.surfaces[0]).not.toHaveProperty("connection");
+  });
+
   test("the agent environment drops Hue control-plane credentials unless opted in", () => {
     const world = worldHandoff(gatewayRun())!;
     const parent = {

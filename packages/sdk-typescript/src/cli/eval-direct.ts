@@ -34,6 +34,7 @@ export const directCaseEnvironment = [
   "HUE_CASE_ID",
   "HUE_CASE_KEY",
   "HUE_EXECUTION_ID",
+  "TRACEPARENT",
 ] as const;
 
 /** Generated-file extensions Hue accepts and the content type recorded for each. */

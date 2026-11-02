@@ -1020,7 +1020,7 @@ describe("hue eval", () => {
         expect(experiment!.finishedAt).toBeTruthy();
         const lines = result.stdout.split("\n");
         expect(lines[0]).toBe(`Run: ${f.baseUrl}/runs/${experiment!.id}`);
-        expect(lines[1]).toBe(`Experiment: ${experiment!.id}`);
+        expect(lines[1]).toBe(`Run id: ${experiment!.id} (MCP get_run, list_run_items)`);
         expect(lines.slice(2, 6)).toEqual([
           "[refund] world created",
           "[refund] agent started",
@@ -1030,9 +1030,11 @@ describe("hue eval", () => {
         expect(result.stdout).toContain("Case    refund_recorded  tone    Result");
         expect(result.stdout).toContain("refund  PASS             polite  PASSED");
         expect(result.stdout).toContain("1 of 1 case passed");
-        expect(result.stdout.trim().split("\n").at(-1)).toBe(
+        expect(result.stdout.trim().split("\n").slice(-3)).toEqual([
           `Run: ${f.baseUrl}/runs/${experiment!.id}`,
-        );
+          `Run id: ${experiment!.id} (MCP get_run, list_run_items)`,
+          expect.stringMatching(/^Scoring run id: \S+$/u),
+        ]);
         expect([...f.worlds.values()].map((world) => [world.status, world.steps])).toEqual([
           ["completed", [{ action: "save", args: { note: "refund charge ch_2" } }]],
         ]);
@@ -2594,7 +2596,7 @@ describe("hue eval", () => {
       try {
         const first = await hue(common, { cwd });
         expect(first.status).toBe(0);
-        const firstId = /^Experiment: (.+)$/m.exec(first.stdout)?.[1];
+        const firstId = /^Run id: (\S+)/m.exec(first.stdout)?.[1];
         expect(firstId).toBeTruthy();
         f.state.verdict = "fail";
         const second = await hue([...common, "--baseline", `${f.baseUrl}/runs/${firstId}`], {
@@ -2605,7 +2607,7 @@ describe("hue eval", () => {
           `Baseline ${firstId}: 0 improved, 1 regressed, 0 unchanged`,
         );
         expect(second.stdout).toContain("  refund: passed -> failed (regressed)");
-        const secondId = /^Experiment: (.+)$/m.exec(second.stdout)?.[1];
+        const secondId = /^Run id: (\S+)/m.exec(second.stdout)?.[1];
         f.state.verdict = "pass";
         const third = await hue([...common, "--baseline", secondId!, "--json"], { cwd });
         expect(third.status).toBe(0);
