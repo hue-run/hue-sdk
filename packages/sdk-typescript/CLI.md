@@ -335,7 +335,10 @@ A World is filled from your files, from a description, or both:
   in the export is sent as its `name`: its path under `<dir>`, or with several apps under
   `<dir>/<app>/` (`channels/general/2026-01-05.json`). An empty file or a symbolic link is
   skipped with a note: a link is never followed, so a planted one cannot read a file outside the
-  directory into the upload. A file larger than 25 MiB is refused before anything is created.
+  directory into the upload. That holds for a link anywhere in a file's path, including a
+  directory swapped for a link while the command runs, and for `<dir>` itself, which must not be
+  a link. A file larger than 25 MiB is refused before anything is created. `--files` runs on
+  Linux and macOS.
 - `--describe "<text>"` asks Hue to generate the apps' data from the description.
   `--dry-run` prints the outline and estimate Hue answers and creates nothing.
 - `--export-from <list>` reads the named apps on your machine with your own access and uploads
