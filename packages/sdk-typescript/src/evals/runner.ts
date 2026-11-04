@@ -152,8 +152,6 @@ interface RunnerOptions {
    * (for example a Hue-operated grading worker that owns the evaluator source) instead of
    * refusing the run. Their IDs are reported in `deferredScorerVersionIds`. */
   deferUnboundLocalScorers?: boolean;
-  /** Let Hue execute its built-in verifiers; local code bindings still execute here. */
-  deferBuiltinScorers?: boolean;
   /** Positive safe integer of cases in flight at once. Default 20. */
   concurrency?: number;
   /** Deadline for JSON Schema scoring in its worker, 100–60000 ms. Default 2000. */

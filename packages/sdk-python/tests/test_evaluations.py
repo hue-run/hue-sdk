@@ -968,6 +968,7 @@ def test_output_over_the_case_bounds_fails_that_case_and_the_run_goes_on(
         return output if context.item["id"] == evaluation_receiver.case_id else "fits"
 
     arguments = options(evaluation_receiver, tmp_path, target, persist=persist)
+    arguments["concurrency"] = 1
     try:
         report = run_experiment(**arguments)
         body = evaluation_receiver.complete_body
@@ -1995,6 +1996,7 @@ def test_evaluator_only_files_are_not_on_disk_while_any_target_runs(evaluation_r
         return "ok"
 
     arguments = options(receiver, tmp_path, target)
+    arguments["concurrency"] = 1
     arguments["scorers"] = [local]
     try:
         run_experiment(**arguments)

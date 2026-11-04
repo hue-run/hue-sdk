@@ -403,7 +403,6 @@ def run_experiment(
     concurrency: int = 20,
     schema_timeout_millis: int = 2000,
     files_directory: str | Path | None = None,
-    defer_builtin_scorers: bool = False,
 ) -> RunnerReport:
     """Run trusted sync/async targets locally; never automatically repeat uncertain work.
 
@@ -447,9 +446,6 @@ def run_experiment(
     local = scorers or []
     validate_bindings(versions, local)
     deferred = _deferred(versions)
-    if defer_builtin_scorers:
-        deferred += [v["id"] for v in versions if v["definition"]["kind"] == "builtin"]
-        versions = [v for v in versions if v["definition"]["kind"] != "builtin"]
     items = _pages(lambda after: client.list_experiment_items(experiment_id, after=after))
     if len(items) != experiment["caseCount"]:
         raise ValueError("Frozen experiment case count differs from its API items.")
@@ -756,7 +752,6 @@ def rescore(
     concurrency: int = 20,
     schema_timeout_millis: int = 2000,
     files_directory: str | Path | None = None,
-    defer_builtin_scorers: bool = False,
 ) -> RunnerReport:
     """Score existing immutable subjects. This entry point has no target callback.
 
@@ -769,9 +764,6 @@ def rescore(
     versions, local = run["scorerVersions"], scorers or []
     validate_bindings(versions, local)
     deferred = _deferred(versions)
-    if defer_builtin_scorers:
-        deferred += [v["id"] for v in versions if v["definition"]["kind"] == "builtin"]
-        versions = [v for v in versions if v["definition"]["kind"] != "builtin"]
     items = _pages(lambda after: client.list_evaluation_items(run_id, after=after))
     if len(items) != run["itemCount"]:
         raise ValueError("Evaluation run item count differs from its API items.")

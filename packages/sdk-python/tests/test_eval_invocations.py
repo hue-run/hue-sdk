@@ -77,6 +77,13 @@ def test_invocation_wire_retry_and_results_only_recovery(receiver, invocation):
     reply(receiver, invocation)
     assert client.get_eval_invocation(invocation["runId"])["receipt"] is None
     assert receiver.requests[-1][0] == f"/api/v1/eval-invocations/{invocation['runId']}"
+    reply(receiver, invocation)
+    ci = {"provider": "local", "commitSha": "base-revision"}
+    assert (
+        client.create_eval_baseline(invocation["id"], idempotency_key="base", ci=ci) == invocation
+    )
+    assert receiver.requests[-1][0] == f"/api/v1/eval-invocations/{invocation['id']}/baseline"
+    assert json.loads(receiver.requests[-1][2]) == {"idempotencyKey": "base", "ci": ci}
 
 
 @pytest.mark.parametrize("verdict", ["pass", "fail", "incomplete", "error", "cancelled"])
@@ -117,3 +124,20 @@ def test_invocation_boundary_rejects_bad_selection_and_untrusted_verdict(receive
     reply(receiver, invocation)
     with pytest.raises(HueApiError):
         client.get_eval_invocation(invocation["id"])
+
+
+def test_invocation_receipt_cannot_refer_to_another_manifest(receiver, invocation):
+    invocation["receipt"] = {
+        "id": str(uuid4()),
+        "manifestDigest": "different",
+        "runId": invocation["runId"],
+        "scoringRunId": invocation["manifest"]["scoringRunId"],
+        "verdict": "pass",
+        "finalizedAt": "2026-11-04T00:00:00Z",
+        "executionIds": [],
+        "results": [],
+        "reasons": [],
+    }
+    reply(receiver, invocation)
+    with pytest.raises(HueApiError):
+        EvaluationClient(receiver.url, "synthetic-key").get_eval_invocation(invocation["id"])

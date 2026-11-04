@@ -43,7 +43,7 @@ def _positive(value: Any) -> int:
 
 
 def policy(value: Any) -> dict[str, Any]:
-    obj = _object(value, {"thresholds"})
+    obj = _object(value, {"thresholds", "baselineComparisons"})
     thresholds = obj.get("thresholds", [])
     if not isinstance(thresholds, list):
         raise ValueError("Expected thresholds.")
@@ -53,7 +53,21 @@ def policy(value: Any) -> dict[str, Any]:
         _text(item["metric"])
         if item["operator"] not in ("gte", "lte") or type(item["value"]) not in (int, float):
             raise ValueError("Invalid threshold.")
-    return {"thresholds": thresholds}
+    if "baselineComparisons" in obj:
+        comparisons = obj["baselineComparisons"]
+        if not isinstance(comparisons, list):
+            raise ValueError("Expected baseline comparisons.")
+        for comparison in comparisons:
+            item = _object(comparison, {"evaluatorVersionId", "metric", "operator", "tolerance"})
+            uuid(item["evaluatorVersionId"])
+            _text(item["metric"])
+            if (
+                item["operator"] not in ("gte", "lte")
+                or type(item["tolerance"]) not in (int, float)
+                or not item["tolerance"] >= 0
+            ):
+                raise ValueError("Invalid baseline comparison.")
+    return {**obj, "thresholds": thresholds}
 
 
 def ci_context(value: Any) -> dict[str, Any]:
@@ -149,6 +163,35 @@ def response(value: Any) -> dict[str, Any]:
         for key in ("id", "runId", "scoringRunId"):
             uuid(receipt[key])
         _text(receipt["manifestDigest"])
+        if (
+            receipt["runId"] != obj["runId"]
+            or receipt["scoringRunId"] != manifest["scoringRunId"]
+            or receipt["manifestDigest"] != manifest["digest"]
+        ):
+            raise ValueError("Gate receipt does not belong to this invocation manifest.")
+        for key in {"baselineRunId", "baselineReceiptId"} & receipt.keys():
+            uuid(receipt[key])
+        if "comparisons" in receipt:
+            if not isinstance(receipt["comparisons"], list):
+                raise ValueError("Expected baseline comparisons.")
+            for comparison in receipt["comparisons"]:
+                policy(
+                    {
+                        "baselineComparisons": [
+                            {
+                                key: comparison[key]
+                                for key in ("evaluatorVersionId", "metric", "operator", "tolerance")
+                            }
+                        ]
+                    }
+                )
+                _ids(comparison["caseIds"])
+                if (
+                    type(comparison["candidateMean"]) not in (int, float)
+                    or type(comparison["baselineMean"]) not in (int, float)
+                    or type(comparison["passed"]) is not bool
+                ):
+                    raise ValueError("Invalid baseline comparison result.")
         _timestamp(receipt["finalizedAt"])
         _ids(receipt["executionIds"])
         if receipt["verdict"] not in ("pass", "fail", "incomplete", "error", "cancelled"):

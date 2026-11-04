@@ -353,6 +353,25 @@ class EvaluationClient:
             self._request("GET", f"/eval-invocations?idempotencyKey={quote(key, safe='')}")
         )
 
+    def create_eval_baseline(
+        self,
+        invocation_id: str,
+        *,
+        idempotency_key: str,
+        ci: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Clone the candidate's frozen inputs for its intended base commit, without latest lookup."""
+        context = _invocations.ci_context(ci)
+        if not context.get("commitSha"):
+            raise ValueError("Baseline CI context requires commitSha.")
+        return self._invocation_response(
+            self._request(
+                "POST",
+                f"/eval-invocations/{uuid(invocation_id)}/baseline",
+                {**_invocations.operation(idempotency_key), "ci": context},
+            )
+        )
+
     def finalize_eval_invocation(
         self,
         invocation_id: str,

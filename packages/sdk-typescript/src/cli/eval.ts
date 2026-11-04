@@ -917,26 +917,26 @@ const executeCiRun: ExecuteCiRun = async ({
       projectDirectory,
     }),
   );
-  const scorers = [];
-  for (const path of config.localScorers) {
-    const module: unknown = await import(pathToFileURL(resolve(projectDirectory, path)).href);
-    if (!module || typeof module !== "object" || !("default" in module))
-      throw new TypeError(
-        "A localScorers module must export its existing LocalScorer binding as default",
-      );
-    const candidate = module.default;
-    if (
-      !candidate ||
-      typeof candidate !== "object" ||
-      !("score" in candidate) ||
-      typeof candidate.score !== "function" ||
-      !("definition" in candidate)
-    )
-      throw new TypeError("Invalid LocalScorer binding");
-    // validateScorerBindings compares the complete definition to the server's frozen pin.
-    scorers.push(candidate as import("../evals/types.js").LocalScorer);
-  }
   try {
+    const scorers = [];
+    for (const path of config.localScorers) {
+      const module: unknown = await import(pathToFileURL(resolve(projectDirectory, path)).href);
+      if (!module || typeof module !== "object" || !("default" in module))
+        throw new TypeError(
+          "A localScorers module must export its existing LocalScorer binding as default",
+        );
+      const candidate = module.default;
+      if (
+        !candidate ||
+        typeof candidate !== "object" ||
+        !("score" in candidate) ||
+        typeof candidate.score !== "function" ||
+        !("definition" in candidate)
+      )
+        throw new TypeError("Invalid LocalScorer binding");
+      // validateScorerBindings compares the complete definition to the server's frozen pin.
+      scorers.push(candidate as import("../evals/types.js").LocalScorer);
+    }
     const report = await runExperiment({
       client,
       hue,
@@ -948,7 +948,6 @@ const executeCiRun: ExecuteCiRun = async ({
       concurrency: config.concurrency,
       signal,
       scorers,
-      deferBuiltinScorers: true,
       environmentEvidence: "when_pinned",
       async target(inputs, context) {
         signal.throwIfAborted();

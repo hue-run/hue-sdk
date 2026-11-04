@@ -61,6 +61,12 @@ describe("eval invocation client", () => {
       expect(await client.getEvalInvocation(saved.runId)).toEqual(saved);
       expect(calls.at(-1)?.method).toBe("GET");
       expect(calls.at(-1)?.body).toBe("");
+      const ci = { provider: "local", commitSha: "base-revision" } as const;
+      expect(await client.createEvalBaseline(saved.id, { idempotencyKey: "base", ci })).toEqual(
+        saved,
+      );
+      expect(calls.at(-1)?.path).toBe(`/api/v1/eval-invocations/${saved.id}/baseline`);
+      expect(JSON.parse(calls.at(-1)!.body)).toEqual({ idempotencyKey: "base", ci });
     } finally {
       server.stop(true);
     }
@@ -131,6 +137,35 @@ describe("eval invocation client", () => {
       ).rejects.toThrow();
       expect(calls).toBe(0);
       await expect(client.getEvalInvocation(randomUUID())).rejects.toBeInstanceOf(HueApiError);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("rejects a gate receipt for a different frozen manifest", async () => {
+    const saved = invocation();
+    saved.receipt = {
+      id: randomUUID(),
+      manifestDigest: "different",
+      runId: saved.runId,
+      scoringRunId: saved.manifest.scoringRunId,
+      verdict: "pass",
+      finalizedAt: "2026-11-04T00:00:00Z",
+      executionIds: [],
+      results: [],
+      reasons: [],
+    };
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => Response.json({ invocation: saved }),
+    });
+    try {
+      const client = createEvaluationClient({
+        apiKey: "synthetic-key",
+        baseUrl: server.url.origin,
+      });
+      await expect(client.getEvalInvocation(saved.id)).rejects.toBeInstanceOf(HueApiError);
     } finally {
       server.stop(true);
     }

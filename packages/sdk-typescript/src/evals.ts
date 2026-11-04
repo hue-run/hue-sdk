@@ -13,6 +13,7 @@ export type {
   EvalCiContext,
   FinalizeEvalInvocationInput,
   CancelEvalInvocationInput,
+  CreateEvalBaselineInput,
 } from "./evals/invocations.js";
 export { MediaFetchError, rehydrateMedia } from "./evals/media.js";
 export type {

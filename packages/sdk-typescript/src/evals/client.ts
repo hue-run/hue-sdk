@@ -7,10 +7,12 @@ import {
   evalInvocationEnvelope,
   finalizeEvalInvocationInput,
   cancelEvalInvocationInput,
+  createEvalBaselineInput,
   type CreateEvalInvocationInput,
   type EvalInvocation,
   type FinalizeEvalInvocationInput,
   type CancelEvalInvocationInput,
+  type CreateEvalBaselineInput,
 } from "./invocations.js";
 import {
   attemptBindingRead,
@@ -804,6 +806,22 @@ export class EvaluationClient {
         "GET",
         `/eval-invocations?idempotencyKey=${encodeURIComponent(key)}`,
         undefined,
+        REQUEST_BOUNDS,
+        signal,
+      ),
+    );
+  }
+  /** Creates or recovers a baseline from the candidate's frozen inputs, never resolving latest. */
+  async createEvalBaseline(
+    id: string,
+    input: CreateEvalBaselineInput,
+    signal?: AbortSignal,
+  ): Promise<EvalInvocation> {
+    return this.invocationResponse(
+      await this.request(
+        "POST",
+        `/eval-invocations/${uuid(id)}/baseline`,
+        createEvalBaselineInput.parse(input),
         REQUEST_BOUNDS,
         signal,
       ),

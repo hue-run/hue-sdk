@@ -60,6 +60,7 @@ function hueStandIn(
     ciVerdict?: "pass" | "fail" | "incomplete";
     ciCreateFailures?: number;
     ciNoReceipt?: boolean;
+    ciBuiltin?: boolean;
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
@@ -98,14 +99,20 @@ function hueStandIn(
   const scorerVersion = {
     id: randomUUID(),
     contentDigest: digest,
-    definition: {
-      kind: "world_outcome",
-      entry: "hue.conversion_outcome.v1",
-      metrics: [
-        { name: "refund_recorded", type: "boolean" },
-        { name: "tone", type: "text" },
-      ],
-    },
+    definition: options.ciBuiltin
+      ? {
+          kind: "builtin",
+          entry: "hue.exact_match.v1",
+          config: {},
+        }
+      : {
+          kind: "world_outcome",
+          entry: "hue.conversion_outcome.v1",
+          metrics: [
+            { name: "refund_recorded", type: "boolean" },
+            { name: "tone", type: "text" },
+          ],
+        },
   };
   const scenario = {
     id: randomUUID(),
@@ -188,7 +195,9 @@ function hueStandIn(
     return experiment;
   }
   let invocation: EvalInvocation | undefined;
+  let baseline: EvalInvocation | undefined;
   const creationRequests: unknown[] = [];
+  const baselineRequests: unknown[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -224,7 +233,7 @@ function hueStandIn(
               evalSetVersionId: version.id,
               scoringRunId: experiment.evaluation.id,
               config: body.config ?? {},
-              policy: { thresholds: [] },
+              policy: body.policy ?? { thresholds: [] },
               cases: [
                 {
                   caseId: frozenCase.id,
@@ -238,7 +247,7 @@ function hueStandIn(
                   id: scorerVersion.id,
                   evaluatorId: scorerId,
                   version: 1,
-                  kind: "llm_judge",
+                  kind: scorerVersion.definition.kind,
                   contentDigest: digest,
                 },
               ],
@@ -251,23 +260,49 @@ function hueStandIn(
         return Response.json({ invocation });
       }
       if (path.startsWith("/eval-invocations/") && invocation) {
-        if (request.method === "POST") {
-          invocation.state = path.endsWith("/cancel") ? "cancelled" : "finalized";
-          if (!options.ciNoReceipt)
-            invocation.receipt = {
+        if (path.endsWith("/baseline")) {
+          baselineRequests.push(await request.json());
+          if (!baseline) {
+            const experiment = createExperiment({
+              name: "Base",
+              datasetVersionId: version.id,
+              scorerVersionIds: [scorerVersion.id],
+              config: invocation.manifest.config,
+            });
+            baseline = {
+              ...structuredClone(invocation),
               id: randomUUID(),
-              manifestDigest: digest,
-              runId: invocation.runId,
-              scoringRunId: invocation.manifest.scoringRunId,
-              verdict:
-                invocation.state === "cancelled" ? "cancelled" : (options.ciVerdict ?? "pass"),
+              runId: experiment.id,
+              runUrl: `${url.origin}/runs/${experiment.id}`,
+              manifest: {
+                ...structuredClone(invocation.manifest),
+                digest: "e".repeat(64),
+                scoringRunId: experiment.evaluation.id,
+              },
+            };
+          }
+          return Response.json({ invocation: baseline });
+        }
+        const selected =
+          baseline && (path.includes(baseline.id) || path.includes(baseline.runId))
+            ? baseline
+            : invocation;
+        if (request.method === "POST") {
+          selected.state = path.endsWith("/cancel") ? "cancelled" : "finalized";
+          if (!options.ciNoReceipt)
+            selected.receipt = {
+              id: randomUUID(),
+              manifestDigest: selected.manifest.digest,
+              runId: selected.runId,
+              scoringRunId: selected.manifest.scoringRunId,
+              verdict: selected.state === "cancelled" ? "cancelled" : (options.ciVerdict ?? "pass"),
               finalizedAt: new Date().toISOString(),
               executionIds: [],
               results: [],
               reasons: [],
             };
         }
-        return Response.json({ invocation });
+        return Response.json({ invocation: selected });
       }
       if (path === "/projects/current")
         return Response.json({
@@ -618,7 +653,7 @@ function hueStandIn(
         const verdict = state.verdict;
         const failed =
           verdict === "fail" || (!options.ignoreExecutionState && body.state !== "succeeded");
-        if (verdict !== "none")
+        if (verdict !== "none" && !options.ciBuiltin)
           results.get(experiment.evaluation.id)!.push({
             id: randomUUID(),
             runId: experiment.evaluation.id,
@@ -653,7 +688,16 @@ function hueStandIn(
       if (runMatch) {
         if (runMatch[2] === "items")
           return Response.json({ items: runItems.get(runMatch[1]!) ?? [], nextCursor: null });
-        if (request.method === "POST") return Response.json({ ids: [randomUUID()] });
+        if (request.method === "POST") {
+          const uploaded = body.results as StoredResult[];
+          const saved = uploaded.map((result) => ({
+            ...result,
+            id: randomUUID(),
+            runId: runMatch[1]!,
+          }));
+          results.get(runMatch[1]!)!.push(...saved);
+          return Response.json({ ids: saved.map((result) => result.id) });
+        }
         const polls = (resultPolls.get(runMatch[1]!) ?? 0) + 1;
         resultPolls.set(runMatch[1]!, polls);
         if (polls <= state.deferredPolls) return Response.json({ items: [], nextCursor: null });
@@ -694,6 +738,8 @@ function hueStandIn(
     experiments,
     worlds,
     creationRequests,
+    baselineRequests,
+    results,
     enqueueRun() {
       const experiment = createExperiment({
         name: "Launched from Hue",
@@ -2790,6 +2836,124 @@ describe("hue eval", () => {
 });
 
 describe("CI invocation CLI", () => {
+  test("CI scores builtins locally before finalizing the authoritative receipt", async () => {
+    const fixture = hueStandIn({ answerOnlyScenario: true, ciBuiltin: true });
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-builtin-"));
+    try {
+      await writeFile(
+        join(directory, "hue.eval.json"),
+        JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: "printf saved",
+          scoringTimeoutSeconds: 2,
+        }),
+      );
+      const result = await hue(["--ci", "--json"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+      const scores = [...fixture.results.values()].flat();
+      expect(scores).toHaveLength(1);
+      expect(scores[0]).toMatchObject({
+        state: "scored",
+        metrics: [{ name: "match", value: true, passed: true }],
+      });
+      const uploaded = fixture.calls.requests.findIndex(
+        (request) => request.startsWith("POST /evaluation-runs/") && request.endsWith("/results"),
+      );
+      expect(uploaded).toBeGreaterThan(0);
+      expect(
+        fixture.calls.requests.findIndex((request) => request.endsWith("/finalize")),
+      ).toBeGreaterThan(uploaded);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        verdict: "pass",
+        category: "pass",
+        exitCode: 0,
+      });
+    } finally {
+      fixture.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("CI executes a prepared base through its frozen clone and finalizes it before the candidate", async () => {
+    const fixture = hueStandIn({ answerOnlyScenario: true });
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-base-"));
+    const base = join(directory, "base");
+    try {
+      spawnSync("git", ["init", "--quiet", base]);
+      spawnSync(
+        "git",
+        [
+          "-C",
+          base,
+          "-c",
+          "user.name=Synthetic",
+          "-c",
+          "user.email=synthetic@example.com",
+          "commit",
+          "--allow-empty",
+          "-m",
+          "Synthetic",
+        ],
+        { stdio: "ignore" },
+      );
+      const sha = spawnSync("git", ["-C", base, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).stdout.trim();
+      await writeFile(join(base, "agent.mjs"), "console.log('base');");
+      await writeFile(join(directory, "agent.mjs"), "console.log('candidate');");
+      await writeFile(
+        join(directory, "hue.eval.json"),
+        JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: 'node "$HUE_PROJECT_DIR/agent.mjs"',
+          baselineCommand: 'node "$HUE_PROJECT_DIR/agent.mjs"',
+          baselineDirectory: "base",
+          baselineRunId: randomUUID(),
+          policy: {
+            baselineComparisons: [
+              {
+                evaluatorVersionId: fixture.scorerVersion.id,
+                metric: "refund_recorded",
+                operator: "gte",
+                tolerance: 0,
+              },
+            ],
+          },
+        }),
+      );
+      const result = await hue(["--ci", "--json"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+      expect(fixture.baselineRequests).toEqual([
+        expect.objectContaining({ ci: { provider: "local", commitSha: sha, baseSha: sha } }),
+      ]);
+      expect(fixture.calls.completions.map((completion) => completion.output)).toEqual([
+        "base",
+        "candidate",
+      ]);
+      const finalizations = fixture.calls.requests.filter((request) =>
+        request.endsWith("/finalize"),
+      );
+      expect(finalizations).toHaveLength(2);
+      const report = JSON.parse(result.stdout);
+      expect(finalizations.at(-1)).toBe(`POST /eval-invocations/${report.invocationId}/finalize`);
+      const repeat = await hue(["--ci", "--json"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect(JSON.parse(repeat.stdout).receipt).toEqual(report.receipt);
+      expect(fixture.calls.completions).toHaveLength(2);
+    } finally {
+      fixture.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("CI runs a command in a fresh home without the control key, uses the receipt, and status executes nothing", async () => {
     const fixture = hueStandIn({ answerOnlyScenario: true, ciVerdict: "fail" });
     const directory = await mkdtemp(join(tmpdir(), "hue-ci-"));
@@ -2898,75 +3062,84 @@ describe("CI invocation CLI", () => {
     }
   }, 30_000);
 
-  test("CI recovers on a fresh GitHub checkout using native HEAD and separate PR metadata", async () => {
-    const fixture = hueStandIn({ answerOnlyScenario: true });
-    const first = await mkdtemp(join(tmpdir(), "hue-ci-github-"));
-    const second = await mkdtemp(join(tmpdir(), "hue-ci-github-recovered-"));
-    try {
-      spawnSync("git", ["init", "--quiet", first]);
-      spawnSync(
-        "git",
-        [
-          "-C",
-          first,
-          "-c",
-          "user.name=Synthetic",
-          "-c",
-          "user.email=synthetic@example.com",
-          "commit",
-          "--allow-empty",
-          "-m",
-          "Synthetic",
-        ],
-        { stdio: "ignore" },
-      );
-      spawnSync("git", ["clone", "--quiet", first, second]);
-      const head = spawnSync("git", ["-C", first, "rev-parse", "HEAD"], {
-        encoding: "utf8",
-      }).stdout.trim();
-      const env = {
-        HUE_BASE_URL: fixture.baseUrl,
-        GITHUB_ACTIONS: "true",
-        GITHUB_REPOSITORY: "synthetic/project",
-        GITHUB_RUN_ID: "123",
-        GITHUB_RUN_ATTEMPT: "1",
-        GITHUB_EVENT_NAME: "pull_request",
-        GITHUB_EVENT_PATH: join(first, "event.json"),
-      };
-      await writeFile(
-        env.GITHUB_EVENT_PATH,
-        JSON.stringify({
-          pull_request: { number: 7, head: { sha: "pr-head" }, base: { sha: "pr-base" } },
-        }),
-      );
-      const config = JSON.stringify({
-        evalSetVersionId: fixture.version.id,
-        command: "printf saved",
-      });
-      await writeFile(join(first, "hue.eval.json"), config);
-      await writeFile(join(second, "hue.eval.json"), config);
-      const candidate = await hue(["--ci", "--json"], { cwd: first, env });
-      const recovery = await hue(["--ci", "--json"], { cwd: second, env });
-      expect(candidate.status).toBe(0);
-      expect(recovery.status).toBe(0);
-      expect(fixture.creationRequests).toHaveLength(1);
-      expect(fixture.creationRequests[0]).toMatchObject({
-        ci: {
-          provider: "github",
-          commitSha: head,
-          baseSha: "pr-base",
-          pullRequestHeadSha: "pr-head",
-          pullRequestNumber: 7,
-        },
-      });
-      expect(fixture.calls.starts).toHaveLength(1);
-      expect(JSON.parse(recovery.stdout).receipt).toEqual(JSON.parse(candidate.stdout).receipt);
-    } finally {
-      fixture.stop();
-      await rm(first, { recursive: true, force: true });
-      await rm(second, { recursive: true, force: true });
-    }
-  }, 30_000);
+  test.each(["pull_request", "merge_group"])(
+    "CI recovers on a fresh GitHub %s checkout using native metadata",
+    async (eventName) => {
+      const fixture = hueStandIn({ answerOnlyScenario: true });
+      const first = await mkdtemp(join(tmpdir(), "hue-ci-github-"));
+      const second = await mkdtemp(join(tmpdir(), "hue-ci-github-recovered-"));
+      try {
+        spawnSync("git", ["init", "--quiet", first]);
+        spawnSync(
+          "git",
+          [
+            "-C",
+            first,
+            "-c",
+            "user.name=Synthetic",
+            "-c",
+            "user.email=synthetic@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Synthetic",
+          ],
+          { stdio: "ignore" },
+        );
+        spawnSync("git", ["clone", "--quiet", first, second]);
+        const head = spawnSync("git", ["-C", first, "rev-parse", "HEAD"], {
+          encoding: "utf8",
+        }).stdout.trim();
+        const env = {
+          HUE_BASE_URL: fixture.baseUrl,
+          GITHUB_ACTIONS: "true",
+          GITHUB_REPOSITORY: "synthetic/project",
+          GITHUB_RUN_ID: "123",
+          ...(eventName === "pull_request" ? { GITHUB_RUN_ATTEMPT: "1" } : {}),
+          GITHUB_EVENT_NAME: eventName,
+          GITHUB_EVENT_PATH: join(first, "event.json"),
+        };
+        await writeFile(
+          env.GITHUB_EVENT_PATH,
+          JSON.stringify(
+            eventName === "pull_request"
+              ? {
+                  pull_request: { number: 7, head: { sha: "pr-head" }, base: { sha: "pr-base" } },
+                }
+              : { merge_group: { base_sha: "pr-base" } },
+          ),
+        );
+        const config = JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: "printf saved",
+        });
+        await writeFile(join(first, "hue.eval.json"), config);
+        await writeFile(join(second, "hue.eval.json"), config);
+        const candidate = await hue(["--ci", "--json"], { cwd: first, env });
+        const recovery = await hue(["--ci", "--json"], { cwd: second, env });
+        expect(candidate.status).toBe(0);
+        expect(recovery.status).toBe(0);
+        expect(fixture.creationRequests).toHaveLength(1);
+        expect(fixture.creationRequests[0]).toMatchObject({
+          ci: {
+            provider: "github",
+            commitSha: head,
+            baseSha: "pr-base",
+            ...(eventName === "pull_request"
+              ? { pullRequestHeadSha: "pr-head", pullRequestNumber: 7 }
+              : {}),
+          },
+        });
+        expect(fixture.calls.starts).toHaveLength(1);
+        expect(JSON.parse(recovery.stdout).receipt).toEqual(JSON.parse(candidate.stdout).receipt);
+      } finally {
+        fixture.stop();
+        await rm(first, { recursive: true, force: true });
+        await rm(second, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 
   test("CI status never invents a verdict without a receipt", async () => {
     const fixture = hueStandIn({ answerOnlyScenario: true, ciNoReceipt: true });

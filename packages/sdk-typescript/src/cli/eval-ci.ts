@@ -37,11 +37,17 @@ export const evalConfig = z
     scoringTimeoutSeconds: seconds.default(300),
     deadlineSeconds: seconds.default(900),
     baselineRunId: z.uuid().optional(),
+    baselineCommand: z.string().trim().min(1).optional(),
+    baselineDirectory: z.string().min(1).optional(),
     localScorers: z.array(z.string().min(1)).default([]),
   })
   .refine(
     (value) => Number(!!value.evalSetId) + Number(!!value.evalSetVersionId) === 1,
     "Choose exactly one eval set selector",
+  )
+  .refine(
+    (value) => !!value.baselineCommand === !!value.baselineDirectory,
+    "baselineCommand and baselineDirectory must be supplied together",
   );
 export type EvalConfig = z.infer<typeof evalConfig>;
 export type ExecuteCiRun = (options: {
@@ -57,12 +63,13 @@ export type ExecuteCiRun = (options: {
 class ConfigurationError extends Error {}
 class AuthenticationError extends Error {}
 
-export function checkedOutRevision(): string | undefined {
+export function checkedOutRevision(directory?: string): string | undefined {
   try {
     return execFileSync("git", ["rev-parse", "HEAD"], {
       encoding: "utf8",
       timeout: 5000,
       stdio: ["ignore", "pipe", "ignore"],
+      ...(directory ? { cwd: directory } : {}),
     }).trim();
   } catch {
     return undefined;
@@ -92,7 +99,7 @@ export async function nativeCiContext(): Promise<EvalCiContext> {
     );
   if (!event.success || !commitSha || !process.env.GITHUB_REPOSITORY || !process.env.GITHUB_RUN_ID)
     throw new ConfigurationError("Cannot read the checked-out GitHub revision or event context");
-  return evalCiContext.parse({
+  const context = {
     provider: "github",
     commitSha,
     repository: process.env.GITHUB_REPOSITORY,
@@ -104,7 +111,10 @@ export async function nativeCiContext(): Promise<EvalCiContext> {
     baseSha: event.data.pull_request?.base.sha ?? event.data.merge_group?.base_sha,
     pullRequestHeadSha: event.data.pull_request?.head.sha,
     pullRequestNumber: event.data.pull_request?.number,
-  });
+  };
+  return evalCiContext.parse(
+    Object.fromEntries(Object.entries(context).filter(([, value]) => value !== undefined)),
+  );
 }
 
 const USAGE = `Usage: hue eval --ci --config hue.eval.json --report-dir .hue/reports
@@ -121,6 +131,55 @@ const USAGE = `Usage: hue eval --ci --config hue.eval.json --report-dir .hue/rep
 Exit codes: 0 pass, 1 failed/error/incomplete, 2 configuration, 130 interrupted.
 `;
 
+async function settleInvocation(
+  client: EvaluationClient,
+  saved: EvalInvocation,
+  timeoutSeconds: number,
+  signal: AbortSignal,
+): Promise<EvalInvocation> {
+  let invocation = saved;
+  const deadline = Math.min(Date.parse(saved.deadlineAt), Date.now() + timeoutSeconds * 1000);
+  while (!signal.aborted) {
+    invocation = await client.getEvalInvocation(invocation.id, signal);
+    if (invocation.receipt || invocation.state !== "active") return invocation;
+    const results = await collectExperimentVerdicts(client, {
+      experimentId: invocation.runId,
+      timeoutMillis: 0,
+      signal,
+    });
+    if (
+      (results.results.complete &&
+        results.results.items.length === invocation.manifest.cases.length &&
+        results.summary.totals.pending === 0) ||
+      Date.now() >= deadline
+    )
+      break;
+    await new Promise<void>((done) => {
+      const finish = () => {
+        clearTimeout(wait);
+        signal.removeEventListener("abort", finish);
+        done();
+      };
+      const wait = setTimeout(finish, 1000);
+      signal.addEventListener("abort", finish, { once: true });
+    });
+  }
+  signal.throwIfAborted();
+  return client.finalizeEvalInvocation(
+    invocation.id,
+    { idempotencyKey: `${invocation.id}:finalize` },
+    signal,
+  );
+}
+
+function uncertainOutcome(error: unknown): boolean {
+  return (
+    error instanceof UncertainExecutionError ||
+    error instanceof TargetOutcomeUncertainError ||
+    (error instanceof AggregateError && error.errors.some(uncertainOutcome))
+  );
+}
+
 /** Saves creation bytes before sending; recovery replays them before any latest resolution. */
 export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): Promise<number> {
   // Locate the destination even if strict argument parsing fails, to report setup errors.
@@ -130,6 +189,7 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
   );
   let report = evalReport();
   let invocation: EvalInvocation | undefined;
+  let baseline: EvalInvocation | undefined;
   let client: EvaluationClient | undefined;
   let store: CheckpointStore | undefined;
   const controller = new AbortController();
@@ -231,6 +291,17 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
         Math.max(1, startedAt + config.deadlineSeconds * 1000 - Date.now()),
       );
       const ci = await nativeCiContext();
+      const baselineDirectory = config.baselineDirectory
+        ? resolve(dirname(path), config.baselineDirectory)
+        : undefined;
+      const baseRevision = baselineDirectory ? checkedOutRevision(baselineDirectory) : undefined;
+      if (baselineDirectory) {
+        if (!baseRevision || (ci.baseSha && ci.baseSha !== baseRevision))
+          throw new ConfigurationError("baselineDirectory must contain the intended base commit");
+        ci.baseSha = baseRevision;
+      }
+      if (config.policy.baselineComparisons?.length && !ci.baseSha)
+        throw new ConfigurationError("Baseline comparisons require an intended base commit");
       const identity = {
         origin: baseUrl,
         config,
@@ -290,63 +361,67 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
       }
       await store.write("invocation", { id: invocation.id, runId: invocation.runId });
       if (!invocation.receipt && invocation.state === "active") {
+        const localScorers = config.localScorers.map((entry) => resolve(dirname(path), entry));
+        if (config.baselineCommand && baselineDirectory && !invocation.manifest.baselineRunId) {
+          baseline = await client.createEvalBaseline(
+            invocation.id,
+            {
+              idempotencyKey: `${invocation.id}:baseline`,
+              ci: { ...ci, commitSha: baseRevision },
+            },
+            controller.signal,
+          );
+          if (baseline.state === "active" && !baseline.receipt) {
+            await execute({
+              client,
+              connection: { apiKey, baseUrl },
+              invocation: baseline,
+              config: { ...config, command: config.baselineCommand, localScorers },
+              projectDirectory: baselineDirectory,
+              checkpointDirectory: checkpointPath(directory, [baseline.runId, "baseline run id"]),
+              signal: controller.signal,
+            });
+            baseline = await settleInvocation(
+              client,
+              baseline,
+              config.scoringTimeoutSeconds,
+              controller.signal,
+            );
+          }
+        }
         await execute({
           client,
           connection: { apiKey, baseUrl },
           invocation,
-          config,
+          config: { ...config, localScorers },
           projectDirectory: dirname(path),
           checkpointDirectory: checkpointPath(directory, [invocation.runId, "run id"]),
           signal: controller.signal,
         });
-        const scoringDeadline = Math.min(
-          Date.parse(invocation.deadlineAt),
-          Date.now() + config.scoringTimeoutSeconds * 1000,
+        invocation = await settleInvocation(
+          client,
+          invocation,
+          config.scoringTimeoutSeconds,
+          controller.signal,
         );
-        while (!controller.signal.aborted) {
-          invocation = await client.getEvalInvocation(invocation.id, controller.signal);
-          if (invocation.receipt || invocation.state !== "active") break;
-          const results = await collectExperimentVerdicts(client, {
-            experimentId: invocation.runId,
-            timeoutMillis: 0,
-            signal: controller.signal,
-          });
-          if (
-            (results.results.complete &&
-              results.results.items.length === invocation.manifest.cases.length &&
-              results.summary.totals.pending === 0) ||
-            Date.now() >= scoringDeadline
-          )
-            break;
-          await new Promise<void>((done) => {
-            const finish = () => {
-              clearTimeout(wait);
-              controller.signal.removeEventListener("abort", finish);
-              done();
-            };
-            const wait = setTimeout(finish, 1000);
-            controller.signal.addEventListener("abort", finish, { once: true });
-          });
-        }
-        controller.signal.throwIfAborted();
-        if (!invocation.receipt)
-          invocation = await client.finalizeEvalInvocation(
-            invocation.id,
-            { idempotencyKey: `${invocation.id}:finalize` },
-            controller.signal,
-          );
       }
       report = evalReport(invocation);
     }
   } catch (error) {
     if (invocation && client && controller.signal.aborted) {
       try {
-        invocation = await new EvaluationClient({
+        const cancelling = new EvaluationClient({
           apiKey: process.env.HUE_API_KEY!.trim(),
           baseUrl: client.baseUrl,
           timeoutMillis: 5000,
           maxAttempts: 1,
-        }).cancelEvalInvocation(invocation.id, {
+        });
+        if (baseline && baseline.state === "active" && !baseline.receipt)
+          await cancelling.cancelEvalInvocation(baseline.id, {
+            idempotencyKey: `${baseline.id}:cancel:${deadline ? "deadline" : "interrupted"}`,
+            reason: deadline ? "deadline" : "interrupted",
+          });
+        invocation = await cancelling.cancelEvalInvocation(invocation.id, {
           idempotencyKey: `${invocation.id}:cancel:${deadline ? "deadline" : "interrupted"}`,
           reason: deadline ? "deadline" : "interrupted",
         });
@@ -363,8 +438,7 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
       error instanceof z.ZodError ||
       error instanceof TypeError ||
       error instanceof RangeError;
-    const uncertain =
-      error instanceof UncertainExecutionError || error instanceof TargetOutcomeUncertainError;
+    const uncertain = uncertainOutcome(error);
     report.category = controller.signal.aborted
       ? deadline
         ? "incomplete"
