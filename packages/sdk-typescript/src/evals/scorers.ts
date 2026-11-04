@@ -144,9 +144,14 @@ export function validateScorerBindings(
  */
 export function executableHere(
   definition: ScorerDefinition,
-  options: { scorers?: LocalScorer[]; deferUnboundLocalScorers?: boolean },
+  options: {
+    scorers?: LocalScorer[];
+    deferUnboundLocalScorers?: boolean;
+    deferBuiltinScorers?: boolean;
+  },
 ): definition is Extract<ScorerDefinition, { kind: "builtin" | "local_code" }> {
   if (!isLocallyExecutable(definition)) return false;
+  if (definition.kind === "builtin" && options.deferBuiltinScorers) return false;
   if (definition.kind === "local_code" && options.deferUnboundLocalScorers)
     return isBoundLocally(definition, options.scorers);
   return true;

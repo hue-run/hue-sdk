@@ -1246,6 +1246,7 @@ const installedPackageTests = [
   "live-spans.test.ts",
   "lifetime.test.ts",
   "evals.test.ts",
+  "eval-invocations.test.ts",
   "scorer-publication.test.ts",
   "attempt.test.ts",
   "environment.test.ts",

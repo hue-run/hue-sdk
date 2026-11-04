@@ -192,8 +192,8 @@ def _decide_export(
 def _settings(persist: bool, concurrency: int, timeout: int) -> None:
     if type(persist) is not bool:
         raise TypeError("Choose persist_result_content explicitly: True or False.")
-    if type(concurrency) is not int or not 1 <= concurrency <= 100:
-        raise ValueError("concurrency must be 1–100.")
+    if type(concurrency) is not int or not 1 <= concurrency <= 9_007_199_254_740_991:
+        raise ValueError("concurrency must be a positive safe integer.")
     if type(timeout) is not int or not 100 <= timeout <= 60_000:
         raise ValueError("schema_timeout_millis must be 100–60000.")
 
@@ -258,10 +258,7 @@ def _pins(versions: list[dict[str, Any]]) -> list[dict[str, str]]:
 
 
 def _deferred(versions: list[dict[str, Any]]) -> list[str]:
-    for version in versions:
-        if version["definition"]["kind"] not in ("builtin", "local_code", "manual", "llm_judge"):
-            raise ValueError("Pinned scorer kind is unsupported.")
-    return [v["id"] for v in versions if v["definition"]["kind"] in ("manual", "llm_judge")]
+    return [v["id"] for v in versions if v["definition"]["kind"] not in ("builtin", "local_code")]
 
 
 def _scores(
@@ -274,7 +271,7 @@ def _scores(
     results = []
     for version in versions:
         definition = version["definition"]
-        if definition["kind"] in ("manual", "llm_judge"):
+        if definition["kind"] not in ("builtin", "local_code"):
             continue
         score = persisted_score(
             score_locally(
@@ -403,9 +400,10 @@ def run_experiment(
     persist_result_content: bool,
     trace_evidence: TraceEvidence,
     scorers: list[LocalScorer] | None = None,
-    concurrency: int = 1,
+    concurrency: int = 20,
     schema_timeout_millis: int = 2000,
     files_directory: str | Path | None = None,
+    defer_builtin_scorers: bool = False,
 ) -> RunnerReport:
     """Run trusted sync/async targets locally; never automatically repeat uncertain work.
 
@@ -449,6 +447,9 @@ def run_experiment(
     local = scorers or []
     validate_bindings(versions, local)
     deferred = _deferred(versions)
+    if defer_builtin_scorers:
+        deferred += [v["id"] for v in versions if v["definition"]["kind"] == "builtin"]
+        versions = [v for v in versions if v["definition"]["kind"] != "builtin"]
     items = _pages(lambda after: client.list_experiment_items(experiment_id, after=after))
     if len(items) != experiment["caseCount"]:
         raise ValueError("Frozen experiment case count differs from its API items.")
@@ -752,9 +753,10 @@ def rescore(
     checkpoint_directory: str | Path,
     persist_result_content: bool,
     scorers: list[LocalScorer] | None = None,
-    concurrency: int = 1,
+    concurrency: int = 20,
     schema_timeout_millis: int = 2000,
     files_directory: str | Path | None = None,
+    defer_builtin_scorers: bool = False,
 ) -> RunnerReport:
     """Score existing immutable subjects. This entry point has no target callback.
 
@@ -767,6 +769,9 @@ def rescore(
     versions, local = run["scorerVersions"], scorers or []
     validate_bindings(versions, local)
     deferred = _deferred(versions)
+    if defer_builtin_scorers:
+        deferred += [v["id"] for v in versions if v["definition"]["kind"] == "builtin"]
+        versions = [v for v in versions if v["definition"]["kind"] != "builtin"]
     items = _pages(lambda after: client.list_evaluation_items(run_id, after=after))
     if len(items) != run["itemCount"]:
         raise ValueError("Evaluation run item count differs from its API items.")

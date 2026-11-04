@@ -69,6 +69,7 @@ import {
 } from "../evals/verdicts.js";
 import type { JsonValue } from "../types.js";
 import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
+import { runCiEvalCommand, type ExecuteCiRun } from "./eval-ci.js";
 
 /** Adapter contract: the module's `default` or `runMyAgent` export. */
 export type EvalAdapter = (
@@ -171,7 +172,7 @@ Output and limits:
   --check                         One-shot: check the key, selection and agent, print what the
                                   run would do and exit without creating a run or a world
   --checkpoint-dir <path>         Private checkpoint directory (default: .hue/eval/<agent-key>)
-  --concurrency <n>               Cases in flight, 1-100 (default: 4)
+  --concurrency <n>               Cases in flight, positive integer (default: 20)
   --trace-not-accepted <policy>   A case whose telemetry Hue did not accept in time: fail_case
                                   (default) completes it as failed with the evidence omitted;
                                   pending completes it in its true state with the trace still to
@@ -756,7 +757,7 @@ function parentEnvironment(allowHueCredentials: boolean): Record<string, string>
 function commandAdapter(
   command: string,
   timeoutSeconds: number,
-  options: { allowHueCredentials: boolean },
+  options: { allowHueCredentials: boolean; projectDirectory?: string },
 ): EvalAdapter {
   return async (inputs, context) => {
     const parent = parentEnvironment(options.allowHueCredentials);
@@ -811,7 +812,11 @@ function commandAdapter(
             ...identity,
           };
       const stdout = await spawnAgentCommand(command, {
-        env,
+        ...(options.projectDirectory ? { cwd: layout.caseDirectory } : {}),
+        env: {
+          ...env,
+          ...(await isolatedCaseEnvironment(layout.caseDirectory, options.projectDirectory)),
+        },
         stdin: JSON.stringify({ inputs, config: context.config }),
         timeoutSeconds,
         ...(context.signal ? { signal: context.signal } : {}),
@@ -831,7 +836,7 @@ function commandAdapter(
 function directCommandAdapter(
   command: string,
   timeoutSeconds: number,
-  options: { allowHueCredentials: boolean; workingDirectory?: string },
+  options: { allowHueCredentials: boolean; workingDirectory?: string; projectDirectory?: string },
 ): DirectEvalAdapter {
   return async (inputs, context) => {
     const layout = await stageDirectCase(context.outputDirectory, {
@@ -845,6 +850,7 @@ function directCommandAdapter(
       cwd: options.workingDirectory ?? layout.caseDirectory,
       env: {
         ...parentEnvironment(options.allowHueCredentials),
+        ...(await isolatedCaseEnvironment(layout.caseDirectory, options.projectDirectory)),
         HUE_CASE_DIR: layout.caseDirectory,
         HUE_CASE_INPUTS: layout.inputsPath,
         HUE_CASE_OUTPUT_DIR: layout.outputDirectory,
@@ -862,6 +868,124 @@ function directCommandAdapter(
     return collectDirectOutputs(layout.outputDirectory, parseAnswer(stdout));
   };
 }
+
+async function isolatedCaseEnvironment(
+  directory: string,
+  projectDirectory?: string,
+): Promise<Record<string, string>> {
+  if (!projectDirectory) return {};
+  const home = join(directory, "home");
+  const scratch = join(directory, "tmp");
+  await mkdir(home, { recursive: true, mode: 0o700 });
+  await mkdir(scratch, { recursive: true, mode: 0o700 });
+  return {
+    HOME: home,
+    TMPDIR: scratch,
+    XDG_CACHE_HOME: join(home, ".cache"),
+    XDG_CONFIG_HOME: join(home, ".config"),
+    XDG_DATA_HOME: join(home, ".local", "share"),
+    XDG_STATE_HOME: join(home, ".local", "state"),
+    HUE_PROJECT_DIR: projectDirectory,
+  };
+}
+
+const executeCiRun: ExecuteCiRun = async ({
+  client,
+  connection,
+  invocation,
+  config,
+  projectDirectory,
+  checkpointDirectory,
+  signal,
+}) => {
+  const hue = createHue({
+    ...connection,
+    serviceName: "hue-eval",
+    captureContent: true,
+    timeoutMillis: CASE_TRACE_EXPORT_MILLIS,
+  });
+  const worldClient = createEnvironmentClient(connection);
+  const simulation = redacting(
+    commandAdapter(config.command, config.timeoutSeconds, {
+      allowHueCredentials: false,
+      projectDirectory,
+    }),
+  );
+  const direct = redacting(
+    directCommandAdapter(config.command, config.timeoutSeconds, {
+      allowHueCredentials: false,
+      projectDirectory,
+    }),
+  );
+  const scorers = [];
+  for (const path of config.localScorers) {
+    const module: unknown = await import(pathToFileURL(resolve(projectDirectory, path)).href);
+    if (!module || typeof module !== "object" || !("default" in module))
+      throw new TypeError(
+        "A localScorers module must export its existing LocalScorer binding as default",
+      );
+    const candidate = module.default;
+    if (
+      !candidate ||
+      typeof candidate !== "object" ||
+      !("score" in candidate) ||
+      typeof candidate.score !== "function" ||
+      !("definition" in candidate)
+    )
+      throw new TypeError("Invalid LocalScorer binding");
+    // validateScorerBindings compares the complete definition to the server's frozen pin.
+    scorers.push(candidate as import("../evals/types.js").LocalScorer);
+  }
+  try {
+    const report = await runExperiment({
+      client,
+      hue,
+      experimentId: invocation.runId,
+      checkpointDirectory,
+      persistResultContent: true,
+      traceEvidence: { mode: "required" },
+      traceNotAccepted: "pending",
+      concurrency: config.concurrency,
+      signal,
+      scorers,
+      deferBuiltinScorers: true,
+      environmentEvidence: "when_pinned",
+      async target(inputs, context) {
+        signal.throwIfAborted();
+        if (pinsWorld(context.item))
+          return runEnvironmentTarget({
+            client,
+            environmentClient: worldClient,
+            hue,
+            inputs,
+            context,
+            signal,
+            deprecationWarnings: false,
+            agentRevision: config.name,
+            ttlSeconds: Math.min(
+              config.timeoutSeconds,
+              Math.max(1, Math.ceil((Date.parse(invocation.deadlineAt) - Date.now()) / 1000)),
+            ),
+            target: (value, worldContext) =>
+              simulation(value, simulationTargetContext(worldContext)),
+          });
+        return direct(inputs, {
+          mode: "direct",
+          config: context.config,
+          item: context.item,
+          executionId: context.executionId,
+          trace: { traceId: context.span.traceId, spanId: context.span.spanId },
+          files: context.files,
+          outputDirectory: context.outputDirectory,
+          signal,
+        });
+      },
+    });
+    await dispatchPinnedJudges(client, invocation.runId, report.subjectIds, signal);
+  } finally {
+    await hue.shutdownSafe({ timeoutMillis: 5000 });
+  }
+};
 
 function metricText(metric: CaseVerdict["metrics"][number]): string {
   if (typeof metric.value === "boolean") return metricPassed(metric) ? "PASS" : "FAIL";
@@ -1588,7 +1712,7 @@ async function runOnce(
   signal: AbortSignal,
 ): Promise<number> {
   const client = new EvaluationClient(connection);
-  const concurrency = integer("concurrency", values.concurrency, 4, 1, 100);
+  const concurrency = integer("concurrency", values.concurrency, 20, 1, Number.MAX_SAFE_INTEGER);
   const baselineId = parseBaseline(values.baseline);
   const mode = parseMode(values.mode);
   integer("wait", values.wait, 300, 0, 86_400);
@@ -1806,7 +1930,7 @@ async function checkRun(
     mode: kind,
     worldCases: kind === "direct" ? 0 : worldCases,
     directCases: kind === "direct" ? cases : cases - worldCases,
-    agent: { key: agent.key, revision: agent.revision, concurrency: values.concurrency ?? "4" },
+    agent: { key: agent.key, revision: agent.revision, concurrency: values.concurrency ?? "20" },
   };
   if (values.json) process.stdout.write(`${JSON.stringify({ check })}\n`);
   else {
@@ -1941,10 +2065,6 @@ async function runExperimentAttempt(
       scorers: [],
       deferUnboundLocalScorers: true,
       environmentEvidence: "when_pinned",
-      // A world case that a process which died here left running runs again in a fresh world;
-      // an answer-only case it left running stays uncertain, since its agent may still be
-      // acting. A direct run gives no case a world, so none of its cases reruns.
-      ...(environmentClient ? { rerunCrashedCases: pinsWorld } : {}),
       async target(inputs, context) {
         if (signal.aborted) throw new TargetCancelledError();
         const label = context.item.externalKey;
@@ -2051,7 +2171,7 @@ async function runWorker(
   const client = new ObservedClient(connection);
   const environmentClient = createEnvironmentClient(connection);
   const wait = integer("wait", values.wait, 300, 0, 86_400);
-  const concurrency = integer("concurrency", values.concurrency, 4, 1, 100);
+  const concurrency = integer("concurrency", values.concurrency, 20, 1, Number.MAX_SAFE_INTEGER);
   let maxRuns =
     values["max-runs"] === undefined
       ? undefined
@@ -2267,6 +2387,8 @@ async function runWorker(
  * Returns the process exit code.
  */
 export async function runEvalCommand(argv: string[]): Promise<number> {
+  if (argv[0] === "status" || argv.includes("--ci") || argv.includes("--config"))
+    return runCiEvalCommand(argv, executeCiRun);
   const secrets: string[] = [];
   const controller = new AbortController();
   let firstInterrupt = 0;

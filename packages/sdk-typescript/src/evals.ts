@@ -6,6 +6,14 @@ export {
   isTransientApiError,
 } from "./evals/client.js";
 export type { EvaluationClientOptions } from "./evals/client.js";
+export type {
+  CreateEvalInvocationInput,
+  EvalInvocation,
+  EvalGateReceipt,
+  EvalCiContext,
+  FinalizeEvalInvocationInput,
+  CancelEvalInvocationInput,
+} from "./evals/invocations.js";
 export { MediaFetchError, rehydrateMedia } from "./evals/media.js";
 export type {
   MediaClient,

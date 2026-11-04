@@ -693,9 +693,9 @@ describe("installed evaluation API and runner contract", () => {
   test("runs up to 100 cases at once and refuses more", async () => {
     const options = (concurrency: number) =>
       ({ persistResultContent: false, concurrency }) as never;
-    for (const concurrency of [0, 101, 1.5])
+    for (const concurrency of [0, Number.MAX_SAFE_INTEGER + 1, 1.5])
       await expect(runExperiment(options(concurrency))).rejects.toThrow(
-        "concurrency must be 1–100",
+        "concurrency must be a positive safe integer",
       );
     // 100 clears the bound and stops at the next required option.
     await expect(runExperiment(options(100))).rejects.toThrow(
@@ -714,6 +714,7 @@ describe("installed evaluation API and runner contract", () => {
       captureContent: false,
     });
     const options = {
+      concurrency: 1,
       client: f.client,
       hue,
       experimentId: exp.id,
@@ -758,6 +759,7 @@ describe("installed evaluation API and runner contract", () => {
       captureContent: false,
     });
     const options = {
+      concurrency: 1,
       client: f.client,
       hue,
       experimentId: exp.id,
@@ -2549,6 +2551,7 @@ describe("installed evaluation API and runner contract", () => {
     });
     let calls = 0;
     const options = {
+      concurrency: 1,
       client: f.client,
       hue,
       experimentId: exp.id,
@@ -2642,6 +2645,7 @@ describe("installed evaluation API and runner contract", () => {
       captureContent: false,
     });
     const options = {
+      concurrency: 1,
       client: f.client,
       hue,
       experimentId: exp.id,
@@ -2687,6 +2691,7 @@ describe("installed evaluation API and runner contract", () => {
       captureContent: false,
     });
     const options = {
+      concurrency: 1,
       client: f.client,
       hue,
       experimentId: exp.id,
@@ -2970,6 +2975,7 @@ describe("installed evaluation API and runner contract", () => {
       captureContent: false,
     });
     const options = {
+      concurrency: 1,
       client: f.client,
       hue,
       experimentId: exp.id,
@@ -3110,7 +3116,8 @@ await runExperiment({
         checkpointDirectory: run.checkpointDirectory,
         persistResultContent: true,
         traceEvidence: { mode: "required" },
-        // Only a case that gets a fresh World reruns; a direct case's agent may still be acting.
+        concurrency: 1,
+        // Explicit opt-in remains available to callers that accept a new World attempt.
         rerunCrashedCases: (item) => Boolean(item.environmentVersionId),
         target: (_inputs, context) => {
           targets.push(context.item.id);
