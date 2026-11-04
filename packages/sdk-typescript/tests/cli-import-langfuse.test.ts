@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
-import { gunzipSync } from "node:zlib";
+import { brotliCompressSync, gunzipSync, gzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { IMPORT_USAGE, runImportCommand, type ImportCommandIo } from "../src/cli/import.js";
 import {
@@ -14,7 +15,9 @@ import {
   hueTraceId,
   isInternalAddress,
   parseMediaToken,
+  pinnedDownload,
   refusedDownload,
+  type LangfuseConnection,
 } from "../src/cli/langfuse.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 
@@ -1527,7 +1530,11 @@ describe("hue import usage", () => {
 
 describe("hue import langfuse media download links", () => {
   /** A Langfuse API at a public host whose media record names `link`, and the URLs fetched. */
-  function api(link: string, store: (url: URL) => Response = () => new Response("bytes")) {
+  function api(
+    link: string,
+    store: (url: URL) => Response = () => new Response("bytes"),
+    seams: Pick<LangfuseConnection, "lookup" | "pinnedFetch"> = {},
+  ) {
     const fetched: string[] = [];
     const fetchImpl = (async (input: URL, init: RequestInit) => {
       // Real fetch would reach a redirect's target before media() could check it.
@@ -1544,6 +1551,7 @@ describe("hue import langfuse media download links", () => {
       fetch: fetchImpl,
       sleep: async () => undefined,
       signal: new AbortController().signal,
+      ...seams,
     });
     return { lf, fetched };
   }
@@ -1594,6 +1602,159 @@ describe("hue import langfuse media download links", () => {
     }
   });
 
+  test("a media host resolved by name downloads at the very addresses that were checked", async () => {
+    const pinned: { url: string; address: string }[] = [];
+    const { lf, fetched } = api("https://store.example/object?sig=1", undefined, {
+      lookup: async () => ["93.184.215.14", "2606:4700::1111"],
+      pinnedFetch: async (url, init, address) => {
+        pinned.push({ url: url.href, address });
+        // A presigned download never carries the Langfuse keys.
+        expect(init.headers).not.toHaveProperty("authorization");
+        return new Response("bytes");
+      },
+    });
+    expect(new TextDecoder().decode((await lf.media("m1")) as Uint8Array)).toBe("bytes");
+    expect(pinned).toEqual([
+      { url: "https://store.example/object?sig=1", address: "93.184.215.14" },
+    ]);
+    // The unpinned transport saw only the configured Langfuse host, never the media host.
+    expect(fetched.every((url) => url.startsWith("https://langfuse.example/"))).toBe(true);
+  });
+
+  test("a name whose lookup answers any private address is refused before a request", async () => {
+    const { lf, fetched } = api("https://store.example/object", undefined, {
+      lookup: async () => ["93.184.215.14", "169.254.169.254"],
+      pinnedFetch: () => Promise.reject(new Error("must not be called")),
+    });
+    await expect(lf.media("m1")).rejects.toThrow("names an address on this machine");
+    expect(fetched.every((url) => url.startsWith("https://langfuse.example/"))).toBe(true);
+  });
+
+  test("a failed pinned attempt tries the next checked address", async () => {
+    const addresses: string[] = [];
+    const { lf } = api("https://store.example/object", undefined, {
+      lookup: async () => ["203.0.113.5", "93.184.215.14"],
+      pinnedFetch: async (_url, _init, address) => {
+        addresses.push(address);
+        if (addresses.length === 1) throw new Error("connection refused");
+        return new Response("bytes");
+      },
+    });
+    expect(new TextDecoder().decode((await lf.media("m1")) as Uint8Array)).toBe("bytes");
+    expect(addresses).toEqual(["203.0.113.5", "93.184.215.14"]);
+  });
+
+  test("pinnedDownload connects to the pinned address with TLS for the URL's own host", async () => {
+    const key = await readFile(join(import.meta.dir, "fixtures", "pinned-download-test-key.pem"));
+    const ca = await readFile(join(import.meta.dir, "fixtures", "pinned-download-test-cert.pem"));
+    const seen: { host?: string; url?: string }[] = [];
+    const server = createServer({ key, cert: ca }, (request, response) => {
+      seen.push({ host: request.headers.host, url: request.url });
+      if (request.url === "/redirect") {
+        response.writeHead(302, { location: "https://elsewhere.test/next" });
+        response.end();
+      } else if (request.url === "/gzip") {
+        response.writeHead(200, { "content-encoding": "gzip" });
+        response.end(gzipSync("pinned bytes"));
+      } else if (request.url === "/unknown-coding") {
+        response.writeHead(200, { "content-encoding": "snappy" });
+        response.end("as it came");
+      } else {
+        response.writeHead(200);
+        response.end("pinned bytes");
+      }
+    });
+    await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
+    const port = (server.address() as { port: number }).port;
+    const init = { headers: { accept: "*/*" }, signal: new AbortController().signal };
+    try {
+      // media.pinned.test resolves nowhere: reaching the server proves the connection used the
+      // pinned address alone, and the handshake proves the certificate was checked for that name.
+      const url = new URL(`https://media.pinned.test:${port}/object?sig=1`);
+      const response = await pinnedDownload(url, init, "127.0.0.1", { ca });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("pinned bytes");
+      expect(seen).toEqual([{ host: `media.pinned.test:${port}`, url: "/object?sig=1" }]);
+      const redirected = await pinnedDownload(
+        new URL(`https://media.pinned.test:${port}/redirect`),
+        init,
+        "127.0.0.1",
+        { ca },
+      );
+      expect(redirected.status).toBe(302);
+      expect(redirected.headers.get("location")).toBe("https://elsewhere.test/next");
+      expect(seen).toHaveLength(2);
+      // A compressed answer is decoded as fetch would decode it; an unknown coding passes
+      // through as it came.
+      const compressed = await pinnedDownload(
+        new URL(`https://media.pinned.test:${port}/gzip`),
+        init,
+        "127.0.0.1",
+        { ca },
+      );
+      expect(await compressed.text()).toBe("pinned bytes");
+      const unknown = await pinnedDownload(
+        new URL(`https://media.pinned.test:${port}/unknown-coding`),
+        init,
+        "127.0.0.1",
+        { ca },
+      );
+      expect(await unknown.text()).toBe("as it came");
+      // A URL whose host the certificate does not name must not be answered by this server.
+      await expect(
+        pinnedDownload(new URL(`https://other.test:${port}/object`), init, "127.0.0.1", { ca }),
+      ).rejects.toThrow();
+    } finally {
+      server.close();
+    }
+  });
+
+  test.each([
+    { encoding: "gzip", bytes: gzipSync("pinned bytes"), invalid: false },
+    { encoding: "gzip, br", bytes: brotliCompressSync(gzipSync("pinned bytes")), invalid: false },
+    { encoding: "gzip", bytes: Buffer.from("invalid compressed bytes"), invalid: true },
+  ])(
+    "pinnedDownload closes the connection on cancellation or decode failure %j",
+    async ({ encoding, bytes, invalid }) => {
+      const key = await readFile(join(import.meta.dir, "fixtures", "pinned-download-test-key.pem"));
+      const ca = await readFile(join(import.meta.dir, "fixtures", "pinned-download-test-cert.pem"));
+      let closed = false;
+      const server = createServer({ key, cert: ca }, (_request, response) => {
+        response.on("close", () => {
+          closed = true;
+        });
+        response.writeHead(200, { "content-encoding": encoding });
+        // Leave the upstream response open after delivering data to the decoder.
+        response.write(bytes);
+      });
+      await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
+      const stop = new AbortController();
+      try {
+        const response = await pinnedDownload(
+          new URL(
+            `https://media.pinned.test:${(server.address() as { port: number }).port}/stream`,
+          ),
+          { headers: {}, signal: stop.signal },
+          "127.0.0.1",
+          { ca },
+        );
+        const reader = response.body!.getReader();
+        if (invalid) await expect(reader.read()).rejects.toThrow();
+        else {
+          expect((await reader.read()).value).toEqual(new TextEncoder().encode("pinned bytes"));
+          await reader.cancel();
+        }
+        const deadline = Date.now() + 1000;
+        while (!closed && Date.now() < deadline) await new Promise((done) => setTimeout(done, 10));
+        expect(closed).toBe(true);
+      } finally {
+        stop.abort();
+        server.closeAllConnections();
+        await new Promise<void>((done) => server.close(() => done()));
+      }
+    },
+  );
+
   test("a stopped import stops waiting for a name's lookup", async () => {
     const stop = new AbortController();
     const check = refusedDownload(
@@ -1602,7 +1763,10 @@ describe("hue import langfuse media download links", () => {
       stop.signal,
     );
     stop.abort();
-    expect(await check).toBe("names a host that could not be resolved");
+    expect(await check).toEqual({
+      kind: "refused",
+      reason: "names a host that could not be resolved",
+    });
   });
 
   test("names internal addresses", () => {

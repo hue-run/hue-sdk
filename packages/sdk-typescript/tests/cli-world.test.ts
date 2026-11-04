@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -424,6 +424,52 @@ describe("hue world create", () => {
       "issues.json",
       "linear/issues.json",
     ]);
+  });
+
+  test("never follows a symbolic link in --files, wherever it points", async () => {
+    const stand = hue();
+    const outside = await scratch();
+    await writeFile(join(outside, "credentials"), "aws_secret_access_key=THE-SECRET");
+    const dir = await scratch();
+    await mkdir(join(dir, "data", "sub"), { recursive: true });
+    const real = Buffer.from('[{"id":"i1"}]');
+    await writeFile(join(dir, "data", "issues.json"), real);
+    await symlink(join(outside, "credentials"), join(dir, "data", "export.json"));
+    await symlink(join(dir, "data", "issues.json"), join(dir, "data", "sub", "copy.json"));
+    await symlink(outside, join(dir, "data", "vault"));
+
+    const result = await world(
+      ["create", "--apps", "linear", "--files", "data", "--origin", stand.origin],
+      { cwd: dir },
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain("Skipped export.json: symbolic links are not uploaded.");
+    expect(result.stderr).toContain("Skipped sub/copy.json: symbolic links are not uploaded.");
+    expect(result.stderr).toContain("Skipped vault: symbolic links are not uploaded.");
+    const sources = stand.creations[0]!.sources as { files: Declared[] };
+    expect(sources.files).toEqual([
+      {
+        app: "linear",
+        files: [{ name: "issues.json", byteSize: real.byteLength, sha256: sha256(real) }],
+      },
+    ]);
+    expect([...stand.stored.values()]).toEqual([real]);
+    expect(JSON.stringify([...stand.stored.values()])).not.toContain("THE-SECRET");
+  });
+
+  test("refuses a --files file past Hue's per-file bound before any request", async () => {
+    const stand = hue();
+    const dir = await scratch();
+    await mkdir(join(dir, "data"));
+    await writeFile(join(dir, "data", "huge.bin"), Buffer.alloc(25 * 1024 * 1024 + 1, 7));
+    const result = await world(
+      ["create", "--apps", "linear", "--files", "data", "--origin", stand.origin],
+      { cwd: dir },
+    );
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("data/huge.bin is larger than Hue's 25 MiB file limit");
+    expect(stand.requests).toEqual([]);
   });
 
   test("creates a World from a description alone, and previews one with --dry-run", async () => {

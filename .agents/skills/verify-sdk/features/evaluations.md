@@ -79,6 +79,13 @@ and `uv run --frozen --all-groups pytest tests/test_environment.py -q -k surface
 `packages/sdk-python`: the handoff keeps it as the World API states it, as its own copy, and
 invents none for an older Hue.
 
+The handoff's `env` keeps only the documented carriers (`HUE_WORLD_*`, `BAGGAGE`, `TRACEPARENT`,
+`HUE_SIM_*` URL/alias/token); `worldHandoff` and `world_handoff` drop every other name a server
+sends, so a hostile origin cannot set proxy, loader or Git variables on the spawned agent. Run
+`bun test tests/world.test.ts -t "documented env carriers"` from `packages/sdk-typescript` and
+`uv run --frozen --all-groups pytest tests/test_environment.py -q -k documented_env_carriers`
+from `packages/sdk-python`.
+
 Run `bun test tests/world-readiness.test.ts tests/world-models.test.ts` from
 `packages/sdk-typescript` and `uv run --frozen --all-groups pytest
 tests/test_world_readiness.py tests/test_world_preparation.py -q` from `packages/sdk-python`
