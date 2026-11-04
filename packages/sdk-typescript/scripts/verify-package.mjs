@@ -639,6 +639,16 @@ if (typeof zlib.zstdCompressSync === "function") {
       contentType: "application/x-www-form-urlencoded",
     },
   ];
+  for (const [index, kind] of ["url_verification", "slash_command", "interactivity"].entries()) {
+    deliveries.push({
+      deliveryId: `6a1c9e4f-2b3d-4c5e-8f7a-9b0c1d2e3f5${index}`,
+      kind,
+      eventId: null,
+      body: JSON.stringify({ incomplete: kind }),
+      contentType: "application/json",
+      incomplete: true,
+    });
+  }
   const reply = JSON.stringify({ response_type: "ephemeral", text: "✓".repeat(2000) });
   const received = [];
   const receiver = createServer((request, response) => {
@@ -651,6 +661,12 @@ if (typeof zlib.zstdCompressSync === "function") {
         authorization: request.headers.authorization,
         raw,
       });
+      if (deliveries.find((delivery) => delivery.body === raw)?.incomplete) {
+        response.writeHead(200, { "content-length": String(Buffer.byteLength(reply) + 1) });
+        response.write(reply);
+        setTimeout(() => response.destroy(), 20);
+        return;
+      }
       response.end(reply);
     });
   });
@@ -747,9 +763,10 @@ if (typeof zlib.zstdCompressSync === "function") {
       const ack = acks.find((item) => item.deliveryId === delivery.deliveryId);
       const request = received.find((item) => item.raw === delivery.body);
       return (
-        ack?.outcome !== "response" ||
-        ack.status !== 200 ||
-        ack.body !== (delivery.kind === "event_callback" ? undefined : reply) ||
+        ack?.outcome !== (delivery.incomplete ? "connection_failed" : "response") ||
+        ack.status !== (delivery.incomplete ? undefined : 200) ||
+        ack.body !==
+          (delivery.incomplete || delivery.kind === "event_callback" ? undefined : reply) ||
         request?.contentType !== delivery.contentType ||
         request.signature !== "v0=abc" ||
         request.authorization !== undefined
@@ -1044,7 +1061,7 @@ run(
   ],
   evaluation,
 );
-// AI SDK 6 accepts zod 3, so the packed SDK must install and import its evaluation entry beside it.
+// AI SDK 6 accepts zod 3; the SDK uses its own patched zod without upgrading the application's.
 const ai6Zod3Evaluation = join(destination, "ai6-zod3-evaluation-consumer");
 await mkdir(ai6Zod3Evaluation);
 await writeFile(
@@ -1074,6 +1091,13 @@ run(
     "-e",
     `
   import { strict as assert } from "node:assert";
+  import { createRequire } from "node:module";
+  const applicationRequire = createRequire(import.meta.url);
+  const sdkRequire = createRequire(applicationRequire.resolve("@hue-run/sdk"));
+  assert.equal(applicationRequire("zod/package.json").version, "3.25.76");
+  const [major, minor, patch] = sdkRequire("zod/package.json").version.split(".").map(Number);
+  assert.equal(major, 4);
+  assert.ok(minor > 6 || (minor === 6 && patch >= 6));
   const sdk = await import("@hue-run/sdk");
   assert.equal(typeof sdk.createHue, "function");
   const { builtins, scoreLocally } = await import("@hue-run/sdk/evals");

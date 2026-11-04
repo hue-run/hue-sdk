@@ -6,6 +6,7 @@
 
 - `npm-inventory` ships exactly the intended `dist/` files, docs and license.
 - `npm-exports` resolves every `exports` entry under ESM, `require(esm)` and TypeScript.
+- `npm-evaluation-compatibility` installs beside AI SDK 6 and application Zod 3, checks that the SDK resolves its own patched Zod 4, imports evaluation helpers and typechecks exported schemas.
 - `npm-consumer` installs the tarball into fresh Node and Bun projects for all five AI SDK 7/`@ai-sdk/otel` pairs. The pairs run concurrently, with each pair's checks kept in order. Broad Bun behavior runs in three isolated batches with pair 139; `tests/ai-sdk.test.ts`, AI SDK error classification in `tests/failure.test.ts`, and the reference chatbot cover every pair. Node-native safety and file/scorer boundaries run once per Node version, since their dependencies do not change with the AI pair. The verifier waits for every pair before returning failure and copies a release artifact only after every check passes.
 - `npm-bundle-safe` keeps every module reachable from `.` and `./ai-sdk` free of computed `import()` specifiers, so a bundling framework (Next.js) can resolve them; the verifier prints `bundle safety: N runtime modules`.
 

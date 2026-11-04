@@ -465,7 +465,10 @@ a later one is a timeout. A failing answer with `x-slack-no-retry: 1` is reporte
 retrying it. A successful URL verification sends its response body to Hue, capped at 4 KiB, to echo
 the challenge. A successful slash command or interaction sends its immediate response body, capped
 at 64 KiB, so Hue can record the bot's reply. Bodies above these limits are cut at a UTF-8 boundary.
-Keep replies within the limit because truncated JSON cannot be applied as a message. Ordinary event
+These responses must finish within three seconds, even when the body exceeds the capture limit.
+If the connection breaks before the response finishes, the listener reports `connection_failed`
+without sending the partial body to Hue.
+Keep replies within the limit; truncation can change the displayed reply. Ordinary event
 response bodies and unsuccessful response bodies stay on this machine. Each pull waits for at most 20 seconds and
 leases up to `--max` deliveries (1 to 10, default 10), which are forwarded concurrently; the next
 pull starts once they are acknowledged, and a delivery beyond `--max` is never forwarded. A waiting
