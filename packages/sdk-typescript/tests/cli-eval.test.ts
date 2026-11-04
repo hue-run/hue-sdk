@@ -10,7 +10,9 @@ import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import { derivedAgentKey, explain, renderTable, spawnAgentCommand } from "../src/cli/eval.js";
-import { CheckpointIdentityError } from "../src/evals/checkpoint.js";
+import { CheckpointIdentityError, CheckpointStore } from "../src/evals/checkpoint.js";
+import { EvaluationClient } from "../src/evals/client.js";
+import { digest as identityDigest } from "../src/evals/json.js";
 import type { CaseVerdict, ExperimentVerdicts } from "../src/evals/verdicts.js";
 import { TargetCancelledError } from "../src/evals.js";
 import { createEvalInvocationInput, type EvalInvocation } from "../src/evals/invocations.js";
@@ -2875,6 +2877,58 @@ describe("hue eval", () => {
 });
 
 describe("CI invocation CLI", () => {
+  test("CI recovers a legacy default-policy checkpoint without a new invocation", async () => {
+    const fixture = hueStandIn({ answerOnlyScenario: true });
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-privacy-upgrade-"));
+    try {
+      // The complete configuration stored by the CLI before privacy flags existed.
+      const config = {
+        evalSetVersionId: fixture.version.id,
+        command: "printf saved",
+        config: {},
+        policy: { thresholds: [] },
+        concurrency: 20,
+        timeoutSeconds: 600,
+        scoringTimeoutSeconds: 2,
+        deadlineSeconds: 900,
+        localScorers: [],
+      };
+      const ci = { provider: "local" as const };
+      const identity = { origin: fixture.baseUrl, config, ci };
+      const client = new EvaluationClient({ apiKey: key, baseUrl: fixture.baseUrl });
+      const project = await client.checkConnection();
+      const request = {
+        idempotencyKey: randomUUID(),
+        evalSetVersionId: fixture.version.id,
+        config: {},
+        policy: { thresholds: [] },
+        ci,
+        deadlineAt: new Date(Date.now() + 900_000).toISOString(),
+      };
+      const saved = await client.createEvalInvocation(request);
+      const checkpoint = await CheckpointStore.acquire(
+        join(directory, ".hue/ci", identityDigest(identity)),
+        { ...identity, projectId: project.id },
+      );
+      await checkpoint.write("request", request);
+      await checkpoint.release();
+      await writeFile(join(directory, "hue.eval.json"), JSON.stringify(config));
+      for (const flags of [[], ["--content"]]) {
+        const result = await hue(["--ci", "--json", ...flags], {
+          cwd: directory,
+          env: { HUE_BASE_URL: fixture.baseUrl },
+        });
+        expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+        expect(JSON.parse(result.stdout).runId).toBe(saved.runId);
+        expect(fixture.creationRequests.at(-1)).toEqual(request);
+        expect(fixture.calls.completions).toHaveLength(1);
+      }
+    } finally {
+      fixture.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test.each([
     { flags: [], config: {}, capture: true, output: true, world: false },
     { flags: ["--no-content"], config: {}, capture: false, output: true, world: false },

@@ -310,9 +310,15 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
       }
       if (config.policy.baselineComparisons?.length && !ci.baseSha)
         throw new ConfigurationError("Baseline comparisons require an intended base commit");
+      const { captureContent, persistResultContent, ...recoveryConfig } = config;
       const identity = {
         origin: baseUrl,
-        config,
+        // Default policies retain identities written before explicit privacy controls existed.
+        config: {
+          ...recoveryConfig,
+          ...(!captureContent ? { captureContent } : {}),
+          ...(!persistResultContent ? { persistResultContent } : {}),
+        },
         ci,
         ...(ci.provider === "github" ? { job: process.env.GITHUB_JOB ?? "" } : {}),
       };
