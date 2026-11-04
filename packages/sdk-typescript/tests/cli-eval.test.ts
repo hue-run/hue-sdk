@@ -802,6 +802,8 @@ function hue(
       cwd: options.cwd,
       env: {
         ...inherited,
+        // GitHub event fixtures opt in below; temporary local cases have no checkout.
+        GITHUB_ACTIONS: "false",
         NO_COLOR: "1",
         ...(options.dropKey ? {} : { HUE_API_KEY: key }),
         ...options.env,
