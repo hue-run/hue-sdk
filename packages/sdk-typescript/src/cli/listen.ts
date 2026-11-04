@@ -345,15 +345,20 @@ export function forwardDelivery(
         delivery.kind === "url_verification" ? MAX_ACK_BODY_BYTES : MAX_INTERACTION_ACK_BODY_BYTES;
       const chunks: Buffer[] = [];
       let size = 0;
-      const done = () => answered(clampUtf8(Buffer.concat(chunks).toString("utf8"), maxBodyBytes));
+      const failed = () => finish({ outcome: "connection_failed", durationMs: elapsed() });
       response.on("data", (chunk: Buffer) => {
         if (size >= maxBodyBytes) return;
         chunks.push(chunk.subarray(0, maxBodyBytes - size));
         size += Math.min(chunk.byteLength, maxBodyBytes - size);
-        if (size >= maxBodyBytes) done();
       });
-      response.on("end", done);
-      response.on("error", done);
+      response.on("end", () => {
+        if (!response.complete) return failed();
+        answered(clampUtf8(Buffer.concat(chunks).toString("utf8"), maxBodyBytes));
+      });
+      response.on("error", failed);
+      response.on("close", () => {
+        if (!response.complete) failed();
+      });
     });
     request.end(body);
   });

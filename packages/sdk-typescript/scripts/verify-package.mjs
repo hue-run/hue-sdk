@@ -639,6 +639,16 @@ if (typeof zlib.zstdCompressSync === "function") {
       contentType: "application/x-www-form-urlencoded",
     },
   ];
+  for (const [index, kind] of ["url_verification", "slash_command", "interactivity"].entries()) {
+    deliveries.push({
+      deliveryId: `6a1c9e4f-2b3d-4c5e-8f7a-9b0c1d2e3f5${index}`,
+      kind,
+      eventId: null,
+      body: JSON.stringify({ incomplete: kind }),
+      contentType: "application/json",
+      incomplete: true,
+    });
+  }
   const reply = JSON.stringify({ response_type: "ephemeral", text: "✓".repeat(2000) });
   const received = [];
   const receiver = createServer((request, response) => {
@@ -651,6 +661,12 @@ if (typeof zlib.zstdCompressSync === "function") {
         authorization: request.headers.authorization,
         raw,
       });
+      if (deliveries.find((delivery) => delivery.body === raw)?.incomplete) {
+        response.writeHead(200, { "content-length": String(Buffer.byteLength(reply) + 1) });
+        response.write(reply);
+        setTimeout(() => response.destroy(), 20);
+        return;
+      }
       response.end(reply);
     });
   });
@@ -747,9 +763,10 @@ if (typeof zlib.zstdCompressSync === "function") {
       const ack = acks.find((item) => item.deliveryId === delivery.deliveryId);
       const request = received.find((item) => item.raw === delivery.body);
       return (
-        ack?.outcome !== "response" ||
-        ack.status !== 200 ||
-        ack.body !== (delivery.kind === "event_callback" ? undefined : reply) ||
+        ack?.outcome !== (delivery.incomplete ? "connection_failed" : "response") ||
+        ack.status !== (delivery.incomplete ? undefined : 200) ||
+        ack.body !==
+          (delivery.incomplete || delivery.kind === "event_callback" ? undefined : reply) ||
         request?.contentType !== delivery.contentType ||
         request.signature !== "v0=abc" ||
         request.authorization !== undefined

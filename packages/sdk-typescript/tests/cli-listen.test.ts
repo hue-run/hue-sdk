@@ -1291,6 +1291,37 @@ describe("hue listen delivery safety", () => {
     }
   });
 
+  test("refuses incomplete successful replies without exporting their partial bodies", async () => {
+    let reply: (response: ServerResponse) => void = () => undefined;
+    const bot = await receiver((_request, response) => reply(response));
+    for (const kind of ["url_verification", "slash_command", "interactivity"] as const) {
+      const delivery = parseDelivery(
+        wire(kind === "url_verification" ? slackDelivery(kind) : slackInteractionDelivery(kind)),
+        SUBSCRIPTION,
+      )!;
+      for (const lengthKnown of [true, false]) {
+        for (const bytes of [32, 70_000]) {
+          reply = (response) => {
+            response.writeHead(200, lengthKnown ? { "content-length": String(bytes + 1) } : {});
+            response.write("s".repeat(bytes));
+            setTimeout(() => response.destroy(), 20);
+          };
+          const failed = await forwardDelivery(new URL(bot.url), delivery);
+          expect(failed).toMatchObject({ outcome: "connection_failed" });
+          expect(failed!.body).toBeUndefined();
+          expect(failed!.status).toBeUndefined();
+        }
+      }
+      reply = (response) => {
+        response.writeHead(200);
+        response.write("s".repeat(70_000));
+      };
+      const late = await forwardDelivery(new URL(bot.url), delivery, { timeoutMs: 30 });
+      expect(late).toMatchObject({ outcome: "timeout" });
+      expect(late!.body).toBeUndefined();
+    }
+  });
+
   test("loads the credential from --env-path", async () => {
     const hue = await mockHue();
     const bot = await receiver();
