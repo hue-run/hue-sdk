@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants, existsSync } from "node:fs";
-import { open, readdir, readFile, realpath, stat } from "node:fs/promises";
+import { type Dirent, existsSync } from "node:fs";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { constants } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
@@ -21,6 +21,7 @@ import { pipedreamTransport } from "./world-export-pipedream.js";
 import { composioLinear, exportLinear, linearApi } from "./world-export-linear.js";
 import { exportSalesforce, salesforceOrigin } from "./world-export-salesforce.js";
 import { exportSlack } from "./world-export-slack.js";
+import { canonicalDirectory, openInTree, readUpTo } from "./tree-files.js";
 import {
   isObject,
   RequestError,
@@ -96,8 +97,8 @@ description, or both, and prints its URL and World version once it is ready.
   --name NAME            The World's name (default: the apps)
   --files DIR            Upload the files under DIR as the apps' data; Hue keeps them exactly.
                          With one app every file is that app's; with several, each app's files
-                         go in DIR/<app>/. Hidden files and symbolic links are skipped; a file
-                         over 25 MiB is refused
+                         go in DIR/<app>/. Hidden files and symbolic links are skipped, DIR
+                         must not be a link and a file over 25 MiB is refused (Linux or macOS)
   --describe TEXT        Describe the data Hue generates for the apps
   --export-from LIST     Read these apps' data on this machine with your own access and upload
                          it, comma-separated:
@@ -659,18 +660,22 @@ async function filesFrom(ctx: Context, directory: string, apps: string[]): Promi
   try {
     if (!(await stat(root)).isDirectory())
       throw new UsageError(`--files ${directory} is not a directory`);
-    realRoot = await realpath(root);
-    entries = await readdir(root, { withFileTypes: true, recursive: true });
+    realRoot = await canonicalDirectory(root);
+    entries = await listTree(realRoot);
   } catch (error) {
     if (error instanceof UsageError) throw error;
+    const code = (error as NodeJS.ErrnoException).code;
     throw new UsageError(
-      `Unable to read --files ${directory}: ${(error as NodeJS.ErrnoException).code ?? "unreadable"}`,
+      code === "ELOOP"
+        ? `--files ${directory} is a symbolic link; name the directory itself`
+        : code === "ENOTSUP"
+          ? `--files ${directory}: ${(error as Error).message}`
+          : `Unable to read --files ${directory}: ${code ?? "unreadable"}`,
     );
   }
   const uploads: Upload[] = [];
   for (const entry of entries) {
-    const path = join(entry.parentPath, entry.name);
-    const label = relative(root, path);
+    const label = relative(realRoot, join(entry.parentPath, entry.name));
     const parts = label.split(sep);
     if (parts.some((part) => part.startsWith("."))) continue;
     if (entry.isSymbolicLink()) {
@@ -678,22 +683,13 @@ async function filesFrom(ctx: Context, directory: string, apps: string[]): Promi
       continue;
     }
     if (!entry.isFile()) continue;
-    // The walk's own path resolving to itself proves no component is a symbolic link out of the
-    // tree (the walk does not descend into linked directories, so this only guards a changed
-    // tree).
-    // shortcut: a component swapped for a link between this check and the open can still escape;
-    // worth openat-style reads only if exports ever walk trees an attacker can change mid-run.
-    if ((await realpath(path).catch(() => null)) !== join(realRoot, label)) {
-      ctx.note(`Skipped ${label}: it does not resolve inside ${directory}.`);
-      continue;
-    }
     const inApp = parts.length > 1 && apps.includes(parts[0]!);
     const app = inApp ? parts[0]! : apps.length === 1 ? apps[0]! : undefined;
     if (!app)
       throw new UsageError(
         `${join(directory, label)} is not in an app's directory: with several apps, put each app's files in ${join(directory, "<app>")}/`,
       );
-    const digested = await digest(path).catch((error: unknown) => {
+    const digested = await digest(realRoot, label).catch((error: unknown) => {
       throw unreadable(join(directory, label), error);
     });
     if (digested === "tooLarge")
@@ -702,7 +698,7 @@ async function filesFrom(ctx: Context, directory: string, apps: string[]): Promi
         // division only as an identifier or number over a numeric literal.
         `${join(directory, label)} is larger than Hue's ${MAX_FILE_DATA_BYTES / 1024 / 1024} MiB file limit`,
       );
-    const { byteSize, sha256 } = digested;
+    const { byteSize, sha256, dev, ino } = digested;
     if (!byteSize) {
       ctx.note(`Skipped ${label}: the file is empty.`);
       continue;
@@ -718,15 +714,14 @@ async function filesFrom(ctx: Context, directory: string, apps: string[]): Promi
       byteSize,
       sha256,
       bytes: async () => {
-        const handle = await openNoFollow(path).catch((error: unknown) => {
+        const handle = await openInTree(realRoot, label).catch((error: unknown) => {
           throw unreadable(join(directory, label), error);
         });
         let bytes;
         try {
-          // The size gates the read so a file grown since the walk is never loaded whole.
           const info = await handle.stat();
-          if (!info.isFile() || info.size !== byteSize) throw changed();
-          bytes = await handle.readFile();
+          if (info.dev !== dev || info.ino !== ino || info.size !== byteSize) throw changed();
+          bytes = await readUpTo(handle, byteSize);
         } catch (error) {
           if (error instanceof WorldCommandError) throw error;
           throw unreadable(join(directory, label), error);
@@ -746,6 +741,18 @@ async function filesFrom(ctx: Context, directory: string, apps: string[]): Promi
   return uploads.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
 }
 
+/** Every entry under `directory`, descending only into real directories: Bun's recursive
+ * `readdir` descends into a linked one too. */
+async function listTree(directory: string): Promise<Dirent[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const nested = await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => listTree(join(directory, entry.name))),
+  );
+  return entries.concat(...nested);
+}
+
 /** A file that could not be read, named with the filesystem's code: the command's error, not a
  * crash. */
 function unreadable(file: string, error: unknown): WorldCommandError {
@@ -754,21 +761,15 @@ function unreadable(file: string, error: unknown): WorldCommandError {
   );
 }
 
-/** Opens the file for reading without following a symbolic link in its final component; a FIFO
- * or device never blocks the open. */
-function openNoFollow(path: string) {
-  // O_NOFOLLOW is absent on Windows, where the dirent check already rejected links.
-  return open(
-    path,
-    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0),
-  );
-}
-
-/** Size and SHA-256 of the file, read without following a final symbolic link and given up past
- * Hue's per-file bound rather than reading on. */
-async function digest(path: string): Promise<{ byteSize: number; sha256: string } | "tooLarge"> {
-  const handle = await openNoFollow(path);
+/** Size, SHA-256 and identity of the file at `label` under `root`, given up past Hue's per-file
+ * bound rather than reading on. */
+async function digest(
+  root: string,
+  label: string,
+): Promise<{ byteSize: number; sha256: string; dev: number; ino: number } | "tooLarge"> {
+  const handle = await openInTree(root, label);
   try {
+    const { dev, ino } = await handle.stat();
     const hash = createHash("sha256");
     let byteSize = 0;
     const buffer = Buffer.alloc(64 * 1024);
@@ -779,7 +780,7 @@ async function digest(path: string): Promise<{ byteSize: number; sha256: string 
       byteSize += bytesRead;
       if (byteSize > MAX_FILE_DATA_BYTES) return "tooLarge";
     }
-    return { byteSize, sha256: hash.digest("hex") };
+    return { byteSize, sha256: hash.digest("hex"), dev, ino };
   } finally {
     await handle.close().catch(() => undefined);
   }

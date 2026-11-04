@@ -103,8 +103,9 @@ export class ZipArchive {
     readonly members: readonly ZipMember[],
   ) {}
 
-  static async open(path: string): Promise<ZipArchive> {
-    const handle = await open(path, "r");
+  /** Lists the archive at `source`; a handle given is the archive's from then on, closed with it. */
+  static async open(source: string | FileHandle): Promise<ZipArchive> {
+    const handle = typeof source === "string" ? await open(source, "r") : source;
     try {
       const members = await ZipArchive.list(handle);
       return new ZipArchive(handle, members);
