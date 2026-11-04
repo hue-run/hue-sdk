@@ -34,6 +34,8 @@ refuses to publish a version without a matching entry below.
 
 #### Fixed
 
+- CI evaluations honor `--no-content` and `--no-output`, with equivalent configuration fields,
+  while preserving the existing content-capture and output-storage defaults.
 - `hue listen` forwards Slack slash commands and interactions to a local HTTP receiver and returns
   successful immediate replies to Hue, capped at 64 KiB. Event and error response bodies stay local.
 - HTTP capture decodes gzip, deflate and br responses before applying the text and size policy,

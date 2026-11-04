@@ -1379,6 +1379,16 @@ Hue control credentials are removed. World cases receive their own scoped connec
 and world clock. The command reads `{"inputs": ..., "config": ...}` on stdin and writes its
 answer on stdout or through the existing case output files.
 
+The CLI's trace content and stored case outputs are enabled by default. Set `captureContent: false`
+in the configuration, or pass `--no-content`, to export trace metadata only. Independently,
+set `persistResultContent: false`, or pass `--no-output`, to omit stored case outputs, error
+messages and scorer explanations. Use both controls to omit content from both paths.
+Generated documents still upload, and an agent's own instrumentation keeps its own settings.
+`--content` overrides `captureContent: false`; combining it with `--no-content` is an error.
+These policies apply to candidate and baseline runs and form part of their recovery identity.
+Local scorers can still read the answer in memory. Hosted scorers that require stored output
+may lack evidence; the report preserves Hue's resulting receipt and never invents a pass.
+
 Exactly one of `evalSetId` and `evalSetVersionId` is required. Optional `evaluatorIds` resolve
 published versions once; `evaluatorVersionIds` pin versions explicitly. When omitted, the case
 evaluator pins apply. `config` holds agent parameters. `localScorers` is an optional array of
