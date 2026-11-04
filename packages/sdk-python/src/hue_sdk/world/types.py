@@ -240,6 +240,11 @@ class WorldHandoff(TypedDict):
     ``now`` is the world's clock at creation (RFC 3339): the date an agent computes its dates
     from in place of the wall clock, a trace-built world's recorded start. Also
     ``env["HUE_WORLD_NOW"]``; ``None`` for a Hue that names neither.
+
+    ``env`` holds only the documented carriers (``HUE_WORLD_*``, ``BAGGAGE``, ``TRACEPARENT``
+    and each surface's ``HUE_SIM_*`` URL, alias or token): ``world_handoff`` drops every other
+    name the server sends, so a hostile origin cannot set proxy, loader or Git variables on a
+    spawned agent.
     """
 
     id: str

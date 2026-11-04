@@ -83,9 +83,20 @@ def _has_hue_control_plane_credential(value: str) -> bool:
     return False
 
 
+# The environment carriers a world may hand an agent (the handoff's documented ``env``): the
+# world's own ``HUE_WORLD_*`` values, the trace context, and each surface's ``HUE_SIM_*`` URL,
+# alias or token. Everything else in the server's map is dropped: a hostile origin must not reach
+# the spawned command through proxy, loader or Git variables that ``agent_environment`` would
+# otherwise copy onto the child beside the parent's credentials.
+_HANDOFF_ENV = re.compile(
+    r"^(?:HUE_WORLD_[A-Z0-9_]+|BAGGAGE|TRACEPARENT|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS|TOKEN))$"
+)
+
+
 def world_handoff(run: EnvironmentRun) -> WorldHandoff | None:
     """The world an agent acts on through provider mirrors, or ``None`` for a world created
-    while the gateway was off (that world has Hue-native tools and no mirror URLs)."""
+    while the gateway was off (that world has Hue-native tools and no mirror URLs). Only the
+    documented env carriers cross from the server; every other name is dropped."""
     if not (run.get("token") and "env" in run and "mcpConfig" in run and "surfaces" in run):
         return None
     world_id = run.get("worldId") or run["id"]
@@ -99,7 +110,7 @@ def world_handoff(run: EnvironmentRun) -> WorldHandoff | None:
         "baggage": run.get("baggage") or f"hue-world={world_id}",
         "now": run.get("now") or run["env"].get("HUE_WORLD_NOW") or None,
         "surfaces": deepcopy(run["surfaces"]),
-        "env": dict(run["env"]),
+        "env": {name: value for name, value in run["env"].items() if _HANDOFF_ENV.match(name)},
         "mcpConfig": deepcopy(run["mcpConfig"]),
     }
 

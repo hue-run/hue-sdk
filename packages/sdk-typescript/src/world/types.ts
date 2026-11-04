@@ -489,7 +489,9 @@ export interface WorldHandoff {
    * null for a Hue that names neither. */
   now: string | null;
   /** `HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW`, `BAGGAGE`, `TRACEPARENT` and one
-   * `HUE_SIM_<SURFACE ID>_URL` per surface. */
+   * `HUE_SIM_<SURFACE ID>_URL` per surface, with a surface's `_ALIAS` or `_TOKEN` where it has
+   * one. Only these carriers cross from the server: `worldHandoff` drops every other name, so a
+   * hostile origin cannot set proxy, loader or Git variables on a spawned agent. */
   env: Record<string, string>;
   /** The `mcpServers` configuration for the MCP surfaces. */
   mcpConfig: WorldMcpConfig;

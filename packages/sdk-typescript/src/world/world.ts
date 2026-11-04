@@ -3,6 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EnvironmentRun, LegacyMcpCapability, WorldHandoff, WorldMcpServer } from "./types.js";
 
+/** The environment carriers a world may hand an agent (the handoff's documented `env`): the
+ * world's own `HUE_WORLD_*` values, the trace context, and each surface's `HUE_SIM_*` URL, alias
+ * or token. Everything else in the server's map is dropped: a hostile origin must not reach the
+ * spawned command through proxy, loader or Git variables that `agentEnvironment` would otherwise
+ * copy onto the child beside the parent's credentials. */
+const HANDOFF_ENV =
+  /^(?:HUE_WORLD_[A-Z0-9_]+|BAGGAGE|TRACEPARENT|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS|TOKEN))$/;
+
 /**
  * The world an agent acts on through provider mirrors, read from a create or replay response.
  * Null for a world created while the gateway was off: that world has Hue-native tools and no
@@ -21,7 +29,7 @@ export function worldHandoff(run: EnvironmentRun): WorldHandoff | null {
     baggage: run.baggage ?? `hue-world=${id}`,
     now: run.now ?? run.env.HUE_WORLD_NOW ?? null,
     surfaces: run.surfaces.map((surface) => structuredClone(surface)),
-    env: { ...run.env },
+    env: Object.fromEntries(Object.entries(run.env).filter(([name]) => HANDOFF_ENV.test(name))),
     mcpConfig: {
       mcpServers: Object.fromEntries(
         Object.entries(run.mcpConfig.mcpServers).map(([name, server]) => [
