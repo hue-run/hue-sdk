@@ -417,8 +417,25 @@ already-buffered responses, and `httplib2` captures the returned bytes. `urllib3
 content. Streaming capture is limited to bytes the application reads through supported response
 methods. A complete output is recorded at EOF. An unread response has no captured response body,
 and an early close marks partial content as truncated. The HTTP span ends at EOF, close or client
-shutdown. Raw compressed reads record size without decoded content. Finish or close responses
-before flushing and shutting Hue down. Raw `http.client`, custom socket transports, gRPC,
+shutdown. Since `0.15.0`, raw gzip, x-gzip and deflate reads are decoded in a separate bounded copy
+for capture. Both zlib-wrapped and raw deflate are supported, including stacked encodings. The
+application keeps its original bytes. Encoded input and each decoded layer must fit the value cap;
+malformed, incomplete or over-limit content records a truncation marker.
+
+Raw Brotli (`br`) capture requires the optional decoder:
+
+```sh
+pip install 'hue-run[compression]'
+```
+
+This extra installs Brotli `>=1.2.1,<2`; Hue rejects older or unsupported decoder versions at
+runtime too. Installing it can also enable Brotli negotiation and decoding in HTTP clients such
+as `requests`; the base SDK does not install it or change their
+encoding negotiation. Hue uses the decoder's bounded API, with at most a 32 KiB output block per
+call, and rejects decoded output above the value cap. Missing or older decoders leave a truncation
+marker, without an unbounded fallback. Already-decoded client responses need no extra.
+
+Finish or close responses before flushing and shutting Hue down. Raw `http.client`, custom socket transports, gRPC,
 WebSockets and requests made by other processes are
 outside this capture.
 

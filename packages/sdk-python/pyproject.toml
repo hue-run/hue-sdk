@@ -34,6 +34,8 @@ dependencies = [
 [project.optional-dependencies]
 # JSON Schema scoring (builtin_scorers.json_schema) runs jsonschema in an isolated worker process.
 evals = ["jsonschema>=4.18,<5", "referencing>=0.28"]
+# Optional because its presence also enables Brotli in supported HTTP clients.
+compression = ["brotli>=1.2.1,<2"]
 
 [project.urls]
 Homepage = "https://docs.hue.run"
@@ -44,6 +46,7 @@ Issues = "https://github.com/hue-run/hue-sdk/issues"
 
 [dependency-groups]
 dev = [
+  "brotli>=1.2.1,<2",
   "pytest>=8.3,<10",
   "build>=1.2,<2",
   "ruff>=0.15,<1",
