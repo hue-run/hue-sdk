@@ -698,7 +698,9 @@ async function filesFrom(ctx: Context, directory: string, apps: string[]): Promi
     });
     if (digested === "tooLarge")
       throw new UsageError(
-        `${join(directory, label)} is larger than Hue's ${MAX_FILE_DATA_BYTES / (1024 * 1024)} MiB file limit`,
+        // Divided step by step: the release inventory reads dist with a tokenizer that accepts
+        // division only as an identifier or number over a numeric literal.
+        `${join(directory, label)} is larger than Hue's ${MAX_FILE_DATA_BYTES / 1024 / 1024} MiB file limit`,
       );
     const { byteSize, sha256 } = digested;
     if (!byteSize) {
