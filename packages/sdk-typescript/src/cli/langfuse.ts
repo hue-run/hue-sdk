@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
+import { request as httpsRequest } from "node:https";
 import { BlockList, isIP } from "node:net";
+import { Readable } from "node:stream";
 import {
   SpanKind,
   SpanStatusCode,
@@ -87,6 +89,15 @@ export interface LangfuseConnection {
   signal: AbortSignal;
   /** Told about each wait for a rate limit or a failed request, in whole seconds. */
   onWait?: (seconds: number, reason: string) => void;
+  /** Test seam: every address a media host resolves to; the system resolver by default. */
+  lookup?: (host: string, signal: AbortSignal) => Promise<string[]>;
+  /** Test seam: the transport for a media download pinned to a checked address;
+   * {@link pinnedDownload} by default. */
+  pinnedFetch?: (
+    url: URL,
+    init: { headers: Record<string, string>; signal: AbortSignal },
+    address: string,
+  ) => Promise<Response>;
 }
 
 /** A request Langfuse refused or did not answer; `fatal` stops the whole import. */
@@ -334,13 +345,16 @@ export class LangfuseApi {
    * tried again after 1, 2, 4, 8 and 16 seconds (or its `Retry-After`, up to a minute). No
    * redirect is followed (its `Location` is answered), so the keys go only to the configured host
    * and a media download reaches only links {@link LangfuseApi.media} checked; `authenticated` is
-   * false for a presigned media download, which carries no Langfuse keys.
+   * false for a presigned media download, which carries no Langfuse keys. With `pinned`, the
+   * connection goes to one of those checked addresses instead of a lookup of its own, trying the
+   * next on a failed attempt.
    */
   async get(
     url: URL,
     authenticated = true,
     maxBytes = MAX_RESPONSE_BYTES,
     timeoutMs = REQUEST_TIMEOUT_MS,
+    pinned?: readonly [string, ...string[]],
   ): Promise<Answer> {
     let failures = 0;
     let limited = 0;
@@ -348,15 +362,19 @@ export class LangfuseApi {
       this.stopped();
       let response: Response;
       try {
-        response = await this.fetchImpl(url, {
-          headers: {
-            accept: "application/json",
-            "user-agent": `hue-sdk-typescript/${sdkVersion} hue-import`,
-            ...(authenticated ? { authorization: this.authorization } : {}),
-          },
-          redirect: "manual",
-          signal: AbortSignal.any([this.connection.signal, AbortSignal.timeout(timeoutMs)]),
-        });
+        const headers = {
+          accept: "application/json",
+          "user-agent": `hue-sdk-typescript/${sdkVersion} hue-import`,
+          ...(authenticated ? { authorization: this.authorization } : {}),
+        };
+        const signal = AbortSignal.any([this.connection.signal, AbortSignal.timeout(timeoutMs)]);
+        response = pinned
+          ? await (this.connection.pinnedFetch ?? pinnedDownload)(
+              url,
+              { headers, signal },
+              pinned[failures % pinned.length]!,
+            )
+          : await this.fetchImpl(url, { headers, redirect: "manual", signal });
       } catch {
         this.stopped();
         if (failures >= RETRY_DELAYS_MS.length)
@@ -642,10 +660,22 @@ export class LangfuseApi {
     if (url.protocol !== "https:" && url.protocol !== "http:") return "missing";
     const langfuse = new URL(this.connection.baseUrl);
     for (let redirects = 0; ; redirects++) {
-      const refused = await refusedDownload(url, langfuse, this.connection.signal);
+      const verdict = await refusedDownload(
+        url,
+        langfuse,
+        this.connection.signal,
+        this.connection.lookup,
+      );
       this.stopped();
-      if (refused) throw new LangfuseError(`Langfuse named a media download link that ${refused}`);
-      const download = await this.get(url, false, MAX_FILE_DATA_BYTES, DOWNLOAD_TIMEOUT_MS);
+      if (verdict.kind === "refused")
+        throw new LangfuseError(`Langfuse named a media download link that ${verdict.reason}`);
+      const download = await this.get(
+        url,
+        false,
+        MAX_FILE_DATA_BYTES,
+        DOWNLOAD_TIMEOUT_MS,
+        verdict.addresses,
+      );
       if (download.location !== undefined) {
         if (redirects === MAX_DOWNLOAD_REDIRECTS)
           throw new LangfuseError("The media download redirected too many times");
@@ -698,40 +728,99 @@ export function isInternalAddress(address: string): boolean {
   return version !== 0 && INTERNAL_ADDRESSES.check(address, version === 4 ? "ipv4" : "ipv6");
 }
 
+/** Whether one media download link may be fetched: `refused` with the reason, or `allowed`, with
+ * the public addresses the connection must be pinned to when its host was resolved by name. */
+export type DownloadVerdict =
+  | { kind: "refused"; reason: string }
+  | { kind: "allowed"; addresses?: [string, ...string[]] };
+
 /**
- * Why a media download link is refused, or undefined when it may be fetched: it must be HTTPS
- * (plain HTTP only to this machine), at most 8192 characters, without credentials or a fragment,
- * and name a host whose every address is public, unless it names the configured Langfuse host or
- * that host is on this machine. Langfuse chooses the link, so this keeps a hostile or compromised
- * deployment from sending requests to this machine's network. The name's lookup gives up after a
- * minute or once `signal` stops the import.
+ * Whether a media download link is refused or may be fetched: it must be HTTPS (plain HTTP only
+ * to this machine), at most 8192 characters, without credentials or a fragment, and name a host
+ * whose every address is public, unless it names the configured Langfuse host or that host is on
+ * this machine. Langfuse chooses the link, so this keeps a hostile or compromised deployment from
+ * sending requests to this machine's network. A host resolved by name is allowed with the very
+ * addresses the download must connect to, since a second lookup could answer a private address
+ * (DNS rebinding); an IP literal, the Langfuse host and loopback need no pin. The name's lookup
+ * gives up after a minute or once `signal` stops the import.
  */
 export async function refusedDownload(
   url: URL,
   langfuse: URL,
   signal: AbortSignal,
-): Promise<string | undefined> {
-  if (url.href.length > MAX_LINK_LENGTH) return "is too long";
+  lookupAddresses: (host: string, signal: AbortSignal) => Promise<string[]> = resolved,
+): Promise<DownloadVerdict> {
+  const refused = (reason: string): DownloadVerdict => ({ kind: "refused", reason });
+  if (url.href.length > MAX_LINK_LENGTH) return refused("is too long");
   if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname)))
-    return "does not use https";
-  if (url.username || url.password || url.hash) return "carries credentials or a fragment";
-  if (isLoopbackHost(langfuse.hostname) || url.hostname === langfuse.hostname) return undefined;
+    return refused("does not use https");
+  if (url.username || url.password || url.hash) return refused("carries credentials or a fragment");
+  if (isLoopbackHost(langfuse.hostname) || url.hostname === langfuse.hostname)
+    return { kind: "allowed" };
   const host = url.hostname.replace(/^\[|\]$/gu, "");
   const named = host === "localhost" || host.endsWith(".localhost");
-  // shortcut: the name is resolved apart from the request's own lookup, so a host that answers a
-  // second lookup differently (DNS rebinding) is not caught; pin the lookup if fetch gains a hook.
   let addresses: string[];
   try {
     addresses =
       named || isIP(host)
         ? [named ? "127.0.0.1" : host]
-        : await resolved(host, AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]));
+        : await lookupAddresses(
+            host,
+            AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+          );
   } catch {
-    return "names a host that could not be resolved";
+    return refused("names a host that could not be resolved");
   }
-  if (addresses.length === 0 || addresses.some(isInternalAddress))
-    return "names an address on this machine or a private network";
-  return undefined;
+  const [first, ...rest] = addresses;
+  if (first === undefined || addresses.some(isInternalAddress))
+    return refused("names an address on this machine or a private network");
+  // An IP literal is where the connection goes already; only a name needs the pin.
+  return isIP(host) ? { kind: "allowed" } : { kind: "allowed", addresses: [first, ...rest] };
+}
+
+/**
+ * One GET of `url` connected to `address` rather than a lookup of its own, so a media download
+ * reaches exactly the public addresses {@link refusedDownload} verified and a second DNS answer
+ * cannot rebind it onto a private network. TLS still validates the certificate against the URL's
+ * hostname (`servername`), and the Host header carries it. Redirects are answered, never
+ * followed, like the plain transport; `tls` lets a test name its own authority.
+ */
+export function pinnedDownload(
+  url: URL,
+  init: { headers: Record<string, string>; signal: AbortSignal },
+  address: string,
+  tls: { ca?: string | Buffer } = {},
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const request = httpsRequest(
+      {
+        host: address,
+        port: url.port === "" ? 443 : Number(url.port),
+        path: `${url.pathname}${url.search}`,
+        servername: url.hostname,
+        headers: { ...init.headers, host: url.host },
+        signal: init.signal,
+        ...tls,
+      },
+      (answer) => {
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(answer.headers)) {
+          if (typeof value === "string") headers.set(name, value);
+          else if (Array.isArray(value)) headers.set(name, value.join(", "));
+        }
+        const status = answer.statusCode ?? 502;
+        // node:stream/web's ReadableStream and the global one are the same object at runtime;
+        // their declarations only differ.
+        const body =
+          status === 204 || status === 304
+            ? null
+            : (Readable.toWeb(answer) as unknown as ReadableStream);
+        resolve(new Response(body, { status, headers }));
+      },
+    );
+    request.once("error", reject);
+    request.end();
+  });
 }
 
 /** Every address `host` resolves to; rejects once `signal` aborts, since a lookup cannot be
