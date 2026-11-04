@@ -3,7 +3,7 @@ name: hue
 description: "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction."
 metadata:
   author: hue-run
-  version: "0.8.27"
+  version: "0.8.28"
 ---
 
 # Hue
@@ -67,7 +67,7 @@ python -m pip install hue-run==0.15.0
 
 Adapt the command to the app's package manager, for example `uv add hue-run==0.15.0`. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If a package is unavailable or a credential is missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or release.
 
-The development key is a **Read and write** project key in `HUE_API_KEY`, configured through the application's existing secret workflow. Keep it on development machines: before the application runs on a production server, tell the user to create a separate **Tracing only** key for that server's `HUE_API_KEY`, which the code reads unchanged. Read the key from the environment; never put it in browser code, fixtures, committed files or logs.
+The development key is a **Read and write** project key in `HUE_API_KEY`, configured through the application's existing secret workflow. Before the application runs on a production server, tell the user to create a separate **Read and write** key for that server's `HUE_API_KEY`, which the code reads unchanged. Read the key from the environment; never put it in browser code, fixtures, committed files or logs.
 
 - **TypeScript:** in serving applications, pass `apiKey`, a stable `serviceName` and explicit `captureContent` to `createHueSafe`. Hue Cloud is the default; omit `baseUrl`. Use strict `createHue` and `checkConnection()` only in a separate setup diagnostic.
 - **Python:** in serving applications, pass `api_key`, a stable `service_name` and explicit `capture_content` to `create_hue_safe`, once per process (after fork). Use strict `Hue` and `validate_project()` only in a separate setup diagnostic.
@@ -240,13 +240,13 @@ These pages own their procedures. Read the page with curl, adding `.md` to its U
 | Evaluate a function in-process or in CI                         | [Local evaluations](https://docs.hue.run/evaluations/first-evaluation)                                                                                                                       |
 | Run the agent from Hue against an HTTPS endpoint                | [Managed runs](https://docs.hue.run/evaluations/managed-runs)                                                                                                                                |
 
-The same rules apply there: never hand the agent Hue-native tools or tools its production version lacks, and never put evaluation-only values in production configuration: mirror URLs (`HUE_SIM_*`), world tokens (`HUE_WORLD_TOKEN`), `HUE_MCP_*` values or the development **Read and write** key. A production server sends traces with its own **Tracing only** key.
+The same rules apply there: never hand the agent Hue-native tools or tools its production version lacks, and never put evaluation-only values in production configuration: mirror URLs (`HUE_SIM_*`), world tokens (`HUE_WORLD_TOKEN`), `HUE_MCP_*` values or the development **Read and write** key. A production server sends traces with its own **Read and write** key.
 
 ## Troubleshooting
 
 | Symptom                                                                  | Likely cause                                                                             | Fix                                                                                                                         |
 | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `flush()` throws `HueExportError` with `rejected` issues or HTTP 401/403 | Invalid or revoked key, a **Read** key, or a `baseUrl` with a path                       | Use **Read and write** for development and evaluation, **Tracing only** on a production server; `baseUrl` is an origin only |
+| `flush()` throws `HueExportError` with `rejected` issues or HTTP 401/403 | Invalid or revoked key, a **Read** key, or a `baseUrl` with a path                       | Use **Read and write**, with separate keys for development and production; `baseUrl` is an origin only |
 | Receipt reports missing expected spans                                   | The owning provider was not flushed, or the stream had not finished                      | Await stream completion, flush the borrowed provider, then verify                                                           |
 | Receipt `fields.input` / `fields.output` are false                       | Metadata-only capture, or the request span did not record its input and reply            | Expected only for an explicit metadata-only policy; otherwise record them and verify again                                  |
 | A file shows **Not uploaded** or `state: "missing"`                      | The flush or shutdown budget ended before the upload, or egress blocks Hue's upload URLs | Flush with a longer budget, allow HTTPS `PUT` to the upload URLs, check `uploadFallbacks` / `upload_fallbacks`              |
