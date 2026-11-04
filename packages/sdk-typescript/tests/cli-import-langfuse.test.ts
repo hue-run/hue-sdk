@@ -6,7 +6,7 @@ import { createServer } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { brotliCompressSync, gunzipSync, gzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { IMPORT_USAGE, runImportCommand, type ImportCommandIo } from "../src/cli/import.js";
 import {
@@ -1708,6 +1708,52 @@ describe("hue import langfuse media download links", () => {
       server.close();
     }
   });
+
+  test.each([
+    { encoding: "gzip", bytes: gzipSync("pinned bytes"), invalid: false },
+    { encoding: "gzip, br", bytes: brotliCompressSync(gzipSync("pinned bytes")), invalid: false },
+    { encoding: "gzip", bytes: Buffer.from("invalid compressed bytes"), invalid: true },
+  ])(
+    "pinnedDownload closes the connection on cancellation or decode failure %j",
+    async ({ encoding, bytes, invalid }) => {
+      const key = await readFile(join(import.meta.dir, "fixtures", "pinned-download-test-key.pem"));
+      const ca = await readFile(join(import.meta.dir, "fixtures", "pinned-download-test-cert.pem"));
+      let closed = false;
+      const server = createServer({ key, cert: ca }, (_request, response) => {
+        response.on("close", () => {
+          closed = true;
+        });
+        response.writeHead(200, { "content-encoding": encoding });
+        // Leave the upstream response open after delivering data to the decoder.
+        response.write(bytes);
+      });
+      await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
+      const stop = new AbortController();
+      try {
+        const response = await pinnedDownload(
+          new URL(
+            `https://media.pinned.test:${(server.address() as { port: number }).port}/stream`,
+          ),
+          { headers: {}, signal: stop.signal },
+          "127.0.0.1",
+          { ca },
+        );
+        const reader = response.body!.getReader();
+        if (invalid) await expect(reader.read()).rejects.toThrow();
+        else {
+          expect((await reader.read()).value).toEqual(new TextEncoder().encode("pinned bytes"));
+          await reader.cancel();
+        }
+        const deadline = Date.now() + 1000;
+        while (!closed && Date.now() < deadline) await new Promise((done) => setTimeout(done, 10));
+        expect(closed).toBe(true);
+      } finally {
+        stop.abort();
+        server.closeAllConnections();
+        await new Promise<void>((done) => server.close(() => done()));
+      }
+    },
+  );
 
   test("a stopped import stops waiting for a name's lookup", async () => {
     const stop = new AbortController();

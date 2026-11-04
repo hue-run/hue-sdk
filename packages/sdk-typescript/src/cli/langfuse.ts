@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { BlockList, isIP } from "node:net";
-import { Readable, type Transform } from "node:stream";
+import { pipeline, Readable, type Transform } from "node:stream";
 import * as zlib from "node:zlib";
 import {
   SpanKind,
@@ -832,10 +832,11 @@ export function pinnedDownload(
           else if (Array.isArray(value)) headers.set(name, value.join(", "));
         }
         let stream: Readable = answer;
-        for (const decoder of contentDecoders(answer.headers["content-encoding"]) ?? []) {
-          const source = stream;
-          source.once("error", (error: Error) => decoder.destroy(error));
-          stream = source.pipe(decoder);
+        const decoders = contentDecoders(answer.headers["content-encoding"]) ?? [];
+        if (decoders.length) {
+          stream = decoders[decoders.length - 1]!;
+          // Cancelling the body or a failed decoder must close every upstream stream too.
+          pipeline([answer, ...decoders], () => undefined);
         }
         const status = answer.statusCode ?? 502;
         // node:stream/web's ReadableStream and the global one are the same object at runtime;
