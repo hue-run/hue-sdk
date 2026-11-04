@@ -3,6 +3,18 @@ import type { ProjectConnection } from "../types.js";
 import { json, uuid, valueBounds } from "./json.js";
 import { MediaClient } from "./media.js";
 import {
+  createEvalInvocationInput,
+  readEvalInvocation,
+  finalizeEvalInvocationInput,
+  cancelEvalInvocationInput,
+  createEvalBaselineInput,
+  type CreateEvalInvocationInput,
+  type EvalInvocation,
+  type FinalizeEvalInvocationInput,
+  type CancelEvalInvocationInput,
+  type CreateEvalBaselineInput,
+} from "./invocations.js";
+import {
   attemptBindingRead,
   parsePrepareAttemptResultV2,
   parseRefreshedAttemptResultV2,
@@ -81,6 +93,8 @@ export interface EvaluationClientOptions {
    * connection failure, a timeout or a 408 or 5xx Hue did not time with `Retry-After`. Default 4,
    * maximum 10; 1 sends every such request once. */
   maxAttempts?: number;
+  /** Cancels all requests and retry waits made by this client. */
+  signal?: AbortSignal;
 }
 /** Thrown for a failed evaluation API request; the message is fixed and never includes response text. */
 export class HueApiError extends Error {
@@ -311,7 +325,9 @@ export class EvaluationClient {
   readonly #apiKey: string;
   private readonly timeoutMillis: number;
   private readonly maxAttempts: number;
+  private readonly signal?: AbortSignal;
   constructor(options: EvaluationClientOptions) {
+    this.signal = options.signal;
     const validated = validateOptions({
       ...options,
       serviceName: "hue-evaluations",
@@ -374,6 +390,9 @@ export class EvaluationClient {
     /** Overrides the retry decision `retryable` takes from the method and body. */
     idempotent?: boolean,
   ): Promise<T> {
+    signal =
+      signal && this.signal ? AbortSignal.any([signal, this.signal]) : (signal ?? this.signal);
+    signal?.throwIfAborted();
     // Serialized once, outside the attempts: a body this client cannot encode is a caller error
     // no attempt fixes.
     const payload = body === undefined ? undefined : payloadOf(body as object, bounds);
@@ -760,6 +779,102 @@ export class EvaluationClient {
   async getEvaluatorVersion(id: string): Promise<EvaluatorVersion> {
     return productRegistryFields(await this.getScorerVersion(id));
   }
+  /** Creates or recovers a frozen invocation; Hue owns the gate verdict. */
+  async createEvalInvocation(
+    input: CreateEvalInvocationInput,
+    signal?: AbortSignal,
+  ): Promise<EvalInvocation> {
+    const body = createEvalInvocationInput.parse(input);
+    return this.invocationResponse(
+      await this.request("POST", "/eval-invocations", body, REQUEST_BOUNDS, signal),
+      signal,
+    );
+  }
+  /** Reads saved inputs and the original gate receipt, without running an agent. Accepts a candidate run ID too. */
+  async getEvalInvocation(id: string, signal?: AbortSignal): Promise<EvalInvocation> {
+    return this.invocationResponse(
+      await this.request("GET", `/eval-invocations/${uuid(id)}`, undefined, REQUEST_BOUNDS, signal),
+      signal,
+    );
+  }
+  /** Looks up a project-scoped invocation before resolving versions or a new deadline. */
+  async getEvalInvocationByKey(
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<EvalInvocation> {
+    const key = finalizeEvalInvocationInput.parse({ idempotencyKey }).idempotencyKey;
+    return this.invocationResponse(
+      await this.request(
+        "GET",
+        `/eval-invocations?idempotencyKey=${encodeURIComponent(key)}`,
+        undefined,
+        REQUEST_BOUNDS,
+        signal,
+      ),
+      signal,
+    );
+  }
+  /** Creates or recovers a baseline from the candidate's frozen inputs, never resolving latest. */
+  async createEvalBaseline(
+    id: string,
+    input: CreateEvalBaselineInput,
+    signal?: AbortSignal,
+  ): Promise<EvalInvocation> {
+    return this.invocationResponse(
+      await this.request(
+        "POST",
+        `/eval-invocations/${uuid(id)}/baseline`,
+        createEvalBaselineInput.parse(input),
+        REQUEST_BOUNDS,
+        signal,
+      ),
+      signal,
+    );
+  }
+  /** Freezes the server's gate decision. Call after scoring settles; an early call freezes incomplete. */
+  async finalizeEvalInvocation(
+    id: string,
+    input: FinalizeEvalInvocationInput,
+    signal?: AbortSignal,
+  ): Promise<EvalInvocation> {
+    return this.invocationResponse(
+      await this.request(
+        "POST",
+        `/eval-invocations/${uuid(id)}/finalize`,
+        finalizeEvalInvocationInput.parse(input),
+        REQUEST_BOUNDS,
+        signal,
+      ),
+      signal,
+    );
+  }
+  /** Durably cancels execution and scoring, including after the local runner exits. */
+  async cancelEvalInvocation(
+    id: string,
+    input: CancelEvalInvocationInput,
+    signal?: AbortSignal,
+  ): Promise<EvalInvocation> {
+    return this.invocationResponse(
+      await this.request(
+        "POST",
+        `/eval-invocations/${uuid(id)}/cancel`,
+        cancelEvalInvocationInput.parse(input),
+        REQUEST_BOUNDS,
+        signal,
+      ),
+      signal,
+    );
+  }
+  private async invocationResponse(value: unknown, signal?: AbortSignal): Promise<EvalInvocation> {
+    try {
+      return await readEvalInvocation(value, (path) =>
+        this.request("GET", path, undefined, REQUEST_BOUNDS, signal),
+      );
+    } catch (error) {
+      if (error instanceof HueApiError) throw error;
+      throw new HueApiError();
+    }
+  }
   /** Creates an experiment over a frozen dataset version with pinned scorer versions and a configuration. */
   createExperiment(input: {
     idempotencyKey: string;
@@ -976,8 +1091,14 @@ export class EvaluationClient {
     }>("POST", "/evaluation-runs", input);
   }
   /** Reads an evaluation run and its scoring progress. */
-  getEvaluationRun(id: string) {
-    return this.request<EvaluationRun>("GET", `/evaluation-runs/${uuid(id)}`);
+  getEvaluationRun(id: string, signal?: AbortSignal) {
+    return this.request<EvaluationRun>(
+      "GET",
+      `/evaluation-runs/${uuid(id)}`,
+      undefined,
+      REQUEST_BOUNDS,
+      signal,
+    );
   }
   /** Every evaluation run of the project, oldest first; a grading worker polls this for pending pins. */
   listEvaluationRuns(page?: PageOptions) {

@@ -13,6 +13,7 @@ import { derivedAgentKey, explain, renderTable, spawnAgentCommand } from "../src
 import { CheckpointIdentityError } from "../src/evals/checkpoint.js";
 import type { CaseVerdict, ExperimentVerdicts } from "../src/evals/verdicts.js";
 import { TargetCancelledError } from "../src/evals.js";
+import { createEvalInvocationInput, type EvalInvocation } from "../src/evals/invocations.js";
 import type {
   Completion,
   Execution,
@@ -56,6 +57,13 @@ function hueStandIn(
     ignoreExecutionState?: boolean;
     /** Project id the stand-in reports; a hostile origin may return anything. */
     projectId?: string;
+    ciVerdict?: "pass" | "fail" | "incomplete";
+    ciCreateFailures?: number;
+    ciNoReceipt?: boolean;
+    ciBuiltin?: boolean;
+    ciScoringTransitions?: boolean;
+    /** Hold one acknowledgement after durable completion so the runner can be killed. */
+    ciLoseCompletionAck?: string;
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
@@ -94,14 +102,20 @@ function hueStandIn(
   const scorerVersion = {
     id: randomUUID(),
     contentDigest: digest,
-    definition: {
-      kind: "world_outcome",
-      entry: "hue.conversion_outcome.v1",
-      metrics: [
-        { name: "refund_recorded", type: "boolean" },
-        { name: "tone", type: "text" },
-      ],
-    },
+    definition: options.ciBuiltin
+      ? {
+          kind: "builtin",
+          entry: "hue.exact_match.v1",
+          config: {},
+        }
+      : {
+          kind: "world_outcome",
+          entry: "hue.conversion_outcome.v1",
+          metrics: [
+            { name: "refund_recorded", type: "boolean" },
+            { name: "tone", type: "text" },
+          ],
+        },
   };
   const scenario = {
     id: randomUUID(),
@@ -134,6 +148,7 @@ function hueStandIn(
   >();
   const results = new Map<string, StoredResult[]>();
   const resultPolls = new Map<string, number>();
+  const scoringPolls = new Map<string, number>();
   const calls = {
     requests: [] as string[],
     otlp: 0,
@@ -183,6 +198,11 @@ function hueStandIn(
     results.set(experiment.evaluation.id, []);
     return experiment;
   }
+  let invocation: EvalInvocation | undefined;
+  let baseline: EvalInvocation | undefined;
+  const creationRequests: unknown[] = [];
+  const baselineRequests: unknown[] = [];
+  let heldCompletion = false;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -192,6 +212,103 @@ function hueStandIn(
       calls.requests.push(`${request.method} ${path}`);
       if (request.headers.get("authorization") !== `Bearer ${key}`)
         return new Response(null, { status: 401 });
+      if (path === "/eval-invocations" && request.method === "GET")
+        return invocation ? Response.json({ invocation }) : new Response(null, { status: 404 });
+      if (path === "/eval-invocations" && request.method === "POST") {
+        const body = createEvalInvocationInput.parse(await request.json());
+        creationRequests.push(body);
+        if (!invocation) {
+          const experiment = createExperiment({
+            name: body.name ?? "CI",
+            datasetVersionId: version.id,
+            scorerVersionIds: [scorerVersion.id],
+            config: body.config,
+          });
+          invocation = {
+            id: randomUUID(),
+            runId: experiment.id,
+            runUrl: `${url.origin}/runs/${experiment.id}`,
+            deadlineAt: body.deadlineAt,
+            state: "active",
+            receipt: null,
+            manifest: {
+              version: 1,
+              digest,
+              evalSetId: dataset.id,
+              evalSetVersionId: version.id,
+              scoringRunId: experiment.evaluation.id,
+              config: body.config ?? {},
+              policy: body.policy ?? { thresholds: [] },
+              cases: [
+                {
+                  caseId: frozenCase.id,
+                  contentDigest: digest,
+                  evaluatorVersionIds: [scorerVersion.id],
+                  world: null,
+                },
+              ],
+              evaluators: [
+                {
+                  id: scorerVersion.id,
+                  evaluatorId: scorerId,
+                  version: 1,
+                  kind: scorerVersion.definition.kind,
+                  contentDigest: digest,
+                },
+              ],
+              baselineRunId: null,
+            },
+          };
+        }
+        if (creationRequests.length <= (options.ciCreateFailures ?? 0))
+          return new Response(null, { status: 503 });
+        return Response.json({ invocation });
+      }
+      if (path.startsWith("/eval-invocations/") && invocation) {
+        if (path.endsWith("/baseline")) {
+          baselineRequests.push(await request.json());
+          if (!baseline) {
+            const experiment = createExperiment({
+              name: "Base",
+              datasetVersionId: version.id,
+              scorerVersionIds: [scorerVersion.id],
+              config: invocation.manifest.config,
+            });
+            baseline = {
+              ...structuredClone(invocation),
+              id: randomUUID(),
+              runId: experiment.id,
+              runUrl: `${url.origin}/runs/${experiment.id}`,
+              manifest: {
+                ...structuredClone(invocation.manifest),
+                digest: "e".repeat(64),
+                scoringRunId: experiment.evaluation.id,
+              },
+            };
+          }
+          return Response.json({ invocation: baseline });
+        }
+        const selected =
+          baseline && (path.includes(baseline.id) || path.includes(baseline.runId))
+            ? baseline
+            : invocation;
+        if (request.method === "POST") {
+          selected.state = path.endsWith("/cancel") ? "cancelled" : "finalized";
+          if (!options.ciNoReceipt)
+            selected.receipt = {
+              id: randomUUID(),
+              manifestDigest: selected.manifest.digest,
+              runId: selected.runId,
+              scoringRunId: selected.manifest.scoringRunId,
+              verdict: selected.state === "cancelled" ? "cancelled" : (options.ciVerdict ?? "pass"),
+              finalizedAt: new Date().toISOString(),
+              executionIds: [],
+              results: [],
+              reasons: [],
+            };
+        }
+        return Response.json({ invocation: selected });
+      }
       if (path === "/projects/current")
         return Response.json({
           id: projectId,
@@ -524,6 +641,7 @@ function hueStandIn(
           contentDigest: digest,
           outputEvidence: hasOutput ? "available" : "unavailable",
           executionState: body.state as Subject["executionState"],
+          environmentVersionId,
           traceSnapshotId: randomUUID(),
           caseId: frozenCase.id,
           datasetVersionId: version.id,
@@ -541,7 +659,7 @@ function hueStandIn(
         const verdict = state.verdict;
         const failed =
           verdict === "fail" || (!options.ignoreExecutionState && body.state !== "succeeded");
-        if (verdict !== "none")
+        if (verdict !== "none" && !options.ciBuiltin)
           results.get(experiment.evaluation.id)!.push({
             id: randomUUID(),
             runId: experiment.evaluation.id,
@@ -565,6 +683,11 @@ function hueStandIn(
             error: verdict === "error" ? { type: "OutcomeEvaluatorUnavailable" } : null,
             sourceDigest: null,
           });
+        if (options.ciLoseCompletionAck && !heldCompletion) {
+          heldCompletion = true;
+          await writeFile(options.ciLoseCompletionAck, "completed");
+          await sleep(1500);
+        }
         return Response.json({
           executionId: execution.id,
           subjectId,
@@ -572,11 +695,46 @@ function hueStandIn(
           traceSnapshotId: randomUUID(),
         } satisfies Completion);
       }
+      const scoringMatch = /^\/evaluation-runs\/([^/]+)$/.exec(path);
+      if (scoringMatch && request.method === "GET") {
+        const scoringId = scoringMatch[1]!;
+        const scoring = [...experiments.values()].find(
+          (experiment) => experiment.evaluation.id === scoringId,
+        )!.evaluation;
+        const polls = (scoringPolls.get(scoringId) ?? 0) + 1;
+        scoringPolls.set(scoringId, polls);
+        const saved = results.get(scoringId) ?? [];
+        const pending = polls <= state.deferredPolls ? 1 : 0;
+        return Response.json({
+          ...scoring,
+          itemCount:
+            options.ciScoringTransitions && polls === 1
+              ? 0
+              : (runItems.get(scoringId)?.length ?? 0),
+          managedScoringActive: options.ciScoringTransitions && polls === 2,
+          scores: {
+            scored: saved.filter((result) => result.state === "scored").length,
+            error: saved.filter((result) => result.state === "error").length,
+            skipped: saved.filter((result) => result.state === "skipped").length,
+            notApplicable: 0,
+            pending: options.ciScoringTransitions && polls === 3 ? 1 : pending,
+          },
+        });
+      }
       const runMatch = /^\/evaluation-runs\/([^/]+)\/(items|results)$/.exec(path);
       if (runMatch) {
         if (runMatch[2] === "items")
           return Response.json({ items: runItems.get(runMatch[1]!) ?? [], nextCursor: null });
-        if (request.method === "POST") return Response.json({ ids: [randomUUID()] });
+        if (request.method === "POST") {
+          const uploaded = body.results as StoredResult[];
+          const saved = uploaded.map((result) => ({
+            ...result,
+            id: randomUUID(),
+            runId: runMatch[1]!,
+          }));
+          results.get(runMatch[1]!)!.push(...saved);
+          return Response.json({ ids: saved.map((result) => result.id) });
+        }
         const polls = (resultPolls.get(runMatch[1]!) ?? 0) + 1;
         resultPolls.set(runMatch[1]!, polls);
         if (polls <= state.deferredPolls) return Response.json({ items: [], nextCursor: null });
@@ -616,6 +774,9 @@ function hueStandIn(
     scorerVersion,
     experiments,
     worlds,
+    creationRequests,
+    baselineRequests,
+    results,
     enqueueRun() {
       const experiment = createExperiment({
         name: "Launched from Hue",
@@ -650,6 +811,8 @@ function hue(
       cwd: options.cwd,
       env: {
         ...inherited,
+        // GitHub event fixtures opt in below; temporary local cases have no checkout.
+        GITHUB_ACTIONS: "false",
         NO_COLOR: "1",
         ...(options.dropKey ? {} : { HUE_API_KEY: key }),
         ...options.env,
@@ -2120,7 +2283,7 @@ describe("hue eval", () => {
   );
 
   test(
-    "a run whose process was killed resumes on the same command and reruns the case it left running",
+    "a run whose process was killed stays uncertain without replaying its world agent",
     async () => {
       const f = hueStandIn();
       const cwd = await workspace();
@@ -2152,11 +2315,10 @@ describe("hue eval", () => {
 
         const resumed = await hue(args, { cwd, env: { HUE_TEST_SURVIVOR: survivor } });
         expect(resumed.stderr).not.toContain("locked");
-        expect(resumed.status).toBe(0);
+        expect(resumed.status).toBe(1);
         expect(f.calls.experiments).toHaveLength(1);
-        expect(f.calls.starts).toHaveLength(2);
-        expect(f.calls.starts[1]).toMatchObject({ allowUncertainRetry: true });
-        expect(f.calls.completions).toEqual([expect.objectContaining({ state: "succeeded" })]);
+        expect(f.calls.starts).toHaveLength(1);
+        expect(f.calls.completions).toEqual([]);
       } finally {
         f.stop();
         await rm(cwd, { recursive: true, force: true });
@@ -2710,4 +2872,524 @@ describe("hue eval", () => {
     },
     SPAWN_TIMEOUT,
   );
+});
+
+describe("CI invocation CLI", () => {
+  test.each([
+    { builtin: false, baseline: false },
+    { builtin: true, baseline: false },
+    { builtin: true, baseline: true },
+  ])(
+    "CI recovers durable work without local checkpoints %j",
+    async ({ builtin, baseline }) => {
+      const directory = await mkdtemp(join(tmpdir(), "hue-ci-lost-runner-"));
+      const first = join(directory, "first");
+      const second = join(directory, "second");
+      const marker = join(directory, "completed");
+      const fixture = hueStandIn({
+        answerOnlyScenario: true,
+        ciBuiltin: builtin,
+        ciLoseCompletionAck: marker,
+      });
+      try {
+        spawnSync("git", ["init", "--quiet", first]);
+        spawnSync("git", [
+          "-C",
+          first,
+          "-c",
+          "user.name=Synthetic",
+          "-c",
+          "user.email=synthetic@example.com",
+          "commit",
+          "--allow-empty",
+          "-m",
+          "Synthetic",
+        ]);
+        spawnSync("git", ["clone", "--quiet", first, second]);
+        const head = spawnSync("git", ["-C", first, "rev-parse", "HEAD"], {
+          encoding: "utf8",
+        }).stdout.trim();
+        const env = {
+          HUE_BASE_URL: fixture.baseUrl,
+          GITHUB_ACTIONS: "true",
+          GITHUB_REPOSITORY: "synthetic/project",
+          GITHUB_RUN_ID: "456",
+          GITHUB_EVENT_NAME: "pull_request",
+          GITHUB_EVENT_PATH: join(directory, "event.json"),
+        };
+        await writeFile(
+          env.GITHUB_EVENT_PATH,
+          JSON.stringify({ pull_request: { number: 7, head: { sha: head }, base: { sha: head } } }),
+        );
+        const config = JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: "printf saved",
+          ...(baseline ? { baselineCommand: "printf saved", baselineDirectory: "base" } : {}),
+        });
+        for (const checkout of [first, second]) {
+          if (baseline) spawnSync("git", ["clone", "--quiet", first, join(checkout, "base")]);
+          await writeFile(join(checkout, "hue.eval.json"), config);
+        }
+        const killed = await hue(["--ci", "--json"], {
+          cwd: first,
+          env,
+          interruptAfter: { file: marker, times: 1, signal: "SIGKILL" },
+        });
+        expect(killed.status).not.toBe(0);
+        const recovered = await hue(["--ci", "--json"], { cwd: second, env });
+        expect({ status: recovered.status, stderr: recovered.stderr }).toEqual({
+          status: 0,
+          stderr: "",
+        });
+        expect(JSON.parse(recovered.stdout).receipt.verdict).toBe("pass");
+        expect(fixture.creationRequests).toHaveLength(1);
+        expect(fixture.calls.starts).toHaveLength(baseline ? 2 : 1);
+        expect(fixture.calls.completions).toHaveLength(baseline ? 2 : 1);
+        if (builtin)
+          expect(
+            fixture.calls.requests.some(
+              (request) => request.endsWith("/results") && request.startsWith("POST"),
+            ),
+          ).toBe(true);
+      } finally {
+        fixture.stop();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
+  test("CI scores builtins locally before finalizing the authoritative receipt", async () => {
+    const fixture = hueStandIn({ answerOnlyScenario: true, ciBuiltin: true });
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-builtin-"));
+    try {
+      await writeFile(
+        join(directory, "hue.eval.json"),
+        JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: "printf saved",
+          scoringTimeoutSeconds: 2,
+        }),
+      );
+      const result = await hue(["--ci", "--json"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+      const scores = [...fixture.results.values()].flat();
+      expect(scores).toHaveLength(1);
+      expect(scores[0]).toMatchObject({
+        state: "scored",
+        metrics: [{ name: "match", value: true, passed: true }],
+      });
+      const uploaded = fixture.calls.requests.findIndex(
+        (request) => request.startsWith("POST /evaluation-runs/") && request.endsWith("/results"),
+      );
+      expect(uploaded).toBeGreaterThan(0);
+      expect(
+        fixture.calls.requests.findIndex((request) => request.endsWith("/finalize")),
+      ).toBeGreaterThan(uploaded);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        verdict: "pass",
+        category: "pass",
+        exitCode: 0,
+      });
+    } finally {
+      fixture.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("CI executes a prepared base through its frozen clone and finalizes it before the candidate", async () => {
+    const fixture = hueStandIn({ answerOnlyScenario: true });
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-base-"));
+    const base = join(directory, "base");
+    try {
+      spawnSync("git", ["init", "--quiet", base]);
+      spawnSync(
+        "git",
+        [
+          "-C",
+          base,
+          "-c",
+          "user.name=Synthetic",
+          "-c",
+          "user.email=synthetic@example.com",
+          "commit",
+          "--allow-empty",
+          "-m",
+          "Synthetic",
+        ],
+        { stdio: "ignore" },
+      );
+      const sha = spawnSync("git", ["-C", base, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).stdout.trim();
+      await writeFile(join(base, "agent.mjs"), "console.log('base');");
+      await writeFile(join(directory, "agent.mjs"), "console.log('candidate');");
+      await writeFile(
+        join(directory, "hue.eval.json"),
+        JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: 'node "$HUE_PROJECT_DIR/agent.mjs"',
+          baselineCommand: 'node "$HUE_PROJECT_DIR/agent.mjs"',
+          baselineDirectory: "base",
+          baselineRunId: randomUUID(),
+          policy: {
+            baselineComparisons: [
+              {
+                evaluatorVersionId: fixture.scorerVersion.id,
+                metric: "refund_recorded",
+                operator: "gte",
+                tolerance: 0,
+              },
+            ],
+          },
+        }),
+      );
+      const result = await hue(["--ci", "--json"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+      expect(fixture.baselineRequests).toEqual([
+        expect.objectContaining({ ci: { provider: "local", commitSha: sha, baseSha: sha } }),
+      ]);
+      expect(fixture.calls.completions.map((completion) => completion.output)).toEqual([
+        "base",
+        "candidate",
+      ]);
+      const finalizations = fixture.calls.requests.filter((request) =>
+        request.endsWith("/finalize"),
+      );
+      expect(finalizations).toHaveLength(2);
+      const report = JSON.parse(result.stdout);
+      expect(finalizations.at(-1)).toBe(`POST /eval-invocations/${report.invocationId}/finalize`);
+      const repeat = await hue(["--ci", "--json"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect(JSON.parse(repeat.stdout).receipt).toEqual(report.receipt);
+      expect(fixture.calls.completions).toHaveLength(2);
+    } finally {
+      fixture.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("CI runs a command in a fresh home without the control key, uses the receipt, and status executes nothing", async () => {
+    const fixture = hueStandIn({ answerOnlyScenario: true, ciVerdict: "fail" });
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-"));
+    try {
+      await writeFile(
+        join(directory, "agent.mjs"),
+        `
+        import { existsSync, writeFileSync } from 'node:fs';
+        if (process.env.HUE_API_KEY || process.env.HUE_MCP_KEY) throw Error('control key reached child');
+        if (!process.env.HOME.startsWith(process.env.HUE_CASE_DIR)) throw Error('shared home');
+        if (process.cwd() !== process.env.HUE_CASE_DIR) throw Error('shared cwd');
+        if (existsSync(process.env.HOME + '/memory')) throw Error('shared memory');
+        writeFileSync(process.env.HOME + '/memory', 'fresh');
+        writeFileSync(process.env.HUE_PROJECT_DIR + '/executed', 'yes');
+        console.log('saved');
+      `,
+      );
+      await writeFile(
+        join(directory, "hue.eval.json"),
+        JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: 'node "$HUE_PROJECT_DIR/agent.mjs"',
+          scoringTimeoutSeconds: 2,
+          concurrency: 101,
+        }),
+      );
+      const result = await hue(
+        ["--ci", "--config", "hue.eval.json", "--report-dir", "reports", "--json"],
+        {
+          cwd: directory,
+          env: { HUE_BASE_URL: fixture.baseUrl, HUE_MCP_KEY: "hue_sk_synthetic_other_control" },
+        },
+      );
+      expect(result.stderr).not.toContain(key);
+      expect({ status: result.status, stdout: result.stdout, stderr: result.stderr }).toMatchObject(
+        { status: 1 },
+      );
+      const report = JSON.parse(result.stdout);
+      expect(report.verdict).toBe("fail");
+      expect(report.receipt.verdict).toBe("fail");
+      expect(await readFile(join(directory, "executed"), "utf8")).toBe("yes");
+      expect(await readFile(join(directory, "reports/junit.xml"), "utf8")).toContain(
+        'failures="1"',
+      );
+      expect(await readFile(join(directory, "reports/summary.md"), "utf8")).toContain(
+        "quality_failure",
+      );
+      const before = [...fixture.calls.requests];
+      const status = await hue(
+        ["status", report.runId, "--report-dir", "status-reports", "--json"],
+        {
+          cwd: directory,
+          env: { HUE_BASE_URL: fixture.baseUrl },
+        },
+      );
+      expect(status.status).toBe(1);
+      expect(JSON.parse(status.stdout).receipt).toEqual(report.receipt);
+      expect(fixture.calls.requests.slice(before.length)).toEqual([
+        `GET /eval-invocations/${report.runId}`,
+      ]);
+      const replay = await hue(
+        ["--ci", "--config", "hue.eval.json", "--report-dir", "replay-reports", "--json"],
+        {
+          cwd: directory,
+          env: { HUE_BASE_URL: fixture.baseUrl },
+        },
+      );
+      expect(replay.status).toBe(1);
+      expect(fixture.creationRequests[1]).toEqual(fixture.creationRequests[0]);
+      expect(JSON.parse(replay.stdout).receipt).toEqual(report.receipt);
+    } finally {
+      fixture.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("CI retries lost creation acknowledgements with identical keys and waits for scoring", async () => {
+    const fixture = hueStandIn({
+      answerOnlyScenario: true,
+      ciCreateFailures: 2,
+      ciScoringTransitions: true,
+    });
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-retry-"));
+    try {
+      await writeFile(
+        join(directory, "hue.eval.json"),
+        JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: "printf saved",
+          scoringTimeoutSeconds: 10,
+        }),
+      );
+      const result = await hue(["--ci", "--json"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect({ status: result.status, stderr: result.stderr }).toMatchObject({ status: 0 });
+      expect(fixture.creationRequests).toHaveLength(3);
+      expect(fixture.creationRequests[1]).toEqual(fixture.creationRequests[0]);
+      expect(fixture.creationRequests[2]).toEqual(fixture.creationRequests[0]);
+      const finalize = fixture.calls.requests.findIndex((call) => call.endsWith("/finalize"));
+      const report = JSON.parse(result.stdout);
+      expect(
+        fixture.calls.requests
+          .slice(0, finalize)
+          .filter((call) => call === `GET /evaluation-runs/${report.receipt.scoringRunId}`).length,
+      ).toBe(4);
+      expect(
+        fixture.calls.requests.filter((call) => /^GET \/evaluation-results\//.test(call)),
+      ).toEqual([]);
+      expect(report.verdict).toBe("pass");
+    } finally {
+      fixture.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test.each(["pull_request", "merge_group"])(
+    "CI recovers on a fresh GitHub %s checkout using native metadata",
+    async (eventName) => {
+      const fixture = hueStandIn({ answerOnlyScenario: true });
+      const first = await mkdtemp(join(tmpdir(), "hue-ci-github-"));
+      const second = await mkdtemp(join(tmpdir(), "hue-ci-github-recovered-"));
+      try {
+        spawnSync("git", ["init", "--quiet", first]);
+        spawnSync(
+          "git",
+          [
+            "-C",
+            first,
+            "-c",
+            "user.name=Synthetic",
+            "-c",
+            "user.email=synthetic@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Synthetic",
+          ],
+          { stdio: "ignore" },
+        );
+        spawnSync("git", ["clone", "--quiet", first, second]);
+        const head = spawnSync("git", ["-C", first, "rev-parse", "HEAD"], {
+          encoding: "utf8",
+        }).stdout.trim();
+        const env = {
+          HUE_BASE_URL: fixture.baseUrl,
+          GITHUB_ACTIONS: "true",
+          GITHUB_REPOSITORY: "synthetic/project",
+          GITHUB_RUN_ID: "123",
+          ...(eventName === "pull_request" ? { GITHUB_RUN_ATTEMPT: "1" } : {}),
+          GITHUB_EVENT_NAME: eventName,
+          GITHUB_EVENT_PATH: join(first, "event.json"),
+        };
+        await writeFile(
+          env.GITHUB_EVENT_PATH,
+          JSON.stringify(
+            eventName === "pull_request"
+              ? {
+                  pull_request: { number: 7, head: { sha: "pr-head" }, base: { sha: "pr-base" } },
+                }
+              : { merge_group: { base_sha: "pr-base" } },
+          ),
+        );
+        const config = JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: "printf saved",
+        });
+        await writeFile(join(first, "hue.eval.json"), config);
+        await writeFile(join(second, "hue.eval.json"), config);
+        const candidate = await hue(["--ci", "--json"], { cwd: first, env });
+        const recovery = await hue(["--ci", "--json"], { cwd: second, env });
+        expect(candidate.status).toBe(0);
+        expect(recovery.status).toBe(0);
+        expect(fixture.creationRequests).toHaveLength(1);
+        expect(fixture.creationRequests[0]).toMatchObject({
+          ci: {
+            provider: "github",
+            commitSha: head,
+            baseSha: "pr-base",
+            ...(eventName === "pull_request"
+              ? { pullRequestHeadSha: "pr-head", pullRequestNumber: 7 }
+              : {}),
+          },
+        });
+        expect(fixture.calls.starts).toHaveLength(1);
+        expect(JSON.parse(recovery.stdout).receipt).toEqual(JSON.parse(candidate.stdout).receipt);
+      } finally {
+        fixture.stop();
+        await rm(first, { recursive: true, force: true });
+        await rm(second, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
+  test("CI status never invents a verdict without a receipt", async () => {
+    const fixture = hueStandIn({ answerOnlyScenario: true, ciNoReceipt: true });
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-no-receipt-"));
+    try {
+      await writeFile(
+        join(directory, "hue.eval.json"),
+        JSON.stringify({ evalSetVersionId: fixture.version.id, command: "printf saved" }),
+      );
+      const candidate = await hue(["--ci", "--json"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      const report = JSON.parse(candidate.stdout);
+      expect(report).toMatchObject({ verdict: null, receipt: null, exitCode: 1 });
+      const before = fixture.calls.starts.length;
+      const recovery = await hue(["status", report.runId, "--json"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect(JSON.parse(recovery.stdout)).toMatchObject({
+        verdict: null,
+        receipt: null,
+        exitCode: 1,
+      });
+      expect(fixture.calls.starts).toHaveLength(before);
+    } finally {
+      fixture.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["deadline", "interrupted"] as const)(
+    "CI %s cancels durably and writes reports",
+    async (reason) => {
+      const fixture = hueStandIn({ answerOnlyScenario: true });
+      const directory = await mkdtemp(join(tmpdir(), "hue-ci-cancel-"));
+      try {
+        await writeFile(
+          join(directory, "hue.eval.json"),
+          JSON.stringify({
+            evalSetVersionId: fixture.version.id,
+            command: 'touch "$HUE_PROJECT_DIR/started"; sleep 30',
+            deadlineSeconds: reason === "deadline" ? 1 : 30,
+          }),
+        );
+        const result = await hue(["--ci", "--json"], {
+          cwd: directory,
+          env: { HUE_BASE_URL: fixture.baseUrl },
+          ...(reason === "interrupted"
+            ? {
+                interruptAfter: {
+                  file: join(directory, "started"),
+                  times: 1,
+                  signal: "SIGTERM" as const,
+                },
+              }
+            : {}),
+        });
+        expect(result.status).toBe(reason === "deadline" ? 1 : 130);
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          receipt: { verdict: "cancelled" },
+          category: reason === "deadline" ? "incomplete" : "cancelled",
+        });
+        expect(fixture.calls.requests.some((call) => call.endsWith("/cancel"))).toBe(true);
+        expect(await readFile(join(directory, ".hue/reports/junit.xml"), "utf8")).toContain(
+          'failures="1"',
+        );
+      } finally {
+        fixture.stop();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
+
+  test("CI invalid configuration writes setup reports", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-config-"));
+    try {
+      await writeFile(join(directory, "hue.eval.json"), '{"command":"echo saved","concurrency":0}');
+      const result = await hue(["--ci", "--json"], { cwd: directory });
+      expect(result.status).toBe(2);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        category: "configuration_error",
+        receipt: null,
+        verdict: null,
+      });
+      expect(await readFile(join(directory, ".hue/reports/summary.md"), "utf8")).toContain(
+        "configuration_error",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("CI missing credentials produces all reports and no authoritative verdict", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-setup-"));
+    try {
+      const result = await hue(["--ci", "--report-dir", "reports", "--json"], {
+        cwd: directory,
+        dropKey: true,
+      });
+      expect(result.status).toBe(2);
+      const report = JSON.parse(await readFile(join(directory, "reports/results.json"), "utf8"));
+      expect(report).toMatchObject({
+        category: "authentication_error",
+        verdict: null,
+        receipt: null,
+        exitCode: 2,
+      });
+      expect(await readFile(join(directory, "reports/junit.xml"), "utf8")).toContain(
+        "HUE_API_KEY is required",
+      );
+      expect(await readFile(join(directory, "reports/summary.md"), "utf8")).toContain(
+        "authentication_error",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });

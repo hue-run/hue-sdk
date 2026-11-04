@@ -79,6 +79,18 @@ JSON values are bounded to 200 KB, depth 32 and 20,000 nodes; request bodies are
 
 ## Content and durable recovery
 
+The invocation methods mirror the TypeScript client: `create_eval_invocation`,
+`get_eval_invocation_by_key`, `get_eval_invocation`, `create_eval_baseline`,
+`finalize_eval_invocation`, and `cancel_eval_invocation`. They require a server with evaluation
+invocation support. Creation resolves selections once into a frozen server manifest. Baseline
+creation clones those inputs for the intended base revision. Reads never run agents. Finalize
+only after scoring settles; an early call freezes an incomplete gate receipt. Retry safe control
+requests with the same key and body, including the original deadline. Responses retain camelCase
+wire fields and the original server verdict. A response without a receipt has no authoritative
+verdict. [CI command and policy reference](../sdk-typescript/CLI.md#run-evaluations-in-ci) covers
+the shared configuration and reports. The `hue` CLI ships in the TypeScript package and can run
+a Python agent through its configured command.
+
 `persist_result_content` is required independently of telemetry `capture_content`. When false, HTTP completions and local checkpoints omit raw target output, target exception messages, scorer evidence and arbitrary explanations. Typed metrics and caller-owned identity/configuration/policy metadata remain. Locally computed scores can still be uploaded. Historical scorers skip missing stored output without invoking a local callback. Telemetry content follows the separately chosen helper setting and redactor.
 
 `TraceEvidence("required")` ends the root span, flushes both OTLP signals, records acknowledgement in the checkpoint, then completes the execution. The client is shared by every case in flight, so each export failure names the traces of the records it concerned (`Hue.export_issues()`): a failure naming the case's trace marks the saved outcome `failed` and raises `TelemetryExportError`, final because its evidence is incomplete; one naming only other cases' traces leaves it accepted; one naming no trace, or a flush that did not succeed without a new failure, is decided by the case's trace receipt, which must hold the case's root span and at least as many spans as the case ended. A saved outcome still `pending` is decided by its receipt again on resume; one marked `failed`, or one the receipt does not hold, is refused as itself. One case's telemetry failure no longer fails the cases running beside it. A fresh exporter cannot acknowledge a prior failed export. `TraceEvidence("omit", "reason")` is an explicit policy that omits a copied trace snapshot even if export succeeds; it permits completion when export fails and retains the declared trace identity and reason. There is no automatic fallback or target rerun.
@@ -89,7 +101,9 @@ The runner saves a starting marker before requesting an execution and a running 
 
 The target's outcome (its state, its output when result content is persisted, its error and its trace) is saved as soon as it returns, before the scorers' files are fetched or anything is scored, so a failure after that resumes and scores the saved outcome without running the target again. Prepared completion/results and their stable request keys are saved before upload. A dropped acknowledgement can replay the same request without repeating the target or acknowledged scoring. A crash while the target runs, or a saved outcome whose output was not persisted, is uncertain; custom scorers may recompute after a crash before their results are saved. The runner stops starting new cases after a failure and lets already-running callbacks finish safely.
 
-`run_experiment` and `rescore` are synchronous entry points with bounded worker concurrency (1–100). Sync and async callbacks are supported inside their workers. From an async application, call the runner through `asyncio.to_thread`.
+`run_experiment` and `rescore` are synchronous entry points with worker concurrency defaulting
+to 20. Any positive JavaScript-safe integer is accepted. Sync and async callbacks are supported
+inside their workers. From an async application, call the runner through `asyncio.to_thread`.
 
 ## Case files
 

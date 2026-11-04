@@ -1211,8 +1211,8 @@ former; a case failed for its telemetry has `state: "error"`,
 Hue-owned `world_outcome` checks are graded after the world seals. An experiment always covers
 every case of the saved version; there is no case subset.
 
-`hue eval` runs up to four cases at a time by default in one-shot and worker modes.
-`--concurrency 1` runs cases serially. Any explicit `--concurrency` value from 1 to 100 takes precedence.
+`hue eval` runs up to 20 cases at a time by default in one-shot and worker modes.
+`--concurrency 1` runs cases serially. Any positive safe integer takes precedence.
 Each case keeps its own files, environment and checkpoint.
 
 The CLI requests the run's pinned `llm_judge` evaluators by default after outputs upload,
@@ -1355,6 +1355,96 @@ summary counts it apart from skipped cases) or Hue's checks were still pending a
 interrupted. On Node.js 22, load TypeScript adapters with `NODE_OPTIONS=--experimental-strip-types`;
 non-erasable syntax (enums, parameter properties, namespaces) needs a loader such as `--import tsx`
 on any Node.js version.
+
+## Run evaluations in CI
+
+CI evaluations use a server-owned frozen invocation and immutable gate receipt. They require
+a Hue server with evaluation invocation support and a **Read and write** project key.
+Save this configuration as `hue.eval.json`, replacing the eval set ID with your own:
+
+```json
+{
+  "evalSetId": "00000000-0000-4000-8000-000000000001",
+  "command": "node \"$HUE_PROJECT_DIR/agent.mjs\"",
+  "concurrency": 20,
+  "deadlineSeconds": 900,
+  "timeoutSeconds": 600,
+  "scoringTimeoutSeconds": 300
+}
+```
+
+```sh
+hue eval --ci --config hue.eval.json --report-dir .hue/reports
+```
+
+Each case starts a fresh command process in a private scratch directory, with its own `HOME`,
+`TMPDIR`, and XDG directories. `HUE_PROJECT_DIR` points to the configuration's directory.
+Use an absolute entry point or resolve it through that variable. Model credentials are inherited;
+Hue control credentials are removed. World cases receive their own scoped connection variables
+and world clock. The command reads `{"inputs": ..., "config": ...}` on stdin and writes its
+answer on stdout or through the existing case output files.
+
+Exactly one of `evalSetId` and `evalSetVersionId` is required. Optional `evaluatorIds` resolve
+published versions once; `evaluatorVersionIds` pin versions explicitly. When omitted, the case
+evaluator pins apply. `config` holds agent parameters. `localScorers` is an optional array of
+module paths relative to the configuration, each exporting its existing `LocalScorer` binding
+as default. Bindings must match the pinned definition and source digest. Builtin scorers execute
+through the SDK; Hue dispatches hosted scoring.
+
+`policy.thresholds` accepts `{evaluatorVersionId, metric, operator, value}` rules, with `operator`
+equal to `gte` or `lte`. Each applicable required result must meet its threshold. Thresholds do
+not average results. Missing, pending, duplicate, errored, or undecided required results cannot pass.
+Managed results that Hue marks not applicable retain that state.
+
+For regression checks, add `policy.baselineComparisons` rules of
+`{evaluatorVersionId, metric, operator, tolerance}`. The nonnegative tolerance applies to paired
+case means: `gte` requires `candidateMean >= baselineMean - tolerance`; `lte` requires
+`candidateMean <= baselineMean + tolerance`. Absolute required checks still apply.
+An optional `baselineRunId` is a reuse hint. Hue reuses it only when it is complete, compatible,
+and belongs to the intended base revision. Otherwise the invocation has no reusable baseline.
+To execute that base, prepare its checkout and dependencies yourself, then supply both fields:
+
+```json
+{
+  "baselineCommand": "node \"$HUE_PROJECT_DIR/agent.mjs\"",
+  "baselineDirectory": "../prepared-base"
+}
+```
+
+These fields extend the configuration above. The CLI verifies that the base checkout's Git HEAD
+matches the GitHub event's base commit. Locally, that checkout supplies the intended base commit.
+It executes a server-created clone of the candidate's frozen inputs, then finalizes the base
+before the candidate. `HUE_PROJECT_DIR` points to the base checkout for its commands. Missing or
+incomplete baseline evidence cannot establish a passing comparison.
+
+On GitHub, the CLI reads the checked-out Git HEAD, repository, workflow run ID and attempt,
+event name, and the PR or merge-group payload from native `GITHUB_*` variables. It records the
+PR head separately from the tested commit. The Action needs no extra CI context flags.
+Stable invocation identity excludes the workspace path. Recovery looks up that identity before
+resolving versions or computing another remote deadline. Saved control requests retain their
+keys and outputs. An uncertain agent attempt is never automatically executed again.
+
+The overall deadline defaults to 15 minutes, including setup, base execution, agent execution,
+and scoring. Case and scoring timeouts are separate. SIGINT and SIGTERM request durable remote
+cancellation; the saved remote deadline still applies after runner loss.
+
+The report directory contains `results.json`, `junit.xml`, and `summary.md`, including setup and
+authentication errors. JSON has `schemaVersion: 1`, `invocationId`, `runId`, `runUrl`, `verdict`,
+`receipt`, `category`, `errors: [{code, message}]`, and `exitCode`. IDs, URL, verdict, and receipt
+are null when unavailable. Without a receipt, `verdict` is always null. Receipt verdicts are
+`pass`, `fail`, `incomplete`, `error`, and `cancelled`. Categories are `pass`, `quality_failure`,
+`agent_error`, `configuration_error`, `authentication_error`, `hue_error`, `incomplete`, and
+`cancelled`. Reports preserve the server's verdict. Comparison receipts may include
+`baselineRunId`, `baselineReceiptId`, and `comparisons` containing each rule plus
+`candidateMean`, `baselineMean`, `passed`, and `caseIds`.
+
+Exit codes remain `0` for pass, `1` for failed, errored, or incomplete execution, `2` for
+configuration or authentication errors, and `130` for interruption. `--json` also prints the
+JSON report. To recover saved results without running agents or finalizing another receipt:
+
+```sh
+hue eval status <run-id> --report-dir .hue/reports --json
+```
 
 ## Evaluate a document eval set
 

@@ -102,7 +102,18 @@ class _PastByteBound(Exception):
     """Raised within ``json_value`` when the byte bound is passed, which is checked last."""
 
 
-def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
+def aggregate_bounds(max_bytes: int) -> dict[str, int]:
+    """Response wrappers contain independently validated values; retain a total byte cap."""
+    return {"max_bytes": max_bytes, "max_nodes": -(-max_bytes // 2), "max_depth": VALUE_DEPTH + 8}
+
+
+def json_value(
+    value: Any,
+    max_bytes: int = VALUE_BYTES,
+    *,
+    max_nodes: int = VALUE_NODES,
+    max_depth: int = VALUE_DEPTH,
+) -> Any:
     """Validate before serialization; never coerce keys, NaN, dates or large Python integers.
 
     As the TypeScript SDK's ``json``, the value is read depth-first in order (an object's members
@@ -149,7 +160,7 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
     def visit(item: Any, depth: int) -> None:
         nonlocal nodes
         nodes += 1
-        if nodes > VALUE_NODES or depth > VALUE_DEPTH:
+        if nodes > max_nodes or depth > max_depth:
             raise JsonLimitError("structure", "JSON exceeds depth or node limits.")
         if item is None or type(item) is bool:
             charge(5 if item is False else 4)
@@ -168,7 +179,7 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
             raise ValueError("Expected JSON without coercion or cycles.")
         # Each element or member is a value: a container with more than the values left is
         # refused before it is read.
-        if len(item) > VALUE_NODES - nodes:
+        if len(item) > max_nodes - nodes:
             raise JsonLimitError("structure", "JSON exceeds depth or node limits.")
         ancestors.add(id(item))
         try:
