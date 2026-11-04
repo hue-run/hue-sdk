@@ -8,7 +8,7 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### Unreleased
+### [0.26.1] - 2026-11-04
 
 #### Added
 
@@ -22,6 +22,8 @@ refuses to publish a version without a matching entry below.
 
 #### Fixed
 
+- `hue listen` forwards Slack slash commands and interactions to a local HTTP receiver and returns
+  successful immediate replies to Hue, capped at 64 KiB. Event and error response bodies stay local.
 - HTTP capture decodes gzip, deflate and br responses before applying the text and size policy,
   so a compressed JSON or text response records `output.value` instead of its size only. The
   application still receives its usual bytes. Undecodable bytes record a truncation marker.

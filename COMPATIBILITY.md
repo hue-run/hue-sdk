@@ -1,6 +1,6 @@
 # Compatibility
 
-This checkout covers TypeScript `0.26.0` and Python `0.14.0`. Registry availability is established by the completed [release workflow](https://github.com/hue-run/hue-sdk/blob/main/RELEASING.md). See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+This checkout covers TypeScript `0.26.1` and Python `0.14.0`. Registry availability is established by the completed [release workflow](https://github.com/hue-run/hue-sdk/blob/main/RELEASING.md). See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -14,7 +14,7 @@ This checkout covers TypeScript `0.26.0` and Python `0.14.0`. Registry availabil
 
 ## TypeScript outbound HTTP capture
 
-From TypeScript `0.26.0`, `createHue` and `createHueTransport` capture outbound HTTP identity by default. HTTP query arguments and supported text bodies follow `captureContent`; `captureHttpBodies: false` keeps identity only, and `captureHttp: false` disables capture. Disabled clients capture nothing. Capture observes request bytes and headers without adding `traceparent` or changing application headers.
+Since TypeScript `0.26.0`, `createHue` and `createHueTransport` capture outbound HTTP identity by default. HTTP query arguments and supported text bodies follow `captureContent`; `captureHttpBodies: false` keeps identity only, and `captureHttp: false` disables capture. Disabled clients capture nothing. Capture observes request bytes and headers without adding `traceparent` or changing application headers.
 
 Node.js 22 and 24 observe `node:http`, `node:https`, native fetch and undici through diagnostics and per-request byte callbacks. Installed-package loopback checks cover axios, node-fetch v2, got, gaxios, googleapis, Slack WebClient, undici fetch, Linear and Notion. Bun 1.4.2 observes Node HTTP clients and wraps global fetch without cloning or draining an unread response. Create Hue before clients that retain global fetch. Bun's built-in `node-fetch` alias bypasses that wrapper; gaxios and googleapis using the alias need an explicit global-fetch implementation or Node. Bun's fetch wrapper omits unobserved request bodies rather than consume them.
 
