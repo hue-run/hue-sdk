@@ -192,6 +192,49 @@ def test_handoff_keeps_each_surface_connection_as_stated():
     assert "connection" not in world["surfaces"][0]
 
 
+def test_handoff_and_written_mcp_config_drop_executable_fields(tmp_path):
+    run = gateway_run()
+    server = run["mcpConfig"]["mcpServers"]["gmail-primary"]
+    server.update(command="synthetic-not-executed", args=["--canary"], env={"CANARY": "value"})
+    run["mcpConfig"]["inputs"] = [{"command": "synthetic-not-executed"}]
+    world = world_handoff(run)
+    assert world is not None
+    expected = {
+        "mcpServers": {
+            "gmail-primary": {
+                "type": "http",
+                "url": MIRROR,
+                "headers": {"Authorization": f"Bearer {TOKEN}"},
+            }
+        }
+    }
+    assert world["mcpConfig"] == expected
+    # The file boundary also handles a directly supplied or modified handoff.
+    world["mcpConfig"] = run["mcpConfig"]
+    with mcp_config_file(world, directory=str(tmp_path)) as path:
+        with open(path) as handle:
+            assert json.load(handle) == expected
+    assert list(tmp_path.iterdir()) == []
+    assert server["command"] == "synthetic-not-executed"
+
+
+def test_handoff_and_mcp_file_reject_stdio_without_writing(tmp_path):
+    run = gateway_run()
+    world = world_handoff(run)
+    assert world is not None
+    server = run["mcpConfig"]["mcpServers"]["gmail-primary"]
+    server.update(type="stdio", command="synthetic-not-executed", args=["--canary"])
+    with pytest.raises(ValueError, match="HTTP transport"):
+        world_handoff(run)
+    world["mcpConfig"] = run["mcpConfig"]
+    with (
+        pytest.raises(ValueError, match="HTTP transport"),
+        mcp_config_file(world, directory=str(tmp_path)),
+    ):
+        pytest.fail("unsupported transport must fail before yielding a config")
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_handoff_carries_the_worlds_now_and_world_now_reads_it_where_an_agent_reads_the_clock():
     world = world_handoff(gateway_run())
     assert world is not None

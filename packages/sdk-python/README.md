@@ -665,6 +665,11 @@ finally:
 evidence = client.get_evidence(run["id"], section="ledger")
 ```
 
+`world_handoff` and `mcp_config_file` keep only each MCP server's HTTP transport, URL and headers.
+They reject non-HTTP transports and omit extra configuration fields such as executable commands,
+arguments and server environment variables. The file helper applies the same projection to a
+directly supplied handoff before writing its private file.
+
 `agent_environment` removes `HUE_API_KEY`, `HUE_MCP_KEY` and any value carrying a Hue control-plane
 credential (`hue_sk_`, `hue_setup_`, `hue_attempt_`, `hue_mcp_`, `hue_inv_`, `hue_install_`,
 `hue_at_`, `hue_rt_`, `hue_it_`, `hue_oauth_`) anywhere in it, including wrapped, percent-encoded or

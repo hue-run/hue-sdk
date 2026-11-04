@@ -19,7 +19,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import cast
 
-from .types import EnvironmentRun, LegacyMcpCapability, WorldHandoff
+from .types import EnvironmentRun, LegacyMcpCapability, WorldHandoff, WorldMcpConfig, WorldMcpServer
 
 #: Variables that authenticate against Hue's control plane rather than a simulated provider.
 HUE_CONTROL_PLANE_VARIABLES: tuple[str, ...] = (
@@ -93,6 +93,20 @@ _HANDOFF_ENV = re.compile(
 )
 
 
+def _http_mcp_config(config: WorldMcpConfig) -> WorldMcpConfig:
+    servers: dict[str, WorldMcpServer] = {}
+    for name, server in config["mcpServers"].items():
+        if server["type"] != "http":
+            raise ValueError("World MCP servers must use HTTP transport.")
+        # A World supplies remote connections, never executable client configuration.
+        servers[name] = {
+            "type": "http",
+            "url": server["url"],
+            "headers": deepcopy(server["headers"]),
+        }
+    return {"mcpServers": servers}
+
+
 def world_handoff(run: EnvironmentRun) -> WorldHandoff | None:
     """The world an agent acts on through provider mirrors, or ``None`` for a world created
     while the gateway was off (that world has Hue-native tools and no mirror URLs). Only the
@@ -111,7 +125,7 @@ def world_handoff(run: EnvironmentRun) -> WorldHandoff | None:
         "now": run.get("now") or run["env"].get("HUE_WORLD_NOW") or None,
         "surfaces": deepcopy(run["surfaces"]),
         "env": {name: value for name, value in run["env"].items() if _HANDOFF_ENV.match(name)},
-        "mcpConfig": deepcopy(run["mcpConfig"]),
+        "mcpConfig": _http_mcp_config(run["mcpConfig"]),
     }
 
 
@@ -219,13 +233,14 @@ def mcp_config_file(world: WorldHandoff, *, directory: str | None = None) -> Ite
     """Write the world's ``mcpConfig`` as an owner-only file (mode 0600 in a private 0700
     directory) for the duration of the block and remove the directory afterwards. The file
     carries the world token; never log its contents."""
+    config = _http_mcp_config(world["mcpConfig"])
     private = tempfile.mkdtemp(prefix="hue-world-", dir=directory)
     try:
         os.chmod(private, 0o700)
         path = os.path.join(private, "mcp.json")
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(world["mcpConfig"], handle, indent=2)
+            json.dump(config, handle, indent=2)
             handle.write("\n")
         yield path
     finally:
