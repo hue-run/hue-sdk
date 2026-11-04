@@ -30,6 +30,10 @@ merge-group events, receipt-only verdicts, cancellation/deadline and setup/authe
 The durable-completion fixtures kill the CLI after Hue saves an execution but before its
 completion acknowledgement arrives. A fresh clone finishes managed or builtin scoring and
 the baseline flow without starting the saved execution again.
+Privacy fixtures check independent `--no-content` and `--no-output` controls, their config
+equivalents, unchanged defaults, explicit content overrides, and conflicting flags. They
+inspect exported OTLP bytes and completion bodies for direct and World cases; an incomplete
+server receipt remains incomplete when output is withheld.
 `node packages/sdk-typescript/scripts/verify-package.mjs` repeats this group with the installed
 tarball. These are loopback-stub checks, not hosted Hue acceptance.
 

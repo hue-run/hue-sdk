@@ -2876,6 +2876,110 @@ describe("hue eval", () => {
 
 describe("CI invocation CLI", () => {
   test.each([
+    { flags: [], config: {}, capture: true, output: true, world: false },
+    { flags: ["--no-content"], config: {}, capture: false, output: true, world: false },
+    { flags: ["--no-output"], config: {}, capture: true, output: false, world: false },
+    {
+      flags: ["--no-content", "--no-output"],
+      config: {},
+      capture: false,
+      output: false,
+      world: true,
+    },
+    {
+      flags: [],
+      config: { captureContent: false, persistResultContent: false },
+      capture: false,
+      output: false,
+      world: false,
+    },
+    {
+      flags: ["--content"],
+      config: { captureContent: false },
+      capture: true,
+      output: true,
+      world: false,
+    },
+  ])(
+    "CI applies independent privacy policies %j",
+    async ({ flags, config, capture, output, world }) => {
+      const fixture = hueStandIn({
+        answerOnlyScenario: !world,
+        ciVerdict: output ? "pass" : "incomplete",
+      });
+      const directory = await mkdtemp(join(tmpdir(), "hue-ci-privacy-"));
+      try {
+        await writeFile(join(directory, "agent.mjs"), "console.log('privacy-answer-canary');");
+        await writeFile(
+          join(directory, "hue.eval.json"),
+          JSON.stringify({
+            evalSetVersionId: fixture.version.id,
+            command: 'node "$HUE_PROJECT_DIR/agent.mjs"',
+            scoringTimeoutSeconds: 2,
+            ...config,
+          }),
+        );
+        const result = await hue(["--ci", "--json", "--checkpoint-dir", ".hue/privacy", ...flags], {
+          cwd: directory,
+          env: { HUE_BASE_URL: fixture.baseUrl },
+        });
+        expect({ status: result.status, stderr: result.stderr }).toEqual({
+          status: output ? 0 : 1,
+          stderr: "",
+        });
+        expect(JSON.parse(result.stdout).verdict).toBe(output ? "pass" : "incomplete");
+        expect(fixture.calls.completions).toHaveLength(1);
+        expect(fixture.calls.completions[0]).toMatchObject({ state: "succeeded" });
+        expect(Object.hasOwn(fixture.calls.completions[0]!, "output")).toBe(output);
+        const spans = fixture.calls.spans.filter((span) => span.name === "hue.experiment.case");
+        expect(spans).toHaveLength(1);
+        expect(spans[0]!.attributes.includes("input.value")).toBe(capture);
+        expect(spans[0]!.attributes.includes("output.value")).toBe(capture);
+        expect(Buffer.concat(fixture.calls.otlpBodies).includes("privacy-answer-canary")).toBe(
+          capture,
+        );
+        if (!output && !capture)
+          expect(await filesContaining(join(directory, ".hue"), ["privacy-answer-canary"])).toEqual(
+            [],
+          );
+        if (config.captureContent === false && !capture) {
+          const changed = await hue(
+            ["--ci", "--json", "--checkpoint-dir", ".hue/privacy", "--content"],
+            { cwd: directory, env: { HUE_BASE_URL: fixture.baseUrl } },
+          );
+          expect(changed.status).toBe(1);
+          expect(JSON.parse(changed.stdout).verdict).toBeNull();
+          expect(fixture.calls.completions).toHaveLength(1);
+          expect(fixture.creationRequests).toHaveLength(1);
+        }
+      } finally {
+        fixture.stop();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
+  test("CI rejects conflicting content flags before contacting Hue", async () => {
+    const fixture = hueStandIn();
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-privacy-conflict-"));
+    try {
+      const result = await hue(["--ci", "--json", "--content", "--no-content"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect(result.status).toBe(2);
+      expect(JSON.parse(result.stdout).errors).toEqual([
+        { code: "configuration_error", message: "Choose either --content or --no-content" },
+      ]);
+      expect(fixture.calls.requests).toEqual([]);
+    } finally {
+      fixture.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
     { builtin: false, baseline: false },
     { builtin: true, baseline: false },
     { builtin: true, baseline: true },
