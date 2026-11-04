@@ -609,20 +609,49 @@ if (typeof zlib.zstdCompressSync === "function") {
       `Installed hue login --env-path did not create a new env file: ${login.stderr}`,
     );
 }
-// The installed `hue listen` under Node: one leased delivery reaches a loopback receiver unchanged,
-// is acknowledged with the receiver's answer, and SIGINT then stops the client cleanly.
+// The installed `hue listen` under Node: events and form interactions reach a loopback receiver
+// unchanged. Only interactions return the immediate reply. SIGINT stops the client cleanly.
 {
   const token = `hue_world_eyJwYWNrYWdlIjoiY2hlY2sifQ.${"t".repeat(43)}`;
   const subscription = "0f8e3c2a-5b7d-4e1f-9a6c-2d4b8e0f1a3c";
-  const deliveryId = "6a1c9e4f-2b3d-4c5e-8f7a-9b0c1d2e3f4a";
-  const body = JSON.stringify({ type: "event_callback", event_id: "Ev0PACKAGE01", event: {} });
+  const deliveries = [
+    {
+      deliveryId: "6a1c9e4f-2b3d-4c5e-8f7a-9b0c1d2e3f4a",
+      kind: "event_callback",
+      eventId: "Ev0PACKAGE01",
+      body: JSON.stringify({ type: "event_callback", event_id: "Ev0PACKAGE01", event: {} }),
+      contentType: "application/json",
+    },
+    {
+      deliveryId: "6a1c9e4f-2b3d-4c5e-8f7a-9b0c1d2e3f4b",
+      kind: "slash_command",
+      eventId: null,
+      body: new URLSearchParams({ command: "/balance", text: "café + savings" }).toString(),
+      contentType: "application/x-www-form-urlencoded",
+    },
+    {
+      deliveryId: "6a1c9e4f-2b3d-4c5e-8f7a-9b0c1d2e3f4c",
+      kind: "interactivity",
+      eventId: null,
+      body: new URLSearchParams({
+        payload: JSON.stringify({ type: "block_actions", actions: [{ action_id: "approve" }] }),
+      }).toString(),
+      contentType: "application/x-www-form-urlencoded",
+    },
+  ];
+  const reply = JSON.stringify({ response_type: "ephemeral", text: "✓".repeat(2000) });
   const received = [];
   const receiver = createServer((request, response) => {
     let raw = "";
     request.on("data", (chunk) => (raw += chunk));
     request.on("end", () => {
-      received.push({ signature: request.headers["x-slack-signature"], raw });
-      response.end("");
+      received.push({
+        signature: request.headers["x-slack-signature"],
+        contentType: request.headers["content-type"],
+        authorization: request.headers.authorization,
+        raw,
+      });
+      response.end(reply);
     });
   });
   await new Promise((listening) => receiver.listen(0, "127.0.0.1", listening));
@@ -639,33 +668,32 @@ if (typeof zlib.zstdCompressSync === "function") {
       }
       const base = `/api/v1/event-subscriptions/${subscription}/deliveries`;
       if (request.url === `${base}/pull`) {
-        const deliveries = pulled
+        const leased = pulled
           ? []
-          : [
-              {
-                deliveryId,
-                subscriptionId: subscription,
-                worldId: null,
-                eventId: "Ev0PACKAGE01",
-                kind: "event_callback",
-                retryNum: 0,
-                leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
-                request: {
-                  method: "POST",
-                  headers: { "content-type": "application/json", "x-slack-signature": "v0=abc" },
-                  body,
-                },
+          : deliveries.map((delivery) => ({
+              deliveryId: delivery.deliveryId,
+              subscriptionId: subscription,
+              worldId: null,
+              eventId: delivery.eventId,
+              kind: delivery.kind,
+              retryNum: 0,
+              leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+              request: {
+                method: "POST",
+                headers: { "content-type": delivery.contentType, "x-slack-signature": "v0=abc" },
+                body: delivery.body,
               },
-            ];
+            }));
         pulled = true;
         // An empty pull waits briefly, as a long poll would, rather than spinning.
         return setTimeout(
-          () => response.end(JSON.stringify({ deliveries })),
-          deliveries.length ? 0 : 200,
+          () => response.end(JSON.stringify({ deliveries: leased })),
+          leased.length ? 0 : 200,
         );
       }
-      if (request.url === `${base}/${deliveryId}/ack`) {
-        acks.push(JSON.parse(raw));
+      const delivery = deliveries.find((item) => request.url === `${base}/${item.deliveryId}/ack`);
+      if (delivery) {
+        acks.push({ deliveryId: delivery.deliveryId, ...JSON.parse(raw) });
         return response.end(JSON.stringify({ state: "acknowledged" }));
       }
       response.statusCode = 404;
@@ -703,7 +731,7 @@ if (typeof zlib.zstdCompressSync === "function") {
     });
     const deadline = Date.now() + 20_000;
     const poll = setInterval(() => {
-      if (acks.length > 0 || Date.now() > deadline) {
+      if (acks.length === deliveries.length || Date.now() > deadline) {
         clearInterval(poll);
         child.kill("SIGINT");
       }
@@ -713,13 +741,22 @@ if (typeof zlib.zstdCompressSync === "function") {
   standIn.close();
   if (
     listen.status !== 0 ||
-    acks.length !== 1 ||
-    acks[0].outcome !== "response" ||
-    acks[0].status !== 200 ||
-    received.length !== 1 ||
-    received[0].raw !== body ||
-    received[0].signature !== "v0=abc" ||
-    listen.output.includes(token)
+    acks.length !== deliveries.length ||
+    received.length !== deliveries.length ||
+    deliveries.some((delivery) => {
+      const ack = acks.find((item) => item.deliveryId === delivery.deliveryId);
+      const request = received.find((item) => item.raw === delivery.body);
+      return (
+        ack?.outcome !== "response" ||
+        ack.status !== 200 ||
+        ack.body !== (delivery.kind === "event_callback" ? undefined : reply) ||
+        request?.contentType !== delivery.contentType ||
+        request.signature !== "v0=abc" ||
+        request.authorization !== undefined
+      );
+    }) ||
+    listen.output.includes(token) ||
+    listen.output.includes(reply)
   )
     throw new Error(
       `Installed hue listen did not forward and acknowledge under Node: ${listen.output}`,
