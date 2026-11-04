@@ -5,22 +5,34 @@ from __future__ import annotations
 import re
 import zlib
 
+MAX_ENCODING_LAYERS = 8
+MAX_GZIP_MEMBERS = 16
+
 
 def content_encodings(header: str) -> tuple[str, ...]:
     return tuple(
         encoding
-        for value in header.split(",")
+        for value in header.split(",", MAX_ENCODING_LAYERS)
         if (encoding := value.strip().lower()) not in {"", "identity"}
     )
 
 
 def supported_encodings(header: str) -> bool:
-    return all(value in {"gzip", "x-gzip", "deflate", "br"} for value in content_encodings(header))
+    encodings = content_encodings(header)
+    # Inspect a bounded prefix; decode_body turns excessive layers into a cut marker.
+    return all(
+        value in {"gzip", "x-gzip", "deflate", "br"} for value in encodings[:MAX_ENCODING_LAYERS]
+    )
 
 
 def _inflate(data: bytes, cap: int, *, gzip: bool = False, raw: bool = False) -> bytes | None:
     output = bytearray()
+    members = 0
     while data:
+        # Empty members consume work without increasing decoded size. Bound their cost too.
+        if members == MAX_GZIP_MEMBERS:
+            return None
+        members += 1
         decoder = zlib.decompressobj(31 if gzip else -15 if raw else 15)
         chunk = decoder.decompress(data, cap - len(output) + 1)
         if len(chunk) > cap - len(output) or not decoder.eof:
@@ -63,8 +75,11 @@ def decode_body(data: bytes, header: str, cap: int) -> bytes | None:
     """Reject incomplete, unsupported, unavailable or over-limit content at each layer."""
     if len(data) > cap:
         return None
+    encodings = content_encodings(header)
+    if len(encodings) > MAX_ENCODING_LAYERS:
+        return None
     try:
-        for encoding in reversed(content_encodings(header)):
+        for encoding in reversed(encodings):
             if encoding in {"gzip", "x-gzip"}:
                 decoded = _inflate(data, cap, gzip=True)
             elif encoding == "deflate":

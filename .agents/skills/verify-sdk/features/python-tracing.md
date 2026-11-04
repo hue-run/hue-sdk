@@ -21,7 +21,8 @@ An application opens `Hue(base_url, api_key, ...)`, records spans, model calls a
   cuts use structured markers and dropped keys stay absent.
 - `py-http-compression` decodes complete raw gzip/x-gzip, zlib/raw deflate and stacked encodings
   in bounded copies. Raw Brotli uses the optional `compression` extra and its bounded API, with
-  a fixed 32 KiB maximum output block per call. Each layer must fit the capture cap. Missing/old
+  a fixed 32 KiB maximum output block per call. Each layer must fit the capture cap. At most
+  eight encoding layers and sixteen gzip members per layer bound work even for empty output. Missing/old
   decoders, corrupt streams and expansion over the cap produce markers; consumer bytes,
   redaction and content opt-outs remain unchanged. Base installs add no decoder or HTTP
   negotiation change. With the extra, run `pytest tests/test_http_compression.py

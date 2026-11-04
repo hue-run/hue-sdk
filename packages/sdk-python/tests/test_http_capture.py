@@ -1112,7 +1112,8 @@ def test_compressed_capture_opt_out_never_decodes(receiver, app, monkeypatch, op
 
 
 @pytest.mark.parametrize(
-    "kind", ("over-limit", "malformed", "incomplete", "unknown", "missing-brotli")
+    "kind",
+    ("over-limit", "malformed", "incomplete", "unknown", "missing-brotli", "layers", "members"),
 )
 def test_compressed_capture_failure_keeps_application_bytes(receiver, app, monkeypatch, kind):
     import brotli
@@ -1127,6 +1128,13 @@ def test_compressed_capture_failure_keeps_application_bytes(receiver, app, monke
     elif kind == "unknown":
         app.content_encoding = "unrecognized"
         app.body = b"opaque bytes"
+    elif kind == "layers":
+        app.body = BODY
+        app.content_encoding = ",".join(["gzip"] * 9)
+        for _ in range(9):
+            app.body = gzip.compress(app.body)
+    elif kind == "members":
+        app.body = gzip.compress(b"") * 17
     else:
         app.content_encoding = "br"
         app.body = brotli.compress(BODY)

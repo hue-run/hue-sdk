@@ -46,7 +46,7 @@ another process are outside this capture. See the [Python HTTP capture guide](./
 Configured OpenTelemetry attribute limits remain authoritative: accepted body cuts use structured
 markers, dropped keys remain absent and URI rewrites over the accepted value limit are omitted.
 
-Since Python `0.15.0`, raw gzip/x-gzip and zlib/raw deflate capture uses bounded standard-library decoding. Raw Brotli capture requires `hue-run[compression]` (Brotli `>=1.2.1,<2`); already-decoded responses need no extra. Encoded input and every decoded layer must fit the capture cap. The optional decoder can enable HTTP clients' own Brotli negotiation; the base SDK adds no decoder or negotiation change. See the [Python HTTP capture guide](./packages/sdk-python/README.md#outbound-http-capture) for decoder limits and unavailable content.
+Since Python `0.15.0`, raw gzip/x-gzip and zlib/raw deflate capture uses bounded standard-library decoding. Raw Brotli capture requires `hue-run[compression]` (Brotli `>=1.2.1,<2`); already-decoded responses need no extra. Encoded input and every decoded layer must fit the capture cap. Python capture permits at most eight encoding layers and sixteen concatenated gzip members per layer. The optional decoder can enable HTTP clients' own Brotli negotiation; the base SDK adds no decoder or negotiation change. See the [Python HTTP capture guide](./packages/sdk-python/README.md#outbound-http-capture) for decoder limits and unavailable content.
 
 The optional HTTPX2 family is verified with `httpx2==2.13.1`.
 

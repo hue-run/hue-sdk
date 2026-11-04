@@ -47,6 +47,7 @@ def test_installed_wheel_outbound_http_capture(tmp_path, wheel):
     for name in (
         "conftest.py",
         "test_http_capture.py",
+        "test_http_compression.py",
         "test_http_markers.py",
         "test_http_parent_context.py",
         "test_http_context_cleanup.py",
@@ -56,7 +57,13 @@ def test_installed_wheel_outbound_http_capture(tmp_path, wheel):
         shutil.copyfile(package / "tests" / name, tmp_path / name)
     environment = {"PATH": os.environ["PATH"], "PYTHONNOUSERSITE": "1"}
     imported = subprocess.run(
-        [str(python), "-I", "-c", "import hue_sdk; print(hue_sdk.__file__)"],
+        [
+            str(python),
+            "-I",
+            "-c",
+            "import hue_sdk, importlib.util; "
+            "assert importlib.util.find_spec('brotli') is None; print(hue_sdk.__file__)",
+        ],
         env=environment,
         cwd=tmp_path,
         check=True,
@@ -64,6 +71,37 @@ def test_installed_wheel_outbound_http_capture(tmp_path, wheel):
         text=True,
     )
     assert str(consumer) in imported.stdout
+    subprocess.run(
+        [
+            str(python),
+            "-I",
+            "-m",
+            "pytest",
+            "-q",
+            "test_http_capture.py",
+            "-k",
+            "raw_compressed and requests",
+        ],
+        env=environment,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            f"{wheel}[compression]",
+            f"brotli=={version('brotli')}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     result = subprocess.run(
         [
             str(python),
@@ -72,6 +110,7 @@ def test_installed_wheel_outbound_http_capture(tmp_path, wheel):
             "pytest",
             "-q",
             "test_http_capture.py",
+            "test_http_compression.py",
             "test_http_markers.py",
             "test_http_parent_context.py",
             "test_http_context_cleanup.py",

@@ -420,7 +420,10 @@ and an early close marks partial content as truncated. The HTTP span ends at EOF
 shutdown. Since `0.15.0`, raw gzip, x-gzip and deflate reads are decoded in a separate bounded copy
 for capture. Both zlib-wrapped and raw deflate are supported, including stacked encodings. The
 application keeps its original bytes. Encoded input and each decoded layer must fit the value cap;
-malformed, incomplete or over-limit content records a truncation marker.
+malformed, incomplete or over-limit content records a truncation marker. Capture supports at
+most eight encoding layers and sixteen concatenated gzip members per layer, so empty members
+cannot create unbounded decoder work. These limits affect capture only; the application receives
+its original response.
 
 Raw Brotli (`br`) capture requires the optional decoder:
 

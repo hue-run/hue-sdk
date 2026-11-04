@@ -30,6 +30,36 @@ def test_concatenated_gzip_members_and_padding_share_one_budget():
     assert decode_body(wire, "gzip", 2047) is None
 
 
+def test_empty_gzip_members_bound_capture_work(monkeypatch):
+    member = gzip.compress(b"", mtime=0)
+    wire = member * 52428
+    assert len(wire) <= 1024 * 1024
+    real = zlib.decompressobj
+    calls = []
+
+    def observed(*args):
+        calls.append(True)
+        return real(*args)
+
+    monkeypatch.setattr(zlib, "decompressobj", observed)
+    assert decode_body(member * 16, "gzip", 1024 * 1024) == b""
+    calls.clear()
+    assert decode_body(wire, "gzip", 1024 * 1024) is None
+    assert len(calls) == 16
+
+
+def test_stacked_encoding_depth_is_bounded_before_decoding(monkeypatch):
+    wire = b"{}"
+    for _ in range(8):
+        wire = gzip.compress(wire, mtime=0)
+    assert decode_body(wire, ",".join(["gzip"] * 8), 1024) == b"{}"
+    wire = gzip.compress(wire, mtime=0)
+    called = []
+    monkeypatch.setattr(zlib, "decompressobj", lambda *args: called.append(True))
+    assert decode_body(wire, ",".join(["gzip"] * 9), 1024) is None
+    assert called == []
+
+
 def test_stacked_encodings_bound_intermediate_output():
     # The final JSON fits, but its padded intermediate gzip representation does not.
     inner = gzip.compress(b"{}") + bytes(8192)
