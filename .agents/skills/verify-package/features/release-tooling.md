@@ -4,7 +4,7 @@ The scripts under `scripts/` back the owner-run `Release SDK` workflow and docs 
 
 ## Sub-features
 
-- `release-scripts` (`release-policy.py`, `release-artifacts.py`, `verify-prepared-release.py`, `wait-for-registry.py`, `npm-release-tags.py`).
+- `release-scripts` (`release-policy.py`, `release-artifacts.py`, `verify-prepared-release.py`, `wait-for-registry.py`, `npm-release-tags.py`). Archive import checks accept numeric division after grouped expressions and the eval command's adapter and local scorer file loaders, while rejecting forbidden imports and other computed loaders. Focused archive tests cover these boundaries.
 - `doc-versions` keeps version mentions in docs current.
 - `repository-links` resolves own GitHub blob/tree URLs against actual Git refs. Lychee checks local files and Markdown fragments offline; hosted link availability runs daily or manually.
 - `docs-contract` keeps `docs-contract.json` in step with the public API.

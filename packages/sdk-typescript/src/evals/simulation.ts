@@ -223,7 +223,7 @@ export interface RunSimulationOptions {
   onTelemetryNotAccepted?(entry: TelemetryNotAccepted): void | Promise<void>;
   /** Local scorer callbacks bound by their declared source digests. */
   localScorers?: LocalScorer[];
-  /** Cases in flight, 1–100; defaults to 1. */
+  /** Cases in flight, a positive safe integer; defaults to 20. */
   concurrency?: number;
   /** JSON Schema worker deadline in milliseconds. */
   schemaTimeoutMillis?: number;
@@ -842,7 +842,6 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
       : undefined;
     const report = await runExperiment({
       signal: options.signal,
-      rerunCrashedCases: true,
       client: options.client,
       hue: options.hue,
       experimentId,

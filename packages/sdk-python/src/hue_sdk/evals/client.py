@@ -6,12 +6,13 @@ import random
 import re
 import time
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import requests
 
 from .._otel_compat import suppress_instrumentation
 from ..transport import DEFAULT_BASE_URL, normalize_base_url, reject_positional_api_key
+from . import _invocations
 from ._json import MISSING, encode, json_value, uuid
 from ._media import MediaClient, _no_auth
 
@@ -301,6 +302,115 @@ class EvaluationClient:
 
     def __repr__(self) -> str:
         return "EvaluationClient()"
+
+    def create_eval_invocation(
+        self,
+        *,
+        idempotency_key: str,
+        deadline_at: str,
+        eval_set_id: str | None = None,
+        eval_set_version_id: str | None = None,
+        evaluator_ids: list[str] | None = None,
+        evaluator_version_ids: list[str] | None = None,
+        name: str | None = None,
+        config: Any = MISSING,
+        policy: dict[str, Any] | None = None,
+        ci: dict[str, Any] | None = None,
+        baseline_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or recover a frozen invocation before resolving latest selections.
+
+        Replay the same key and body, including the original deadline. Hue owns the gate verdict.
+        """
+        body: dict[str, Any] = {"idempotencyKey": idempotency_key, "deadlineAt": deadline_at}
+        fields = {
+            "evalSetId": eval_set_id,
+            "evalSetVersionId": eval_set_version_id,
+            "evaluatorIds": evaluator_ids,
+            "evaluatorVersionIds": evaluator_version_ids,
+            "name": name,
+            "policy": policy,
+            "ci": ci,
+            "baselineRunId": baseline_run_id,
+        }
+        body.update({key: value for key, value in fields.items() if value is not None})
+        if config is not MISSING:
+            body["config"] = config
+        return self._invocation_response(
+            self._request("POST", "/eval-invocations", _invocations.creation(body))
+        )
+
+    def get_eval_invocation(self, invocation_id: str) -> dict[str, Any]:
+        """Read saved inputs and receipt without executing agents; accepts candidate run ID too."""
+        return self._invocation_response(
+            self._request("GET", f"/eval-invocations/{uuid(invocation_id)}")
+        )
+
+    def get_eval_invocation_by_key(self, idempotency_key: str) -> dict[str, Any]:
+        """Look up this project's saved invocation before computing a new deadline."""
+        key = _invocations.operation(idempotency_key)["idempotencyKey"]
+        return self._invocation_response(
+            self._request("GET", f"/eval-invocations?idempotencyKey={quote(key, safe='')}")
+        )
+
+    def create_eval_baseline(
+        self,
+        invocation_id: str,
+        *,
+        idempotency_key: str,
+        ci: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Clone frozen inputs for the intended base commit without resolving latest versions."""
+        context = _invocations.ci_context(ci)
+        if not context.get("commitSha"):
+            raise ValueError("Baseline CI context requires commitSha.")
+        return self._invocation_response(
+            self._request(
+                "POST",
+                f"/eval-invocations/{uuid(invocation_id)}/baseline",
+                {**_invocations.operation(idempotency_key), "ci": context},
+            )
+        )
+
+    def finalize_eval_invocation(
+        self,
+        invocation_id: str,
+        *,
+        idempotency_key: str,
+        execution_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Freeze Hue's gate receipt. Wait for scoring first; premature calls freeze incomplete."""
+        return self._invocation_response(
+            self._request(
+                "POST",
+                f"/eval-invocations/{uuid(invocation_id)}/finalize",
+                _invocations.operation(idempotency_key, execution_ids),
+            )
+        )
+
+    def cancel_eval_invocation(
+        self,
+        invocation_id: str,
+        *,
+        idempotency_key: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Durably cancel admission, agent execution and scoring."""
+        if reason not in ("interrupted", "deadline", "runner_error"):
+            raise ValueError("Invalid invocation cancellation reason.")
+        return self._invocation_response(
+            self._request(
+                "POST",
+                f"/eval-invocations/{uuid(invocation_id)}/cancel",
+                {**_invocations.operation(idempotency_key), "reason": reason},
+            )
+        )
+
+    def _invocation_response(self, value: Any) -> dict[str, Any]:
+        try:
+            return _invocations.hydrate(value, lambda path: self._request("GET", path))
+        except (ValueError, TypeError, KeyError) as error:
+            raise HueApiError(reason="malformed_response") from error
 
     def _request(
         self, method: str, path: str, body: Any = MISSING, *, idempotent: bool = False

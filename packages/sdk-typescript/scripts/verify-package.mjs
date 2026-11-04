@@ -1246,6 +1246,8 @@ const installedPackageTests = [
   "live-spans.test.ts",
   "lifetime.test.ts",
   "evals.test.ts",
+  "eval-invocations.test.ts",
+  "cli-eval.test.ts",
   "scorer-publication.test.ts",
   "attempt.test.ts",
   "environment.test.ts",
@@ -1374,6 +1376,14 @@ void [transition, event, options, backend];
           '"../node_modules/@hue-run/sdk/dist/evals/client.js"',
         )
         .replaceAll(
+          '"../src/evals/invocations.js"',
+          '"../node_modules/@hue-run/sdk/dist/evals/invocations.js"',
+        )
+        .replaceAll(
+          '"../src/evals/verdicts.js"',
+          '"../node_modules/@hue-run/sdk/dist/evals/verdicts.js"',
+        )
+        .replaceAll(
           '"../src/evals/failure.js"',
           '"../node_modules/@hue-run/sdk/dist/evals/failure.js"',
         )
@@ -1491,10 +1501,17 @@ void [transition, event, options, backend];
             transport,
             media,
             installedPackageTests.filter(
-              (name) => !transport.includes(name) && !media.includes(name),
+              (name) =>
+                !transport.includes(name) && !media.includes(name) && name !== "cli-eval.test.ts",
             ),
           ]
         : [["ai-sdk.test.ts", "failure.test.ts"]];
+    if (patch === 139)
+      await runAsync(
+        "bun",
+        ["--no-env-file", "test", "tests/cli-eval.test.ts", "-t", "CI invocation CLI"],
+        consumer,
+      );
     await waitForChecks(
       groups.map((tests, index) =>
         runAsync(

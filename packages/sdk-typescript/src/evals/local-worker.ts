@@ -177,7 +177,7 @@ export interface RunLocalAgentOptions {
   agent: LocalAgentRegistration;
   /** Local scorer bindings matching the published source digests. */
   scorers?: LocalScorer[];
-  /** Cases in flight, between 1 and 100; defaults to 1. */
+  /** Cases in flight, a positive safe integer; defaults to 20. */
   concurrency?: number;
   /** What a case does when its telemetry is not accepted; see
    * `traceNotAccepted` of {@link runExperiment}. Defaults to `"stop"`. */

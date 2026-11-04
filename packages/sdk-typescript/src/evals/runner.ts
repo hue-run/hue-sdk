@@ -31,6 +31,7 @@ import {
   type CompleteExecution,
   type Completion,
   type ExperimentCase,
+  type Execution,
   type JsonValue,
   type LocalFile,
   type LocalScorer,
@@ -152,7 +153,7 @@ interface RunnerOptions {
    * (for example a Hue-operated grading worker that owns the evaluator source) instead of
    * refusing the run. Their IDs are reported in `deferredScorerVersionIds`. */
   deferUnboundLocalScorers?: boolean;
-  /** Cases in flight at once, 1–100. Default 1. */
+  /** Positive safe integer of cases in flight at once. Default 20. */
   concurrency?: number;
   /** Deadline for JSON Schema scoring in its worker, 100–60000 ms. Default 2000. */
   schemaTimeoutMillis?: number;
@@ -443,9 +444,9 @@ function settings(options: RunnerOptions): number {
     throw new TypeError("environmentEvidence must be required or when_pinned when supplied");
   if (typeof options.persistResultContent !== "boolean")
     throw new TypeError("Choose persistResultContent explicitly: true or false");
-  const concurrency = options.concurrency ?? 1;
-  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 100)
-    throw new RangeError("concurrency must be 1–100");
+  const concurrency = options.concurrency ?? 20;
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1)
+    throw new RangeError("concurrency must be a positive safe integer");
   const timeout = options.schemaTimeoutMillis ?? 2000;
   if (!Number.isInteger(timeout) || timeout < 100 || timeout > 60_000)
     throw new RangeError("schemaTimeoutMillis must be 100–60000");
@@ -726,6 +727,14 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       .filter((version) => !executableHere(version.definition, options))
       .map((version) => version.id),
   };
+  let recoveredCompletion = false;
+  const recoverCompletion = (execution: Execution) => {
+    if (!execution.subjectId || !["succeeded", "error", "cancelled"].includes(execution.state))
+      return false;
+    report.subjectIds.push(execution.subjectId);
+    recoveredCompletion = true;
+    return true;
+  };
   try {
     // A run that reclaimed a dead process's lock first records that a crash sweep is due, then
     // marks every case that process left running as crashed, before anything else happens and
@@ -895,6 +904,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
                 ...retry(checkpoint.previousExecutionId),
               })
             : await options.client.getExecution(checkpoint.executionId);
+        if (recoverCompletion(execution)) return;
         throw new UncertainExecutionError(item.id, execution.id);
       }
       if (checkpoint?.stage === "uploading") {
@@ -914,8 +924,10 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       }
       if (!checkpoint) {
         if (options.signal?.aborted) throw new TargetCancelledError();
-        if (item.execution && item.execution.id !== retryOf)
+        if (item.execution && item.execution.id !== retryOf) {
+          if (recoverCompletion(item.execution)) return;
           throw new UncertainExecutionError(item.id, item.execution.id);
+        }
         const frozenCase = await frozenCaseOf();
         if (frozenCase.datasetVersionId !== version.id)
           throw new Error("Case is not from the pinned dataset version");
@@ -1287,6 +1299,16 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     });
     // A stop that came while the last cases saved their outcomes still leaves the run open.
     if (options.signal?.aborted) throw new TargetCancelledError();
+    if (recoveredCompletion) {
+      // Completion is durable before local scores are uploaded. Recover missing scores from
+      // saved subjects and preserve any result receipts that already exist.
+      const recovered = await rescore({
+        ...options,
+        runId: experiment.evaluation.id,
+        checkpointDirectory: join(options.checkpointDirectory, "recovered-scores"),
+      });
+      report.resultIds = [...new Set([...report.resultIds, ...recovered.resultIds])];
+    }
     let finish = await store.read<{ key: string }>("finish");
     if (!finish) {
       finish = { key: randomUUID() };

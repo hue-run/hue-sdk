@@ -655,6 +655,8 @@ export interface EvaluationRun {
   scorerVersions: ScorerVersion[];
   /** Subjects in the run. */
   itemCount: number;
+  /** Whether managed scoring jobs are queued or running; absent on older servers. */
+  managedScoringActive?: boolean;
   /** Result counts by state. */
   scores: {
     /** Results with metrics. */
@@ -663,6 +665,8 @@ export interface EvaluationRun {
     error: number;
     /** Skipped results. */
     skipped: number;
+    /** Managed results that do not apply to a subject; absent on older servers. */
+    notApplicable?: number;
     /** Results not yet recorded. */
     pending: number;
   };
