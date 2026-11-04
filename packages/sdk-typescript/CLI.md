@@ -329,11 +329,13 @@ hue world run <world version id> -- node agent.js
 
 A World is filled from your files, from a description, or both:
 
-- `--files <dir>` uploads every file under the directory, hidden files skipped, exactly as it is.
-  With one app in `--apps` every file is that app's; with several, each app's files go in
-  `<dir>/<app>/`, and a file outside them is refused before anything is sent. Each file's path
+- `--files <dir>` uploads every regular file under the directory, hidden files skipped, exactly
+  as it is. With one app in `--apps` every file is that app's; with several, each app's files go
+  in `<dir>/<app>/`, and a file outside them is refused before anything is sent. Each file's path
   in the export is sent as its `name`: its path under `<dir>`, or with several apps under
-  `<dir>/<app>/` (`channels/general/2026-01-05.json`). An empty file is skipped with a note.
+  `<dir>/<app>/` (`channels/general/2026-01-05.json`). An empty file or a symbolic link is
+  skipped with a note: a link is never followed, so a planted one cannot read a file outside the
+  directory into the upload. A file larger than 25 MiB is refused before anything is created.
 - `--describe "<text>"` asks Hue to generate the apps' data from the description.
   `--dry-run` prints the outline and estimate Hue answers and creates nothing.
 - `--export-from <list>` reads the named apps on your machine with your own access and uploads
@@ -612,8 +614,11 @@ Hue reads a file (a whole string, or the content of a provider part such as an O
 `GET /api/public/media/{id}`. The file is downloaded from the link Langfuse answers (following up to
 five of its store's redirects, without the Langfuse keys). The link and each redirect must use HTTPS
 without credentials or a fragment and reach a public address, or the Langfuse host itself; a link to
-this machine, a private network or a link-local address such as cloud metadata fails the file. When
-the Langfuse host is on this machine, any address is accepted, and plain HTTP to this machine. The
+this machine, a private network or a link-local address such as cloud metadata fails the file. A
+link whose host is a name is downloaded at the very addresses that check resolved, with TLS still
+validated against the name, so a second DNS answer cannot rebind the download onto a private
+address. When the Langfuse host is on this machine, any address is accepted, and plain HTTP to
+this machine. The
 file is then uploaded under the span's trace through Hue's upload route (reservation, presigned
 `PUT`, completion), and placed in the digest form the SDK writes for media it records: a whole string
 becomes `{"type":"blob","mime_type":…,"modality":…,"sha256":…,"size":…}` and a provider part loses its

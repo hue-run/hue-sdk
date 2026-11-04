@@ -225,7 +225,9 @@ beside the run: `token` (a `hue_world_…` credential that lives exactly as long
 `surfaces[]` (one mirror URL per pinned provider surface, such as the Gmail MCP and REST mirrors),
 `now` (the world's clock at creation as an RFC 3339 timestamp), `env` (`HUE_WORLD_ID`,
 `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW`, `BAGGAGE`, `TRACEPARENT` and one `HUE_SIM_<SURFACE ID>_URL`
-per surface) and `mcpConfig` (the common `mcpServers` shape with the token in the `Authorization`
+per surface, with a surface's `_ALIAS` or `_TOKEN` where it has one; `worldHandoff` drops every
+other name the server sends, so no response can set proxy, loader or Git variables on a spawned
+agent) and `mcpConfig` (the common `mcpServers` shape with the token in the `Authorization`
 header). The agent is pointed at the mirrors by configuration only: its own Gmail MCP or REST
 client, the mirror URL, the world token where the Google credential went.
 
