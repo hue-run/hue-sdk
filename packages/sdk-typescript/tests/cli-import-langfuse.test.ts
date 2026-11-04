@@ -6,7 +6,7 @@ import { createServer } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
-import { gunzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { IMPORT_USAGE, runImportCommand, type ImportCommandIo } from "../src/cli/import.js";
 import {
@@ -1653,6 +1653,12 @@ describe("hue import langfuse media download links", () => {
       if (request.url === "/redirect") {
         response.writeHead(302, { location: "https://elsewhere.test/next" });
         response.end();
+      } else if (request.url === "/gzip") {
+        response.writeHead(200, { "content-encoding": "gzip" });
+        response.end(gzipSync("pinned bytes"));
+      } else if (request.url === "/unknown-coding") {
+        response.writeHead(200, { "content-encoding": "snappy" });
+        response.end("as it came");
       } else {
         response.writeHead(200);
         response.end("pinned bytes");
@@ -1678,6 +1684,22 @@ describe("hue import langfuse media download links", () => {
       expect(redirected.status).toBe(302);
       expect(redirected.headers.get("location")).toBe("https://elsewhere.test/next");
       expect(seen).toHaveLength(2);
+      // A compressed answer is decoded as fetch would decode it; an unknown coding passes
+      // through as it came.
+      const compressed = await pinnedDownload(
+        new URL(`https://media.pinned.test:${port}/gzip`),
+        init,
+        "127.0.0.1",
+        { ca },
+      );
+      expect(await compressed.text()).toBe("pinned bytes");
+      const unknown = await pinnedDownload(
+        new URL(`https://media.pinned.test:${port}/unknown-coding`),
+        init,
+        "127.0.0.1",
+        { ca },
+      );
+      expect(await unknown.text()).toBe("as it came");
       // A URL whose host the certificate does not name must not be answered by this server.
       await expect(
         pinnedDownload(new URL(`https://other.test:${port}/object`), init, "127.0.0.1", { ca }),
