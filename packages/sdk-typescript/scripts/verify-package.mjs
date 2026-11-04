@@ -1061,7 +1061,7 @@ run(
   ],
   evaluation,
 );
-// AI SDK 6 accepts zod 3, so the packed SDK must install and import its evaluation entry beside it.
+// AI SDK 6 accepts zod 3; the SDK uses its own patched zod without upgrading the application's.
 const ai6Zod3Evaluation = join(destination, "ai6-zod3-evaluation-consumer");
 await mkdir(ai6Zod3Evaluation);
 await writeFile(
@@ -1091,6 +1091,13 @@ run(
     "-e",
     `
   import { strict as assert } from "node:assert";
+  import { createRequire } from "node:module";
+  const applicationRequire = createRequire(import.meta.url);
+  const sdkRequire = createRequire(applicationRequire.resolve("@hue-run/sdk"));
+  assert.equal(applicationRequire("zod/package.json").version, "3.25.76");
+  const [major, minor, patch] = sdkRequire("zod/package.json").version.split(".").map(Number);
+  assert.equal(major, 4);
+  assert.ok(minor > 6 || (minor === 6 && patch >= 6));
   const sdk = await import("@hue-run/sdk");
   assert.equal(typeof sdk.createHue, "function");
   const { builtins, scoreLocally } = await import("@hue-run/sdk/evals");
