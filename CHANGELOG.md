@@ -8,9 +8,21 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### [0.26.1] - 2026-11-04
+### [0.27.0] - 2026-11-04
+
+#### Breaking
+
+- Local evaluation concurrency defaults to 20. Set `concurrency: 4` or `--concurrency 4` to retain
+  the previous limit. An uncertain agent attempt requires explicit retry acknowledgement instead
+  of automatic replay, preventing repeated business actions after a runner loses its connection.
 
 #### Added
+
+- `hue eval --ci` creates a frozen evaluation invocation and writes JSON, JUnit and Markdown
+  reports from the server's immutable receipt. `hue eval status` recovers results without running
+  the agent. CI supports explicit baseline reuse and a prepared base checkout for relative checks.
+- Both evaluation clients support idempotent invocation creation, frozen baseline creation,
+  finalization, cancellation and bounded evidence retrieval.
 
 - `WorldSurface.connection` types how a client reaches each surface of a World instance:
   where the world token goes (`auth`), the provider base the mirror URL stands in for
@@ -2054,9 +2066,20 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### Unreleased
+### [0.15.0] - 2026-11-04
+
+#### Breaking
+
+- Local evaluation concurrency defaults to 20. Set `concurrency=4` to retain the previous limit.
+  An uncertain agent attempt requires explicit retry acknowledgement instead of automatic replay.
 
 #### Added
+
+- Evaluation invocations freeze inputs and policy, support explicit baseline reuse and copied base
+  inputs, and preserve the server's immutable receipt. The client supports idempotent lookup,
+  finalization, cancellation and bounded evidence retrieval.
+- A completed execution can recover missing scores from its saved output after runner loss without
+  replaying the agent.
 
 - `WorldSurface` takes an optional `connection` (`WorldSurfaceConnection`): where the world token
   goes, the provider base the mirror URL stands in for, the identifiers its calls name with the
