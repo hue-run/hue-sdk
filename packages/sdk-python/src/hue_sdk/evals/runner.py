@@ -198,15 +198,17 @@ def _settings(persist: bool, concurrency: int, timeout: int) -> None:
         raise ValueError("schema_timeout_millis must be 100–60000.")
 
 
-def _pages(page: Callable[[str | None], dict[str, Any]]) -> list[dict[str, Any]]:
+def _pages(
+    page: Callable[[str | None], dict[str, Any]], *, limit: int = 5000
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     cursors: set[str] = set()
     after = None
     while True:
         response = page(after)
         items.extend(response["items"])
-        if len(items) > 5000:
-            raise ValueError("Runner supports at most 5000 items.")
+        if len(items) > limit:
+            raise ValueError(f"Runner supports at most {limit} items.")
         if response["nextCursor"] is None:
             return items
         after = uuid(response["nextCursor"])
@@ -471,6 +473,20 @@ def run_experiment(
     )
     report = RunnerReport(experiment["evaluation"]["id"], [], [], deferred)
     report_lock = Lock()
+    recovered_completion = Event()
+
+    def recover_completion(execution: dict[str, Any]) -> bool:
+        if not execution.get("subjectId") or execution["state"] not in (
+            "succeeded",
+            "error",
+            "cancelled",
+        ):
+            return False
+        with report_lock:
+            report.subject_ids.append(execution["subjectId"])
+        recovered_completion.set()
+        return True
+
     files_root = Path(os.path.abspath(files_directory or Path(checkpoint_directory) / "files"))
 
     def execute(item: dict[str, Any]) -> None:
@@ -556,9 +572,13 @@ def run_experiment(
                 if checkpoint["stage"] == "starting"
                 else client.get_execution(checkpoint["executionId"])
             )
+            if recover_completion(execution):
+                return
             raise UncertainExecutionError(item["id"], execution["id"])
         if checkpoint is None:
             if item["execution"] is not None:
+                if recover_completion(item["execution"]):
+                    return
                 raise UncertainExecutionError(item["id"], item["execution"]["id"])
             case = client.get_experiment_case(experiment_id, item["id"])
             if case["datasetVersionId"] != version["id"]:
@@ -732,6 +752,17 @@ def run_experiment(
 
     try:
         _pool(items, concurrency, execute)
+        if recovered_completion.is_set():
+            recovered = rescore(
+                client=client,
+                run_id=report.run_id,
+                checkpoint_directory=Path(checkpoint_directory) / "recovered-scores",
+                persist_result_content=persist_result_content,
+                scorers=local,
+                concurrency=concurrency,
+                schema_timeout_millis=schema_timeout_millis,
+            )
+            report.result_ids[:] = list(dict.fromkeys([*report.result_ids, *recovered.result_ids]))
         finish = store.read("finish")
         if finish is None:
             finish = {"key": str(uuid4())}
@@ -767,6 +798,13 @@ def rescore(
     items = _pages(lambda after: client.list_evaluation_items(run_id, after=after))
     if len(items) != run["itemCount"]:
         raise ValueError("Evaluation run item count differs from its API items.")
+    receipts = {
+        (result["itemId"], result["scorerVersionId"]): result["id"]
+        for result in _pages(
+            lambda after: client.list_results(run_id, after=after), limit=5000 * 100
+        )
+    }
+
     store = CheckpointStore(
         checkpoint_directory,
         {
@@ -785,6 +823,9 @@ def rescore(
     def execute(item: dict[str, Any]) -> None:
         file = f"item-{uuid(item['id'])}"
         saved = store.read(file)
+        pending = [v for v in versions if (item["id"], v["id"]) not in receipts]
+        if saved is None and not any(v["id"] not in deferred for v in pending):
+            saved = {"scores": []}
         if saved is None:
             subject = client.get_subject(item["subjectId"])
             files = (
@@ -797,7 +838,7 @@ def rescore(
                 else []
             )
             scores = _scores(
-                versions,
+                pending,
                 {
                     "inputs": subject["inputs"],
                     "has_output": subject["hasOutput"],
@@ -816,14 +857,24 @@ def rescore(
                 score["payload"]["evaluationItemId"] = item["id"]
             saved = {"scores": scores}
             store.write(file, saved)
+        for score in saved["scores"]:
+            receipt = receipts.get((item["id"], score["payload"]["scorerVersionId"]))
+            if receipt:
+                score["receipt"] = [receipt]
         _upload(client, run_id, saved["scores"], lambda: store.write(file, saved))
         with report_lock:
             report.subject_ids.append(item["subjectId"])
+            report.result_ids.extend(
+                receipts[(item["id"], v["id"])]
+                for v in versions
+                if v["id"] not in deferred and (item["id"], v["id"]) in receipts
+            )
             for score in saved["scores"]:
                 report.result_ids.extend(score["receipt"])
 
     try:
         _pool(items, concurrency, execute)
+        report.result_ids[:] = list(dict.fromkeys(report.result_ids))
         return report
     finally:
         store.release()

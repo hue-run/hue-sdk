@@ -27,6 +27,9 @@ CI invocation proof: `cd packages/sdk-typescript && bun test tests/cli-eval.test
 The process fixtures cover builtin scoring before finalization, base-before-candidate execution,
 credential separation, aggregate scoring waits across pending/active-job transitions, lost creation acknowledgement, fresh-checkout recovery for PR and
 merge-group events, receipt-only verdicts, cancellation/deadline and setup/authentication reports.
+The durable-completion fixtures kill the CLI after Hue saves an execution but before its
+completion acknowledgement arrives. A fresh clone finishes managed or builtin scoring and
+the baseline flow without starting the saved execution again.
 `node packages/sdk-typescript/scripts/verify-package.mjs` repeats this group with the installed
 tarball. These are loopback-stub checks, not hosted Hue acceptance.
 

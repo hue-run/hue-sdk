@@ -38,6 +38,10 @@ lookups, create a frozen baseline, preserve all five server receipt verdicts and
 from a different manifest. The npm verifier and installed Python release consumer run these
 tests against archives. Shared runners default to 20 and accept positive safe integer concurrency;
 automatic recovery never repeats an uncertain world-backed target.
+Terminal executions with a saved subject resume scoring in the original scoring run from a
+fresh checkpoint directory. Run `pytest tests/test_evaluations.py -k remote_completion` to
+prove that missing scores are restored and existing result receipts are preserved without
+calling the target again.
 
 - The stub does not implement evaluation routes; a script that calls `EvaluationClient` against it fails. Use the test receivers.
 - A live run against a real Hue project needs a maintainer's project key and is not part of PR verification.

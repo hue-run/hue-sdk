@@ -62,6 +62,8 @@ function hueStandIn(
     ciNoReceipt?: boolean;
     ciBuiltin?: boolean;
     ciScoringTransitions?: boolean;
+    /** Hold one acknowledgement after durable completion so the runner can be killed. */
+    ciLoseCompletionAck?: string;
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
@@ -200,6 +202,7 @@ function hueStandIn(
   let baseline: EvalInvocation | undefined;
   const creationRequests: unknown[] = [];
   const baselineRequests: unknown[] = [];
+  let heldCompletion = false;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -638,6 +641,7 @@ function hueStandIn(
           contentDigest: digest,
           outputEvidence: hasOutput ? "available" : "unavailable",
           executionState: body.state as Subject["executionState"],
+          environmentVersionId,
           traceSnapshotId: randomUUID(),
           caseId: frozenCase.id,
           datasetVersionId: version.id,
@@ -679,6 +683,11 @@ function hueStandIn(
             error: verdict === "error" ? { type: "OutcomeEvaluatorUnavailable" } : null,
             sourceDigest: null,
           });
+        if (options.ciLoseCompletionAck && !heldCompletion) {
+          heldCompletion = true;
+          await writeFile(options.ciLoseCompletionAck, "completed");
+          await sleep(1500);
+        }
         return Response.json({
           executionId: execution.id,
           subjectId,
@@ -2866,6 +2875,90 @@ describe("hue eval", () => {
 });
 
 describe("CI invocation CLI", () => {
+  test.each([
+    { builtin: false, baseline: false },
+    { builtin: true, baseline: false },
+    { builtin: true, baseline: true },
+  ])(
+    "CI recovers durable work without local checkpoints %j",
+    async ({ builtin, baseline }) => {
+      const directory = await mkdtemp(join(tmpdir(), "hue-ci-lost-runner-"));
+      const first = join(directory, "first");
+      const second = join(directory, "second");
+      const marker = join(directory, "completed");
+      const fixture = hueStandIn({
+        answerOnlyScenario: true,
+        ciBuiltin: builtin,
+        ciLoseCompletionAck: marker,
+      });
+      try {
+        spawnSync("git", ["init", "--quiet", first]);
+        spawnSync("git", [
+          "-C",
+          first,
+          "-c",
+          "user.name=Synthetic",
+          "-c",
+          "user.email=synthetic@example.com",
+          "commit",
+          "--allow-empty",
+          "-m",
+          "Synthetic",
+        ]);
+        spawnSync("git", ["clone", "--quiet", first, second]);
+        const head = spawnSync("git", ["-C", first, "rev-parse", "HEAD"], {
+          encoding: "utf8",
+        }).stdout.trim();
+        const env = {
+          HUE_BASE_URL: fixture.baseUrl,
+          GITHUB_ACTIONS: "true",
+          GITHUB_REPOSITORY: "synthetic/project",
+          GITHUB_RUN_ID: "456",
+          GITHUB_EVENT_NAME: "pull_request",
+          GITHUB_EVENT_PATH: join(directory, "event.json"),
+        };
+        await writeFile(
+          env.GITHUB_EVENT_PATH,
+          JSON.stringify({ pull_request: { number: 7, head: { sha: head }, base: { sha: head } } }),
+        );
+        const config = JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: "printf saved",
+          ...(baseline ? { baselineCommand: "printf saved", baselineDirectory: "base" } : {}),
+        });
+        for (const checkout of [first, second]) {
+          if (baseline) spawnSync("git", ["clone", "--quiet", first, join(checkout, "base")]);
+          await writeFile(join(checkout, "hue.eval.json"), config);
+        }
+        const killed = await hue(["--ci", "--json"], {
+          cwd: first,
+          env,
+          interruptAfter: { file: marker, times: 1, signal: "SIGKILL" },
+        });
+        expect(killed.status).not.toBe(0);
+        const recovered = await hue(["--ci", "--json"], { cwd: second, env });
+        expect({ status: recovered.status, stderr: recovered.stderr }).toEqual({
+          status: 0,
+          stderr: "",
+        });
+        expect(JSON.parse(recovered.stdout).receipt.verdict).toBe("pass");
+        expect(fixture.creationRequests).toHaveLength(1);
+        expect(fixture.calls.starts).toHaveLength(baseline ? 2 : 1);
+        expect(fixture.calls.completions).toHaveLength(baseline ? 2 : 1);
+        if (builtin)
+          expect(
+            fixture.calls.requests.some(
+              (request) => request.endsWith("/results") && request.startsWith("POST"),
+            ),
+          ).toBe(true);
+      } finally {
+        fixture.stop();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
   test("CI scores builtins locally before finalizing the authoritative receipt", async () => {
     const fixture = hueStandIn({ answerOnlyScenario: true, ciBuiltin: true });
     const directory = await mkdtemp(join(tmpdir(), "hue-ci-builtin-"));

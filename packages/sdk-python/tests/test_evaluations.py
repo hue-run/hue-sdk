@@ -323,6 +323,7 @@ def evaluation_receiver():
                     "traceSnapshotId": str(uuid4()),
                 }
                 state.execution["state"] = body["state"]
+                state.execution["subjectId"] = state.completion["subjectId"]
                 state.subject = {
                     "id": state.completion["subjectId"],
                     "experimentId": state.experiment_id,
@@ -347,17 +348,24 @@ def evaluation_receiver():
             return 200, {
                 "items": [
                     {
-                        "id": state.result_id,
-                        "itemId": state.case_id,
-                        "scorerVersionId": state.scorer_id,
+                        "id": result_id,
+                        "itemId": result["evaluationItemId"],
+                        "scorerVersionId": result.get(
+                            "scorerVersionId", result.get("evaluatorVersionId")
+                        ),
                     }
+                    for saved in state.scores.values()
+                    if saved["path"] == path
+                    for result_id, result in zip(
+                        saved["ids"], saved["body"]["results"], strict=True
+                    )
                 ],
                 "nextCursor": None,
             }
         if path.endswith("/results"):
             key = body["idempotencyKey"]
             if key not in state.scores:
-                state.scores[key] = {"body": body, "ids": [str(uuid4())]}
+                state.scores[key] = {"body": body, "ids": [str(uuid4())], "path": path}
             elif state.scores[key]["body"] != body:
                 return 409, {}
             if state.fail_result:
@@ -391,6 +399,18 @@ def evaluation_receiver():
             }
         if "/evaluation-subjects/" in path:
             return 200, state.subject
+        if f"/evaluation-runs/{state.run_id}" in path:
+            if path.endswith("/items"):
+                return 200, {
+                    "items": [
+                        {
+                            "id": state.completion["evaluationItemId"],
+                            "subjectId": state.subject["id"],
+                        }
+                    ],
+                    "nextCursor": None,
+                }
+            return 200, {"id": state.run_id, "itemCount": 1, "scorerVersions": state.versions}
         if state.historical and f"/evaluation-runs/{state.historical['id']}" in path:
             if path.endswith("/items"):
                 return 200, {
@@ -921,6 +941,27 @@ def test_content_opt_out_covers_http_and_checkpoints_and_historical_unavailable(
     assert (
         result["state"] == "skipped" and result["explanation"] == "Output evidence is unavailable"
     )
+
+
+@pytest.mark.parametrize("missing_scores", [True, False])
+def test_remote_completion_recovers_missing_scores_in_a_fresh_directory(
+    evaluation_receiver, tmp_path, missing_scores
+):
+    receiver, calls = evaluation_receiver, []
+    arguments = options(receiver, tmp_path, lambda *_: calls.append(1))
+    try:
+        first = run_experiment(**arguments)
+        if missing_scores:
+            receiver.scores.clear()
+        arguments["checkpoint_directory"] = tmp_path / "fresh-checkout"
+        recovered = run_experiment(**arguments)
+        assert receiver.starts == 1 and calls == [1]
+        assert recovered.subject_ids == first.subject_ids
+        assert len(recovered.result_ids) == 1 and len(receiver.scores) == 1
+        if not missing_scores:
+            assert recovered.result_ids == first.result_ids
+    finally:
+        arguments["hue"].shutdown()
 
 
 def test_start_ambiguity_and_serialization_failure_never_reinvoke(evaluation_receiver, tmp_path):
