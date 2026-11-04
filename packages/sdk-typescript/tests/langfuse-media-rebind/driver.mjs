@@ -9,7 +9,8 @@
  * sees the public address. The download must connect to an address the check accepted.
  *
  * The private listener presents a certificate for the media hostname, which is what lets the
- * TLS handshake finish and the GET body reach TraceMedia. Exits 0 while the gap is open.
+ * TLS handshake finish and the GET body reach TraceMedia. The process exits non-zero while that
+ * GET still lands on the private address.
  */
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
