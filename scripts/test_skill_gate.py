@@ -25,7 +25,7 @@ ACCOUNT_LINE = "A Hue account is required."
 CONTACT_DETAILS = ("founders@hue.run", "calendar.notion.so", "book a time")
 # Commands that start or continue anonymous setup or account linkage.
 SETUP_COMMAND = re.compile(r"(@hue-run/sdk\S*|\bhue)\s+(setup|resume|claim)\b")
-# Copy from the retired invite-only gate, the production preset the setup key must not be, and
+# Copy from the retired invite-only gate, the retired tracing preset the setup key must not be, and
 # the earlier wording that let an agent from the setup page skip the presence check.
 FORBIDDEN = ("invite-only", "heightened demand", "then stop", "Tracing only", "key step is done")
 PASTE = re.compile(r"\bpast(?:e[sd]?|ing)\b", re.I)
