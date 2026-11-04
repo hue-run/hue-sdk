@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { Writable } from "node:stream";
+import { MAX_FILE_DATA_BYTES } from "../src/config.js";
 import { runWorldCommand, WORLD_USAGE, type WorldCommandIo } from "../src/cli/world.js";
 import { PIPEDREAM_API_URL, pipedreamTransport } from "../src/cli/world-export-pipedream.js";
 
@@ -297,6 +298,77 @@ async function scratch(): Promise<string> {
   return directory;
 }
 
+const OUTSIDE_FILE = "OUTSIDE-WORLD-EXPORT-MARKER";
+const OUTSIDE_DIR = "OUTSIDE-DIR-EXPORT-MARKER";
+
+/** Bytes the process has read, from `/proc/self/io`. */
+async function bytesRead(): Promise<number> {
+  const text = await readFile("/proc/self/io", "utf8");
+  const line = text.split("\n").find((item) => item.startsWith("rchar:"));
+  return Number(line?.slice("rchar:".length));
+}
+
+/**
+ * Resolves once the watches are installed. `stop` waits long enough for an open
+ * that already happened to be reported, then resolves true when any watched file
+ * was opened.
+ */
+function watchOpens(paths: string[]): Promise<{ stop: () => Promise<boolean> }> {
+  const script = [
+    "import ctypes, ctypes.util, os, select, sys",
+    "libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)",
+    "fd = libc.inotify_init1(0)",
+    "if fd < 0: sys.exit(2)",
+    "for path in sys.argv[1:]:",
+    "    if libc.inotify_add_watch(fd, path.encode(), 0x21) < 0: sys.exit(2)",
+    "sys.stdout.write('READY\\n'); sys.stdout.flush()",
+    "while True:",
+    "    ready, _, _ = select.select([fd], [], [], 0.2)",
+    "    if not ready: continue",
+    "    if os.read(fd, 4096):",
+    "        sys.stdout.write('OPENED\\n'); sys.stdout.flush()",
+  ].join("\n");
+  const child = spawn("python3", ["-c", script, ...paths], { stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    out += chunk;
+  });
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("file watch did not start")), 2000);
+    const ready = () => {
+      if (!out.includes("READY")) return;
+      clearTimeout(timer);
+      resolve({
+        stop: async () => {
+          await new Promise((done) => setTimeout(done, 400));
+          if (child.exitCode === null) {
+            child.kill();
+            await new Promise((done) => child.once("exit", () => done(undefined)));
+          }
+          return out.includes("OPENED");
+        },
+      });
+    };
+    child.stdout.on("data", ready);
+    ready();
+  });
+}
+
+function isSwapReport(value: unknown): value is { code: number; stderr: string } {
+  if (typeof value !== "object" || value === null) return false;
+  if (!("code" in value) || !("stderr" in value)) return false;
+  return typeof value.code === "number" && typeof value.stderr === "string";
+}
+
+function compileSwapSupervisor(directory: string): string {
+  const bin = join(directory, "swap-before-read");
+  execFileSync("gcc", ["-O2", "-o", bin, join(import.meta.dir, "support/swap-before-read.c")], {
+    stdio: "pipe",
+  });
+  return bin;
+}
+
 async function world(
   args: string[],
   options: { env?: Record<string, string>; cwd?: string; io?: Partial<WorldCommandIo> } = {},
@@ -425,6 +497,146 @@ describe("hue world create", () => {
       "linear/issues.json",
     ]);
   });
+
+  test("does not follow a symlink planted in hue world create --files", async () => {
+    const stand = hue();
+    const outside = await scratch();
+    await mkdir(join(outside, "vault"));
+    await writeFile(join(outside, "marker"), OUTSIDE_FILE);
+    await writeFile(join(outside, "vault", "note.json"), OUTSIDE_DIR);
+    const dir = await scratch();
+    await mkdir(join(dir, "data", "nested"), { recursive: true });
+    const real = Buffer.from('[{"id":"i1"}]');
+    await writeFile(join(dir, "data", "issues.json"), real);
+    await symlink(join(outside, "marker"), join(dir, "data", "export.json"));
+    await symlink(
+      relative(join(dir, "data", "nested"), join(outside, "marker")),
+      join(dir, "data", "nested", "escape.json"),
+    );
+    await symlink("issues.json", join(dir, "data", "alias.json"));
+    await symlink(join(outside, "vault"), join(dir, "data", "vault"));
+    await symlink(join(outside, "marker"), join(dir, "data", ".hidden.json"));
+    const opened = await watchOpens([join(outside, "marker"), join(outside, "vault", "note.json")]);
+    const result = await world(
+      ["create", "--apps", "linear", "--files", "data", "--origin", stand.origin],
+      { cwd: dir },
+    );
+    const sawOpen = await opened.stop();
+    const uploaded = [...stand.stored.values()].map((buf) => buf.toString("utf8")).join("\n");
+    expect(uploaded).not.toContain(OUTSIDE_FILE);
+    expect(uploaded).not.toContain(OUTSIDE_DIR);
+    expect(sawOpen).toBe(false);
+    expect(await readFile(join(outside, "marker"), "utf8")).toBe(OUTSIDE_FILE);
+    expect(await readFile(join(outside, "vault", "note.json"), "utf8")).toBe(OUTSIDE_DIR);
+    if (result.code === 0) {
+      const sources = stand.creations[0]!.sources as { files: Declared[] };
+      expect(sources.files).toEqual([
+        {
+          app: "linear",
+          files: [{ name: "issues.json", byteSize: real.byteLength, sha256: sha256(real) }],
+        },
+      ]);
+      expect([...stand.stored.values()]).toEqual([real]);
+    } else {
+      expect(stand.stored.size).toBe(0);
+    }
+  }, 20_000);
+
+  test("does not follow a --files directory that is a symlink", async () => {
+    const stand = hue();
+    const outside = await scratch();
+    await writeFile(join(outside, "issues.json"), OUTSIDE_FILE);
+    const dir = await scratch();
+    await symlink(outside, join(dir, "data"));
+    const opened = await watchOpens([join(outside, "issues.json")]);
+    await world(["create", "--apps", "linear", "--files", "data", "--origin", stand.origin], {
+      cwd: dir,
+    });
+    const sawOpen = await opened.stop();
+    const uploaded = [...stand.stored.values()].map((buf) => buf.toString("utf8")).join("\n");
+    expect(uploaded).not.toContain(OUTSIDE_FILE);
+    expect(stand.requests).toEqual([]);
+    expect(stand.stored.size).toBe(0);
+    expect(sawOpen).toBe(false);
+  }, 20_000);
+
+  test("does not read a symlink larger than Hue's per-file limit", async () => {
+    const stand = hue();
+    const outside = await scratch();
+    const size = MAX_FILE_DATA_BYTES + 8 * 1024 * 1024;
+    await writeFile(join(outside, "huge.bin"), Buffer.alloc(size, 7));
+    const dir = await scratch();
+    await mkdir(join(dir, "data"));
+    await symlink(join(outside, "huge.bin"), join(dir, "data", "huge.bin"));
+    const opened = await watchOpens([join(outside, "huge.bin")]);
+    const before = await bytesRead();
+    await world(["create", "--apps", "linear", "--files", "data", "--origin", stand.origin], {
+      cwd: dir,
+    });
+    const sawOpen = await opened.stop();
+    const delta = (await bytesRead()) - before;
+    expect(delta).toBeLessThan(MAX_FILE_DATA_BYTES + 2 * 1024 * 1024);
+    expect(stand.requests).toEqual([]);
+    expect(stand.stored.size).toBe(0);
+    expect(sawOpen).toBe(false);
+  }, 60_000);
+
+  test("does not follow a file replaced by a symlink before it is read", async () => {
+    const stand = hue();
+    const outside = await scratch();
+    await writeFile(join(outside, "marker"), OUTSIDE_FILE);
+    const dir = await scratch();
+    await mkdir(join(dir, "data"));
+    await writeFile(join(dir, "data", "issues.json"), '[{"id":"i1"}]');
+    const swapped = join(dir, "data", "export.json");
+    await writeFile(swapped, "INSIDE-EXPORT-MARKER");
+    const bin = compileSwapSupervisor(dir);
+    const opened = await watchOpens([join(outside, "marker")]);
+    const child = spawn(
+      bin,
+      [
+        "--",
+        process.execPath,
+        join(import.meta.dir, "world-symlink-swap-run.ts"),
+        "create",
+        "--apps",
+        "linear",
+        "--files",
+        "data",
+        "--origin",
+        stand.origin,
+      ],
+      {
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: process.env.HOME ?? "",
+          HUE_API_KEY: KEY,
+          HUE_CWD: dir,
+          HUE_SWAP_PATH: swapped,
+          HUE_SWAP_TARGET: join(outside, "marker"),
+        },
+      },
+    );
+    let output = "";
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      output += chunk;
+    });
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("swap run did not exit")), 20_000);
+      child.once("exit", (code) => {
+        clearTimeout(timer);
+        resolve(code ?? 1);
+      });
+    });
+    const sawOpen = await opened.stop();
+    const parsed: unknown = JSON.parse(output);
+    if (!isSwapReport(parsed)) throw new Error("swap run did not report a result");
+    expect(exitCode).toBe(0);
+    expect(parsed.stderr).not.toContain(OUTSIDE_FILE);
+    for (const buf of stand.stored.values()) expect(buf.toString()).not.toContain(OUTSIDE_FILE);
+    expect(sawOpen).toBe(false);
+  }, 30_000);
 
   test("creates a World from a description alone, and previews one with --dry-run", async () => {
     const stand = hue({ statuses: ["generating", "ready"] });
