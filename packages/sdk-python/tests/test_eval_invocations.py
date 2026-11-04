@@ -147,3 +147,91 @@ def test_invocation_receipt_cannot_refer_to_another_manifest(receiver, invocatio
     reply(receiver, invocation)
     with pytest.raises(HueApiError):
         EvaluationClient(receiver.url, "synthetic-key").get_eval_invocation(invocation["id"])
+
+
+def test_large_receipt_pages_preserve_complete_evidence(receiver, invocation):
+    result = {
+        "caseId": str(uuid4()),
+        "executionId": str(uuid4()),
+        "evaluatorVersionId": str(uuid4()),
+        "resultId": str(uuid4()),
+        "state": "scored",
+        "metrics": [{"name": "quality", "value": 1, "passed": True}],
+    }
+    results = [result] * 20000
+    receipt = {
+        "id": str(uuid4()),
+        "manifestDigest": invocation["manifest"]["digest"],
+        "runId": invocation["runId"],
+        "scoringRunId": invocation["manifest"]["scoringRunId"],
+        "verdict": "pass",
+        "finalizedAt": "2026-11-04T00:00:00Z",
+        "executionIds": [],
+        "results": [],
+        "reasons": [],
+    }
+    invocation["receipt"] = receipt
+    receiver.reply(
+        200,
+        json.dumps(
+            {
+                "invocation": invocation,
+                "pages": [{"field": "receipt.results", "total": len(results)}],
+            }
+        ).encode(),
+        **{"Content-Type": "application/json"},
+    )
+    for offset in range(0, len(results), 100):
+        page = {
+            "id": invocation["id"],
+            "manifestDigest": invocation["manifest"]["digest"],
+            "receiptId": receipt["id"],
+            "field": "receipt.results",
+            "offset": offset,
+            "total": len(results),
+            "items": results[offset : offset + 100],
+            "nextOffset": offset + 100 if offset + 100 < len(results) else None,
+        }
+        receiver.reply(200, json.dumps(page).encode(), **{"Content-Type": "application/json"})
+    actual = EvaluationClient(receiver.url, "synthetic-key").get_eval_invocation(invocation["id"])
+    assert actual["receipt"] == {**receipt, "results": results}
+    assert len(json.dumps(actual).encode()) > 4 * 1024 * 1024
+    assert len(receiver.requests) == 201
+    assert "receiptId=" + receipt["id"] in receiver.requests[-1][0]
+
+
+@pytest.mark.parametrize("bad", ["receiptId", "manifestDigest", "offset", "nextOffset", "total"])
+def test_refuses_mixed_or_nonprogressing_evidence_pages(receiver, invocation, bad):
+    receipt = {
+        "id": str(uuid4()),
+        "manifestDigest": invocation["manifest"]["digest"],
+        "runId": invocation["runId"],
+        "scoringRunId": invocation["manifest"]["scoringRunId"],
+        "verdict": "incomplete",
+        "finalizedAt": "2026-11-04T00:00:00Z",
+        "executionIds": [],
+        "results": [],
+        "reasons": [],
+    }
+    invocation["receipt"] = receipt
+    receiver.reply(
+        200,
+        json.dumps(
+            {"invocation": invocation, "pages": [{"field": "receipt.reasons", "total": 2}]}
+        ).encode(),
+        **{"Content-Type": "application/json"},
+    )
+    page = {
+        "id": invocation["id"],
+        "manifestDigest": invocation["manifest"]["digest"],
+        "receiptId": receipt["id"],
+        "field": "receipt.reasons",
+        "offset": 0,
+        "total": 2,
+        "items": ["missing"],
+        "nextOffset": 1,
+    }
+    page[bad] = str(uuid4()) if bad in ("receiptId", "manifestDigest") else 99
+    receiver.reply(200, json.dumps(page).encode(), **{"Content-Type": "application/json"})
+    with pytest.raises(HueApiError):
+        EvaluationClient(receiver.url, "synthetic-key").get_eval_invocation(invocation["id"])

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from ._json import json_value, uuid
+from ._json import aggregate_bounds, json_value, uuid
 
 
 def _object(value: Any, keys: set[str] | None = None) -> dict[str, Any]:
@@ -223,7 +223,7 @@ def response(value: Any) -> dict[str, Any]:
                     raise ValueError("Invalid metric value.")
                 if "passed" in metric and type(metric["passed"]) is not bool:
                     raise ValueError("Invalid metric verdict.")
-    json_value(obj, 4 * 1024 * 1024)
+    json_value(obj, **aggregate_bounds(256 * 1024 * 1024))
     return obj
 
 
@@ -232,3 +232,61 @@ def operation(key: str, execution_ids: list[str] | None = None) -> dict[str, Any
     if execution_ids is not None:
         body["executionIds"] = _ids(execution_ids)
     return body
+
+
+def hydrate(value: Any, load: Any) -> dict[str, Any]:
+    """Read bounded pages pinned to the original manifest and immutable receipt."""
+    import json
+    from urllib.parse import urlencode
+
+    obj = response(value)
+    size = len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    fields = {"manifest.cases", "receipt.results", "receipt.reasons", "receipt.comparisons"}
+    pages = _object(value).get("pages", [])
+    if not isinstance(pages, list):
+        raise ValueError("Invalid evidence pages.")
+    seen: set[str] = set()
+    for descriptor in pages:
+        descriptor = _object(descriptor, {"field", "total"})
+        field, total = descriptor["field"], _positive(descriptor["total"])
+        if field not in fields or field in seen or total > 5_000_000:
+            raise ValueError("Invalid evidence field.")
+        seen.add(field)
+        root, key = field.split(".")
+        target = _object(obj[root])
+        if target.get(key) != []:
+            raise ValueError("Invalid evidence placeholder.")
+        items: list[Any] = []
+        while len(items) < total:
+            query = {
+                "field": field,
+                "offset": str(len(items)),
+                "manifestDigest": obj["manifest"]["digest"],
+            }
+            if obj["receipt"] is not None:
+                query["receiptId"] = obj["receipt"]["id"]
+            page = _object(load(f"/eval-invocations/{obj['id']}?{urlencode(query)}"))
+            part = page["items"]
+            if not isinstance(part, list) or not 1 <= len(part) <= 100:
+                raise ValueError("Invalid evidence page entries.")
+            end = len(items) + len(part)
+            if (
+                page["id"] != obj["id"]
+                or page["manifestDigest"] != obj["manifest"]["digest"]
+                or root == "receipt"
+                and page["receiptId"] != obj["receipt"]["id"]
+                or page["field"] != field
+                or type(page["offset"]) is not int
+                or page["offset"] != len(items)
+                or type(page["total"]) is not int
+                or page["total"] != total
+                or end > total
+                or page["nextOffset"] != (None if end == total else end)
+            ):
+                raise ValueError("Evidence page does not belong to this invocation.")
+            size += len(json.dumps(part, ensure_ascii=False).encode("utf-8"))
+            if size > 256 * 1024 * 1024:
+                raise ValueError("Invocation evidence exceeds 256 MiB.")
+            items.extend(part)
+        target[key] = items
+    return response({"invocation": obj})

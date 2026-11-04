@@ -126,6 +126,27 @@ class ArchiveGateTests(unittest.TestCase):
                 "1.2.3",
             )
 
+    def test_grouped_numeric_division_preserves_import_boundary(self):
+        division = b"const seconds = Math.ceil((Date.parse(deadline) - Date.now()) / 1000);\n"
+        with tempfile.TemporaryDirectory() as folder:
+            release.inspect(
+                self.parser_archive(folder, {"package/dist/index.js": division}),
+                "typescript",
+                "1.2.3",
+            )
+            for forbidden in (
+                b'import "./setup/source.js";',
+                b'await import("./" + "setup/source.js");',
+            ):
+                with self.subTest(import_source=forbidden), self.assertRaises(AssertionError):
+                    release.inspect(
+                        self.parser_archive(
+                            folder, {"package/dist/index.js": division + forbidden}
+                        ),
+                        "typescript",
+                        "1.2.3",
+                    )
+
     def test_rejects_wrong_parser_pin_unknown_dependency_or_missing_parser_module(self):
         with tempfile.TemporaryDirectory() as folder:
             for dependencies in (
@@ -256,7 +277,7 @@ class ArchiveGateTests(unittest.TestCase):
                         "package/dist/transport.js": b'export async function transport(protocol) { return import(protocol === "https:" ? "node:https" : "node:http"); }',
                         "package/dist/ai-sdk.js": b'import { createRequire } from "node:module"; export const metadata = createRequire(import.meta.url)("ai/package.json");',
                         "package/dist/evals/scorers.js": b'import { createRequire } from "node:module"; export const optional = createRequire(import.meta.url).resolve("ajv/dist/2020.js");',
-                        "package/dist/cli/eval.js": b'import { pathToFileURL } from "node:url"; export async function load(path) { return import(pathToFileURL(path).href); }',
+                        "package/dist/cli/eval.js": b'import { pathToFileURL } from "node:url"; import { resolve } from "node:path"; export async function load(path) { return import(pathToFileURL(path).href); } export async function loadScorer(projectDirectory, path) { return import(pathToFileURL(resolve(projectDirectory, path)).href); }',
                     },
                 ),
                 "typescript",
@@ -265,10 +286,13 @@ class ArchiveGateTests(unittest.TestCase):
 
     def test_accepts_the_eval_adapter_loader_only_in_the_eval_command(self):
         loader = b'import { pathToFileURL } from "node:url"; export async function load(path) { return import(pathToFileURL(path).href); }'
+        scorer_loader = b'import { pathToFileURL } from "node:url"; import { resolve } from "node:path"; export async function load(projectDirectory, path) { return import(pathToFileURL(resolve(projectDirectory, path)).href); }'
         with tempfile.TemporaryDirectory() as folder:
             for files in (
                 {"package/dist/index.js": loader},
                 {"package/dist/cli/login.js": loader},
+                {"package/dist/index.js": scorer_loader},
+                {"package/dist/cli/login.js": scorer_loader},
                 {"package/dist/cli/eval.js": b"export async function load(target) { return import(target); }"},
             ):
                 with (

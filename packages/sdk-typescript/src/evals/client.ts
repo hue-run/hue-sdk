@@ -4,7 +4,7 @@ import { json, uuid, valueBounds } from "./json.js";
 import { MediaClient } from "./media.js";
 import {
   createEvalInvocationInput,
-  evalInvocationEnvelope,
+  readEvalInvocation,
   finalizeEvalInvocationInput,
   cancelEvalInvocationInput,
   createEvalBaselineInput,
@@ -787,12 +787,14 @@ export class EvaluationClient {
     const body = createEvalInvocationInput.parse(input);
     return this.invocationResponse(
       await this.request("POST", "/eval-invocations", body, REQUEST_BOUNDS, signal),
+      signal,
     );
   }
   /** Reads saved inputs and the original gate receipt, without running an agent. Accepts a candidate run ID too. */
   async getEvalInvocation(id: string, signal?: AbortSignal): Promise<EvalInvocation> {
     return this.invocationResponse(
       await this.request("GET", `/eval-invocations/${uuid(id)}`, undefined, REQUEST_BOUNDS, signal),
+      signal,
     );
   }
   /** Looks up a project-scoped invocation before resolving versions or a new deadline. */
@@ -809,6 +811,7 @@ export class EvaluationClient {
         REQUEST_BOUNDS,
         signal,
       ),
+      signal,
     );
   }
   /** Creates or recovers a baseline from the candidate's frozen inputs, never resolving latest. */
@@ -825,6 +828,7 @@ export class EvaluationClient {
         REQUEST_BOUNDS,
         signal,
       ),
+      signal,
     );
   }
   /** Freezes the server's gate decision. Call after scoring settles; an early call freezes incomplete. */
@@ -841,6 +845,7 @@ export class EvaluationClient {
         REQUEST_BOUNDS,
         signal,
       ),
+      signal,
     );
   }
   /** Durably cancels execution and scoring, including after the local runner exits. */
@@ -857,12 +862,18 @@ export class EvaluationClient {
         REQUEST_BOUNDS,
         signal,
       ),
+      signal,
     );
   }
-  private invocationResponse(value: unknown): EvalInvocation {
-    const parsed = evalInvocationEnvelope.safeParse(value);
-    if (!parsed.success) throw new HueApiError();
-    return parsed.data.invocation;
+  private async invocationResponse(value: unknown, signal?: AbortSignal): Promise<EvalInvocation> {
+    try {
+      return await readEvalInvocation(value, (path) =>
+        this.request("GET", path, undefined, REQUEST_BOUNDS, signal),
+      );
+    } catch (error) {
+      if (error instanceof HueApiError) throw error;
+      throw new HueApiError();
+    }
   }
   /** Creates an experiment over a frozen dataset version with pinned scorer versions and a configuration. */
   createExperiment(input: {

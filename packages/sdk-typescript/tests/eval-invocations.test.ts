@@ -185,3 +185,64 @@ describe("eval invocation client", () => {
     }
   });
 });
+
+test("reads a receipt larger than 4 MiB in immutable bounded pages", async () => {
+  const saved = invocation();
+  const result = {
+    caseId: randomUUID(),
+    executionId: randomUUID(),
+    evaluatorVersionId: randomUUID(),
+    resultId: randomUUID(),
+    state: "scored",
+    metrics: [{ name: "quality", value: 1, passed: true }],
+  };
+  const results = Array.from({ length: 20000 }, () => result);
+  saved.receipt = {
+    id: randomUUID(),
+    manifestDigest: saved.manifest.digest,
+    runId: saved.runId,
+    scoringRunId: saved.manifest.scoringRunId,
+    verdict: "pass",
+    finalizedAt: "2026-11-04T00:00:00Z",
+    executionIds: [],
+    results,
+    reasons: [],
+  };
+  expect(Buffer.byteLength(JSON.stringify(saved))).toBeGreaterThan(4 * 1024 * 1024);
+  let pages = 0;
+  let corrupt = false;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const query = new URL(request.url).searchParams;
+      if (!query.has("field"))
+        return Response.json({
+          invocation: { ...saved, receipt: { ...saved.receipt, results: [] } },
+          pages: [{ field: "receipt.results", total: results.length }],
+        });
+      pages++;
+      const offset = Number(query.get("offset"));
+      expect(query.get("receiptId")).toBe(saved.receipt!.id);
+      return Response.json({
+        id: saved.id,
+        manifestDigest: saved.manifest.digest,
+        receiptId: corrupt ? randomUUID() : saved.receipt!.id,
+        field: "receipt.results",
+        offset,
+        total: results.length,
+        items: results.slice(offset, offset + 100),
+        nextOffset: offset + 100 < results.length ? offset + 100 : null,
+      });
+    },
+  });
+  try {
+    const client = createEvaluationClient({ apiKey: "synthetic-key", baseUrl: server.url.origin });
+    expect((await client.getEvalInvocation(saved.id)).receipt).toEqual(saved.receipt);
+    expect(pages).toBe(200);
+    corrupt = true;
+    await expect(client.getEvalInvocation(saved.id)).rejects.toBeInstanceOf(HueApiError);
+  } finally {
+    server.stop(true);
+  }
+});

@@ -71,11 +71,11 @@ def javascript_tokens(source: str) -> list[tuple[str, str]]:
                 tokens.append(("template", "`"))
             elif char == "/":
                 previous = tokens[-1] if tokens else None
-                # The current emitted division form is an identifier divided by a
-                # numeric literal. Other ambiguous slash syntax is not accepted.
+                # Numeric division can follow an identifier, number or grouped
+                # expression. Other ambiguous slash syntax is not accepted.
                 if (
                     previous
-                    and previous[0] in {"word", "number"}
+                    and (previous[0] in {"word", "number"} or previous == ("punct", ")"))
                     and re.match(r"\s*[0-9]", source[index + 1 :])
                 ):
                     tokens.append(("punct", "/"))
@@ -208,18 +208,20 @@ def module_imports(source: str, filename: str) -> list[str]:
                     imports.append(literal(index + 2))
                     assert after[2] == ("punct", ")"), "Computed import is unsupported"
                 else:
-                    # The transport selects one of two built-ins, and `hue eval <adapter-file>`
-                    # loads the adapter file the user named; neither loads an archive module.
+                    # The transport selects one of two built-ins. Eval loads the user's
+                    # adapter or local scorer file; neither loads an archive module.
                     allowed = {
-                        "package/dist/transport.js": (
+                        "package/dist/transport.js": [
                             'import(protocol === "https:" ? "node:https" : "node:http")'
-                        ),
-                        "package/dist/cli/eval.js": "import(pathToFileURL(path).href)",
-                    }.get(filename)
-                    expected = javascript_tokens(allowed) if allowed else None
-                    assert (
-                        expected is not None
-                        and tokens[index : index + len(expected)] == expected
+                        ],
+                        "package/dist/cli/eval.js": [
+                            "import(pathToFileURL(path).href)",
+                            "import(pathToFileURL(resolve(projectDirectory, path)).href)",
+                        ],
+                    }.get(filename, [])
+                    assert any(
+                        tokens[index : index + len(expected)] == expected
+                        for expected in map(javascript_tokens, allowed)
                     ), "Computed import is unsupported"
                 continue
             if after and after[0][0] == "string":

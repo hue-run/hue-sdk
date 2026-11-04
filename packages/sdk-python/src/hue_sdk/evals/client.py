@@ -406,10 +406,9 @@ class EvaluationClient:
             )
         )
 
-    @staticmethod
-    def _invocation_response(value: Any) -> dict[str, Any]:
+    def _invocation_response(self, value: Any) -> dict[str, Any]:
         try:
-            return _invocations.response(value)
+            return _invocations.hydrate(value, lambda path: self._request("GET", path))
         except (ValueError, TypeError, KeyError) as error:
             raise HueApiError(reason="malformed_response") from error
 
