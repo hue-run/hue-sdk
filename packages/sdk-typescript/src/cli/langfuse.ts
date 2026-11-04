@@ -810,9 +810,9 @@ export function pinnedDownload(
         }
         const status = answer.statusCode ?? 502;
         // node:stream/web's ReadableStream and the global one are the same object at runtime;
-        // their declarations only differ.
+        // their declarations only differ. A null-body status must construct with a null body.
         const body =
-          status === 204 || status === 304
+          status === 204 || status === 205 || status === 304
             ? null
             : (Readable.toWeb(answer) as unknown as ReadableStream);
         resolve(new Response(body, { status, headers }));
