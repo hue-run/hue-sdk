@@ -149,6 +149,13 @@ def response(value: Any) -> dict[str, Any]:
         case = _object(item)
         uuid(case["caseId"])
         _text(case["contentDigest"])
+        if "inputIdentity" in case:
+            _text(case["inputIdentity"])
+        if "judgePinning" in case:
+            for evaluator_id, scope in _object(case["judgePinning"]).items():
+                uuid(evaluator_id)
+                if scope not in ("this_case", "other_cases", "no_case"):
+                    raise ValueError("Invalid case judge ownership.")
         _ids(case["evaluatorVersionIds"])
         json_value(case["world"])
     for item in manifest["evaluators"]:

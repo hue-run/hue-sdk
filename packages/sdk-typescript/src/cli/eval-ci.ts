@@ -16,7 +16,6 @@ import {
   type EvalCiContext,
   type CreateEvalInvocationInput,
 } from "../evals/invocations.js";
-import { collectExperimentVerdicts } from "../evals/verdicts.js";
 import { UncertainExecutionError, TargetOutcomeUncertainError } from "../evals/runner.js";
 import { evalReport, writeEvalReports } from "./eval-reports.js";
 import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
@@ -142,15 +141,11 @@ async function settleInvocation(
   while (!signal.aborted) {
     invocation = await client.getEvalInvocation(invocation.id, signal);
     if (invocation.receipt || invocation.state !== "active") return invocation;
-    const results = await collectExperimentVerdicts(client, {
-      experimentId: invocation.runId,
-      timeoutMillis: 0,
-      signal,
-    });
+    const scoring = await client.getEvaluationRun(invocation.manifest.scoringRunId, signal);
     if (
-      (results.results.complete &&
-        results.results.items.length === invocation.manifest.cases.length &&
-        results.summary.totals.pending === 0) ||
+      (scoring.itemCount === invocation.manifest.cases.length &&
+        scoring.scores.pending === 0 &&
+        !scoring.managedScoringActive) ||
       Date.now() >= deadline
     )
       break;

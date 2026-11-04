@@ -1157,7 +1157,7 @@ describe("hue eval CLI concurrency", () => {
   for (const worker of [false, true])
     for (const concurrency of [undefined, 1, 2])
       test(
-        `${worker ? "worker" : "one-shot"} runs ${concurrency ?? "default four"} isolated cases at a time`,
+        `${worker ? "worker" : "one-shot"} runs ${concurrency ?? "default 20"} isolated cases at a time`,
         async () => {
           const adoptRegisteredWorker = worker && concurrency === undefined;
           const standIn = documentStandIn({
@@ -1234,7 +1234,7 @@ process.stdout.write(JSON.stringify({ answer: event.key }));
               peak = Math.max(peak, active);
             }
             const starts = events.filter((event) => event.type === "start");
-            expect(peak).toBe(concurrency ?? 4);
+            expect(peak).toBe(Math.min(concurrency ?? 20, 6));
             expect(active).toBe(0);
             expect(starts).toHaveLength(6);
             for (const field of ["key", "directory", "output", "pid"] as const)
@@ -1317,7 +1317,7 @@ describe("hue eval hosted judges", () => {
           { cwd, installed: true, env: { HUE_BASE_URL: standIn.baseUrl } },
         );
         expect(result.status).toBe(0);
-        expect(JSON.parse(result.stdout).check.agent.concurrency).toBe("4");
+        expect(JSON.parse(result.stdout).check.agent.concurrency).toBe("20");
         expect(standIn.calls.experiments).toEqual([]);
         expect(standIn.calls.judgeJobs).toEqual([]);
         expect(standIn.calls.starts).toBe(0);

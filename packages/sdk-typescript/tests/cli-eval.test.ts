@@ -13,7 +13,7 @@ import { derivedAgentKey, explain, renderTable, spawnAgentCommand } from "../src
 import { CheckpointIdentityError } from "../src/evals/checkpoint.js";
 import type { CaseVerdict, ExperimentVerdicts } from "../src/evals/verdicts.js";
 import { TargetCancelledError } from "../src/evals.js";
-import type { EvalInvocation } from "../src/evals/invocations.js";
+import { createEvalInvocationInput, type EvalInvocation } from "../src/evals/invocations.js";
 import type {
   Completion,
   Execution,
@@ -61,6 +61,7 @@ function hueStandIn(
     ciCreateFailures?: number;
     ciNoReceipt?: boolean;
     ciBuiltin?: boolean;
+    ciScoringTransitions?: boolean;
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
@@ -145,6 +146,7 @@ function hueStandIn(
   >();
   const results = new Map<string, StoredResult[]>();
   const resultPolls = new Map<string, number>();
+  const scoringPolls = new Map<string, number>();
   const calls = {
     requests: [] as string[],
     otlp: 0,
@@ -210,7 +212,7 @@ function hueStandIn(
       if (path === "/eval-invocations" && request.method === "GET")
         return invocation ? Response.json({ invocation }) : new Response(null, { status: 404 });
       if (path === "/eval-invocations" && request.method === "POST") {
-        const body = await request.json();
+        const body = createEvalInvocationInput.parse(await request.json());
         creationRequests.push(body);
         if (!invocation) {
           const experiment = createExperiment({
@@ -683,6 +685,32 @@ function hueStandIn(
           evaluationItemId,
           traceSnapshotId: randomUUID(),
         } satisfies Completion);
+      }
+      const scoringMatch = /^\/evaluation-runs\/([^/]+)$/.exec(path);
+      if (scoringMatch && request.method === "GET") {
+        const scoringId = scoringMatch[1]!;
+        const scoring = [...experiments.values()].find(
+          (experiment) => experiment.evaluation.id === scoringId,
+        )!.evaluation;
+        const polls = (scoringPolls.get(scoringId) ?? 0) + 1;
+        scoringPolls.set(scoringId, polls);
+        const saved = results.get(scoringId) ?? [];
+        const pending = polls <= state.deferredPolls ? 1 : 0;
+        return Response.json({
+          ...scoring,
+          itemCount:
+            options.ciScoringTransitions && polls === 1
+              ? 0
+              : (runItems.get(scoringId)?.length ?? 0),
+          managedScoringActive: options.ciScoringTransitions && polls === 2,
+          scores: {
+            scored: saved.filter((result) => result.state === "scored").length,
+            error: saved.filter((result) => result.state === "error").length,
+            skipped: saved.filter((result) => result.state === "skipped").length,
+            notApplicable: 0,
+            pending: options.ciScoringTransitions && polls === 3 ? 1 : pending,
+          },
+        });
       }
       const runMatch = /^\/evaluation-runs\/([^/]+)\/(items|results)$/.exec(path);
       if (runMatch) {
@@ -3031,7 +3059,11 @@ describe("CI invocation CLI", () => {
   }, 30_000);
 
   test("CI retries lost creation acknowledgements with identical keys and waits for scoring", async () => {
-    const fixture = hueStandIn({ answerOnlyScenario: true, ciCreateFailures: 2, deferredPolls: 2 });
+    const fixture = hueStandIn({
+      answerOnlyScenario: true,
+      ciCreateFailures: 2,
+      ciScoringTransitions: true,
+    });
     const directory = await mkdtemp(join(tmpdir(), "hue-ci-retry-"));
     try {
       await writeFile(
@@ -3051,11 +3083,16 @@ describe("CI invocation CLI", () => {
       expect(fixture.creationRequests[1]).toEqual(fixture.creationRequests[0]);
       expect(fixture.creationRequests[2]).toEqual(fixture.creationRequests[0]);
       const finalize = fixture.calls.requests.findIndex((call) => call.endsWith("/finalize"));
+      const report = JSON.parse(result.stdout);
       expect(
-        fixture.calls.requests.slice(0, finalize).filter((call) => call.endsWith("/results"))
-          .length,
-      ).toBeGreaterThanOrEqual(3);
-      expect(JSON.parse(result.stdout).verdict).toBe("pass");
+        fixture.calls.requests
+          .slice(0, finalize)
+          .filter((call) => call === `GET /evaluation-runs/${report.receipt.scoringRunId}`).length,
+      ).toBe(4);
+      expect(
+        fixture.calls.requests.filter((call) => /^GET \/evaluation-results\//.test(call)),
+      ).toEqual([]);
+      expect(report.verdict).toBe("pass");
     } finally {
       fixture.stop();
       await rm(directory, { recursive: true, force: true });

@@ -107,6 +107,8 @@ export const evalInvocationEnvelope = z
           z.object({
             caseId: id,
             contentDigest: z.string(),
+            inputIdentity: z.string().optional(),
+            judgePinning: z.record(id, z.enum(["this_case", "other_cases", "no_case"])).optional(),
             evaluatorVersionIds: z.array(id),
             world: z.json(),
           }),

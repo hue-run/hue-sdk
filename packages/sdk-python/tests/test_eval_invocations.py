@@ -31,6 +31,12 @@ def invocation():
                 {
                     "caseId": case_id,
                     "contentDigest": "b" * 64,
+                    "inputIdentity": "d" * 64,
+                    "judgePinning": {
+                        evaluator_id: "this_case",
+                        str(uuid4()): "other_cases",
+                        str(uuid4()): "no_case",
+                    },
                     "evaluatorVersionIds": [evaluator_id],
                     "world": None,
                 }

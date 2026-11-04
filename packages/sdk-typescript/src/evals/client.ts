@@ -779,7 +779,7 @@ export class EvaluationClient {
   async getEvaluatorVersion(id: string): Promise<EvaluatorVersion> {
     return productRegistryFields(await this.getScorerVersion(id));
   }
-  /** Creates an experiment over a frozen dataset version with pinned scorer versions and a configuration. */
+  /** Creates or recovers a frozen invocation; Hue owns the gate verdict. */
   async createEvalInvocation(
     input: CreateEvalInvocationInput,
     signal?: AbortSignal,
@@ -864,6 +864,7 @@ export class EvaluationClient {
     if (!parsed.success) throw new HueApiError();
     return parsed.data.invocation;
   }
+  /** Creates an experiment over a frozen dataset version with pinned scorer versions and a configuration. */
   createExperiment(input: {
     idempotencyKey: string;
     name: string;
@@ -1079,8 +1080,14 @@ export class EvaluationClient {
     }>("POST", "/evaluation-runs", input);
   }
   /** Reads an evaluation run and its scoring progress. */
-  getEvaluationRun(id: string) {
-    return this.request<EvaluationRun>("GET", `/evaluation-runs/${uuid(id)}`);
+  getEvaluationRun(id: string, signal?: AbortSignal) {
+    return this.request<EvaluationRun>(
+      "GET",
+      `/evaluation-runs/${uuid(id)}`,
+      undefined,
+      REQUEST_BOUNDS,
+      signal,
+    );
   }
   /** Every evaluation run of the project, oldest first; a grading worker polls this for pending pins. */
   listEvaluationRuns(page?: PageOptions) {

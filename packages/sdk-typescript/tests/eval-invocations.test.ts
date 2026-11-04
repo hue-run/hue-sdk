@@ -28,6 +28,20 @@ function invocation(): EvalInvocation {
 describe("eval invocation client", () => {
   test("retries safe control operations with original bytes and reads by encoded identity", async () => {
     const saved = invocation();
+    saved.manifest.cases = [
+      {
+        caseId: randomUUID(),
+        contentDigest: "b".repeat(64),
+        inputIdentity: "c".repeat(64),
+        evaluatorVersionIds: [],
+        world: null,
+        judgePinning: {
+          [randomUUID()]: "this_case",
+          [randomUUID()]: "other_cases",
+          [randomUUID()]: "no_case",
+        },
+      },
+    ];
     const calls: { method: string; path: string; body: string }[] = [];
     const server = Bun.serve({
       hostname: "127.0.0.1",

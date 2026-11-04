@@ -112,6 +112,16 @@ The callback may run again after an interruption, so make its writes idempotent.
 Cases whose inputs are a task plus pinned documents, and rescoring over documents a run already
 saved, use the same runner without a world. See [Direct cases and files](#direct-cases-and-files).
 
+## CI invocation clients
+
+For CI gates, `createEvalInvocation` resolves a frozen manifest once. `getEvalInvocationByKey`
+recovers it before version resolution, and `getEvalInvocation` reads its saved state and original
+receipt without running agents. `createEvalBaseline` clones its frozen inputs for the intended
+base revision. After scoring settles, `finalizeEvalInvocation` freezes the server's decision;
+`cancelEvalInvocation` durably stops the invocation. Reuse each control request's original key
+and body. These methods require server support. The [CI CLI guide](./CLI.md#run-evaluations-in-ci)
+describes configuration, policy, process isolation, recovery, reports, and exit codes.
+
 ## Tags
 
 Tags group datasets, scorers and experiments, for example by the area of the agent they test.
@@ -169,7 +179,7 @@ A callback receives `{inputs,hasOutput,output?,hasExpected,expected?,metadata,ex
 - `{state:"error",error:{type,message?}}`.
 - `{state:"skipped",explanation:"reason"}`.
 
-All declared metrics must appear exactly once and satisfy pinned types, bounds and categories. Each metric may include an optional `description` (1–500 characters) shown with its check in Hue's run view. The binding must match language, entrypoint, SHA-256 source digest and metric definitions. The digest is an authenticated caller declaration; it does not attest closures, dependency versions or actual execution. Callback source is never downloaded or evaluated. Callbacks are trusted local code; they have **no execution timeout or side-effect cancellation**. Concurrency limits active cases to 1–100 (default 1), with scorers evaluated sequentially within each case.
+All declared metrics must appear exactly once and satisfy pinned types, bounds and categories. Each metric may include an optional `description` (1–500 characters) shown with its check in Hue's run view. The binding must match language, entrypoint, SHA-256 source digest and metric definitions. The digest is an authenticated caller declaration; it does not attest closures, dependency versions or actual execution. Callback source is never downloaded or evaluated. Callbacks are trusted local code; they have **no execution timeout or side-effect cancellation**. Concurrency defaults to 20 active cases and accepts any positive safe integer, with scorers evaluated sequentially within each case.
 
 `files` is present only when the runner handled files for that execution: every pinned input file
 (all roles, including the evaluator-only `org_template`) and every generated output, each with its

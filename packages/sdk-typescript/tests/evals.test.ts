@@ -960,6 +960,7 @@ describe("installed evaluation API and runner contract", () => {
           checkpointDirectory: await directory(),
           persistResultContent: false,
           traceEvidence: { mode: "omit" as const, reason: "Synthetic service failures" },
+          concurrency: 1,
           target: async () => {
             calls++;
             throw calls === 1 ? first : second;
