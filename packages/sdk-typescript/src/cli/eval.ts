@@ -901,7 +901,7 @@ const executeCiRun: ExecuteCiRun = async ({
   const hue = createHue({
     ...connection,
     serviceName: "hue-eval",
-    captureContent: true,
+    captureContent: config.captureContent,
     timeoutMillis: CASE_TRACE_EXPORT_MILLIS,
   });
   const worldClient = createEnvironmentClient(connection);
@@ -942,7 +942,7 @@ const executeCiRun: ExecuteCiRun = async ({
       hue,
       experimentId: invocation.runId,
       checkpointDirectory,
-      persistResultContent: true,
+      persistResultContent: config.persistResultContent,
       traceEvidence: { mode: "required" },
       traceNotAccepted: "pending",
       concurrency: config.concurrency,

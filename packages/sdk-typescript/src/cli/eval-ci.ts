@@ -30,6 +30,8 @@ export const evalConfig = z
     evaluatorIds: z.array(z.uuid()).optional(),
     evaluatorVersionIds: z.array(z.uuid()).optional(),
     config: z.json().default({}),
+    captureContent: z.boolean().default(true),
+    persistResultContent: z.boolean().default(true),
     policy: evalPolicy.default({ thresholds: [] }),
     concurrency: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(20),
     timeoutSeconds: seconds.default(600),
@@ -123,6 +125,9 @@ const USAGE = `Usage: hue eval --ci --config hue.eval.json --report-dir .hue/rep
 --deadline <sec>   Overall deadline (default: config or 900)
 --timeout <sec>    Agent timeout per case (default: config or 600)
 --wait <sec>       Scoring wait (default: config or 300)
+--content          Capture trace content (default: config or enabled)
+--no-content       Export trace metadata only
+--no-output        Omit stored case outputs, error messages and scorer explanations
 --checkpoint-dir  Private recovery directory (default: .hue/ci/<identity>)
 --origin <url>    Hue origin; otherwise HUE_BASE_URL
 --env-path <path> Load a private dotenv file
@@ -210,6 +215,9 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
           deadline: { type: "string" },
           timeout: { type: "string" },
           wait: { type: "string" },
+          content: { type: "boolean" },
+          "no-content": { type: "boolean" },
+          "no-output": { type: "boolean" },
           "checkpoint-dir": { type: "string" },
           origin: { type: "string" },
           json: { type: "boolean" },
@@ -227,6 +235,8 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
       process.stdout.write(USAGE);
       return 0;
     }
+    if (values.content && values["no-content"])
+      throw new ConfigurationError("Choose either --content or --no-content");
     const status = positionals[0] === "status";
     if (
       (status && (positionals.length !== 2 || values.ci || values.config)) ||
@@ -267,6 +277,9 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
               .join("; "),
         );
       const config = result.data;
+      if (values.content) config.captureContent = true;
+      if (values["no-content"]) config.captureContent = false;
+      if (values["no-output"]) config.persistResultContent = false;
       for (const [flag, key] of [
         ["concurrency", "concurrency"],
         ["deadline", "deadlineSeconds"],
@@ -297,9 +310,15 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
       }
       if (config.policy.baselineComparisons?.length && !ci.baseSha)
         throw new ConfigurationError("Baseline comparisons require an intended base commit");
+      const { captureContent, persistResultContent, ...recoveryConfig } = config;
       const identity = {
         origin: baseUrl,
-        config,
+        // Default policies retain identities written before explicit privacy controls existed.
+        config: {
+          ...recoveryConfig,
+          ...(!captureContent ? { captureContent } : {}),
+          ...(!persistResultContent ? { persistResultContent } : {}),
+        },
         ci,
         ...(ci.provider === "github" ? { job: process.env.GITHUB_JOB ?? "" } : {}),
       };
