@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import urllib.request
+import zlib
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Thread
@@ -34,6 +35,7 @@ class App:
     url: str = ""
     body: bytes = BODY
     content_type: str = "application/json"
+    content_encoding: str | None = None
     status: int = 200
     requests: list = field(default_factory=list)
     routes: dict[str, bytes] = field(default_factory=dict)
@@ -72,7 +74,7 @@ def app():
             result = state.routes.get(urlsplit(self.path).path, state.body)
             if state.status in (204, 304):
                 result = b""
-            if self.path.startswith("/gzip"):
+            if self.path.startswith("/gzip") and state.content_encoding is None:
                 result = gzip.compress(result, mtime=0)
             redirected = state.redirects.get(urlsplit(self.path).path)
             self.send_response(302 if redirected else state.status)
@@ -89,7 +91,9 @@ def app():
                 self.close_connection = True
             self.send_header("Notion-Version", "2022-06-28")
             self.send_header("Set-Cookie", "synthetic-response-cookie=private")
-            if self.path.startswith("/gzip"):
+            if state.content_encoding is not None:
+                self.send_header("Content-Encoding", state.content_encoding)
+            elif self.path.startswith("/gzip"):
                 self.send_header("Content-Encoding", "gzip")
             self.end_headers()
             if state.body_gate is not None:
@@ -979,17 +983,19 @@ def test_undecodable_bodies_are_omitted_without_inventing_characters(receiver, a
     assert "output.value" not in fields
 
 
-@pytest.mark.parametrize("kind", ("requests", "urllib3", *HTTPX_TRANSPORTS))
-def test_raw_compressed_reads_preserve_bytes_and_record_size_only(receiver, app, kind):
+@pytest.mark.parametrize("kind", ("requests", "urllib3", "urllib3-preloaded", *HTTPX_TRANSPORTS))
+def test_raw_compressed_reads_preserve_bytes_and_capture_decoded_content(receiver, app, kind):
     def read():
         url = app.url + "/gzip"
         if kind == "requests":
             with requests.get(url, stream=True) as response:
                 return response.raw.read(decode_content=False)
-        if kind == "urllib3":
+        if kind.startswith("urllib3"):
             import urllib3
 
             with urllib3.PoolManager() as client:
+                if kind == "urllib3-preloaded":
+                    return client.request("GET", url, decode_content=False).data
                 response = client.request("GET", url, preload_content=False)
                 try:
                     return response.read(decode_content=False)
@@ -1016,7 +1022,7 @@ def test_raw_compressed_reads_preserve_bytes_and_record_size_only(receiver, app,
     assert gzip.decompress(baseline) == BODY
     fields = attributes(http_spans(receiver)[0])
     assert fields["http.response.body.size"] == len(baseline)
-    assert "output.value" not in fields
+    assert json.loads(fields["output.value"]) == PAYLOAD
 
 
 @pytest.mark.parametrize(
@@ -1045,7 +1051,114 @@ def test_aiohttp_decompression_choice_preserves_bytes_and_honest_capture(
         assert json.loads(fields["output.value"]) == PAYLOAD
     else:
         assert gzip.decompress(baseline) == BODY
+        assert json.loads(fields["output.value"]) == PAYLOAD
+
+
+@pytest.mark.parametrize("encoding", ("gzip", "x-gzip", "deflate", "raw-deflate", "br", "gzip, br"))
+def test_compressed_capture_preserves_wire_bytes_and_redacts(receiver, app, encoding):
+    import brotli
+
+    payload = {"ok": True, "access_token": "synthetic-private-value", "ordinary": "redact-me"}
+    plain = json.dumps(payload).encode()
+    if encoding == "raw-deflate":
+        compressor = zlib.compressobj(wbits=-15)
+        body = compressor.compress(plain) + compressor.flush()
+    elif encoding == "deflate":
+        body = zlib.compress(plain)
+    elif encoding == "br":
+        body = brotli.compress(plain)
+    else:
+        body = gzip.compress(plain, mtime=0)
+        if encoding == "gzip, br":
+            body = brotli.compress(body)
+    app.body = body
+    app.content_encoding = "deflate" if encoding == "raw-deflate" else encoding
+
+    def redact(_key, value):
+        if isinstance(value, dict) and value.get("ordinary") == "redact-me":
+            return {**value, "ordinary": "[removed]"}
+        return value
+
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False, redactor=redact) as hue:
+        request = urllib.request.Request(
+            app.url + "/compressed",
+            data=body,
+            headers={"Content-Type": "application/json", "Content-Encoding": app.content_encoding},
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.read() == body
+        assert hue.force_flush()
+    fields = attributes(http_spans(receiver)[0])
+    expected = {"ok": True, "access_token": "[redacted]", "ordinary": "[removed]"}
+    assert json.loads(fields["input.value"]) == expected
+    assert json.loads(fields["output.value"]) == expected
+    assert fields["http.response.body.size"] == len(body)
+    assert app.requests[0][2] == body
+
+
+@pytest.mark.parametrize("options", ({"capture_content": False}, {"capture_http_bodies": False}))
+def test_compressed_capture_opt_out_never_decodes(receiver, app, monkeypatch, options):
+    from hue_sdk import _http_capture
+
+    decoded = []
+    monkeypatch.setattr(_http_capture, "decode_body", lambda *args: decoded.append(args))
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False, **options) as hue:
+        with urllib.request.urlopen(app.url + "/gzip") as response:
+            assert gzip.decompress(response.read()) == BODY
+        assert hue.force_flush()
+    assert decoded == []
+    fields = attributes(http_spans(receiver)[0])
+    assert "output.value" not in fields
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("over-limit", "malformed", "incomplete", "unknown", "missing-brotli", "layers", "members"),
+)
+def test_compressed_capture_failure_keeps_application_bytes(receiver, app, monkeypatch, kind):
+    import brotli
+
+    app.content_encoding = "gzip"
+    if kind == "over-limit":
+        app.body = gzip.compress(b"x" * (2 * 1024 * 1024))
+    elif kind == "malformed":
+        app.body = b"invalid gzip bytes"
+    elif kind == "incomplete":
+        app.body = gzip.compress(BODY)[:-1]
+    elif kind == "unknown":
+        app.content_encoding = "unrecognized"
+        app.body = b"opaque bytes"
+    elif kind == "layers":
+        app.body = BODY
+        app.content_encoding = ",".join(["gzip"] * 9)
+        for _ in range(9):
+            app.body = gzip.compress(app.body)
+    elif kind == "members":
+        app.body = gzip.compress(b"") * 17
+    else:
+        app.content_encoding = "br"
+        app.body = brotli.compress(BODY)
+        monkeypatch.setitem(sys.modules, "brotli", None)
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        with urllib.request.urlopen(app.url + "/compressed") as response:
+            assert response.read() == app.body
+        assert hue.force_flush()
+    fields = attributes(http_spans(receiver)[0])
+    assert fields["http.response.body.size"] == len(app.body)
+    if kind == "unknown":
         assert "output.value" not in fields
+    else:
+        assert fields["output.value"]["hue.truncated"] is True
+
+
+def test_early_close_of_raw_compressed_stream_records_only_a_marker(receiver, app):
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        with urllib.request.urlopen(app.url + "/gzip") as response:
+            assert response.read(3) == gzip.compress(BODY, mtime=0)[:3]
+        assert hue.force_flush()
+    fields = attributes(http_spans(receiver)[0])
+    assert fields["http.response.body.size"] == 3
+    assert fields["output.value"]["hue.truncated"] is True
 
 
 @pytest.mark.parametrize("kind", ("requests", *HTTPX_TRANSPORTS, "urllib", "aiohttp", "urllib3"))

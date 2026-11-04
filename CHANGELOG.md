@@ -2088,6 +2088,15 @@ No registry release is claimed until publication and registry acceptance complet
   world's values, the API versions every call accepts, required headers and common clients'
   options. A Hue that does not send it is read as before.
 
+#### Fixed
+
+- Raw gzip/x-gzip and zlib/raw deflate HTTP bodies now capture decoded content from bounded copies.
+  Raw Brotli capture uses the optional `compression` extra. Every decoded layer respects the
+  content cap, and application bytes and privacy opt-outs remain unchanged. Installing the extra
+  can also enable HTTP clients' own Brotli negotiation; the base install adds no decoder.
+- World handoffs and temporary MCP files retain only remote HTTP connection fields. Unsupported
+  transports are rejected and executable configuration fields are omitted.
+
 ### [0.14.0] - 2026-10-25
 
 #### Breaking

@@ -6,6 +6,11 @@ An application opens `Hue(base_url, api_key, ...)`, records spans, model calls a
 
 - `py-span` records `span`, `model`, `tool` and `context` with input and output.
 - `py-subagent` records `subagent()` (a `with` block, or a decorator for functions and coroutine functions) as an `invoke_agent {name}` span under the active tool span, or under `parent_context` from `Hue.extract()` in another process. A shared helper restores each task's parent context independently, including nested and inherited scopes.
+- `py-world-handoff` preserves copied remote MCP URLs and headers while projecting only supported
+  HTTP fields. Both `world_handoff` and `mcp_config_file` reject non-HTTP transports and drop
+  executable configuration fields, including on directly supplied handoffs. Run installed-wheel
+  `pytest tests/test_environment.py -k 'handoff or mcp_config or mcp_file'`; inspect the written
+  JSON, owner-only permissions and cleanup without executing the synthetic command canary.
 - `py-capture` honors `capture_content` and redaction before export.
 - `py-http` observes outbound HTTP identity and eligible request and response bodies by default
   through `requests`, `httpx` and `httpx2` sync and async, `urllib.request`, `aiohttp`, `httplib2` and `urllib3`.
@@ -19,6 +24,16 @@ An application opens `Hue(base_url, api_key, ...)`, records spans, model calls a
   Captured MIME fields declare JSON while allowed header attributes preserve original content types.
   Original SDK attribute limits remain authoritative: URI expansions are omitted, accepted body
   cuts use structured markers and dropped keys stay absent.
+- `py-http-compression` decodes complete raw gzip/x-gzip, zlib/raw deflate and stacked encodings
+  in bounded copies. Raw Brotli uses the optional `compression` extra and its bounded API, with
+  a fixed 32 KiB maximum output block per call. Each layer must fit the capture cap. At most
+  eight encoding layers and sixteen gzip members per layer bound work even for empty output. Missing/old
+  decoders, corrupt streams and expansion over the cap produce markers; consumer bytes,
+  redaction and content opt-outs remain unchanged. Base installs add no decoder or HTTP
+  negotiation change. With the extra, run `pytest tests/test_http_compression.py
+  tests/test_http_capture.py -k 'compress or gzip'` from the installed wheel. With base
+  dependencies, run `pytest tests/test_http_capture.py -k 'raw_compressed and requests'` and
+  confirm that Brotli is not installed.
 - `py-http-identity` scrubs recognized credentials in URL paths, preserves ordinary identifiers,
   applies URL and present URI-alias redactors in both content modes, removes `url.query` and
   sanitizes aliases and method-only span names only in Hue's export copy. URL-valued `resource.name`

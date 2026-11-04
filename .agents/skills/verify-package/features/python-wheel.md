@@ -6,6 +6,10 @@
 
 - `wheel-inventory` ships exactly the intended modules and metadata.
 - `wheel-consumer` installs the same candidate wheel into fresh pip and uv environments on Python 3.10 and 3.14. Pip runs broad behavior; uv runs content-default, metadata-only and isolated schema-worker checks. Both import before frozen test dependencies are added.
+- `wheel-compression-extra` keeps Brotli out of base dependencies. Compare `requests`' default
+  `Accept-Encoding` before and after installing the base wheel, then install the same wheel with
+  `[compression]` and run bounded raw response capture. Optional decoder installation may enable
+  clients' own Brotli negotiation; Hue capture itself never rewrites their headers.
 
 ## How to get to it (user POV)
 

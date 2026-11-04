@@ -22,6 +22,7 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from ._http_bounds import mark_cut, remember_span
+from ._http_compression import decode_body, supported_encodings
 from ._http_identity import sanitize_http_url
 from ._http_scope import client_scope, is_stale_span, model_for, scope_for
 from ._http_streams import install_stream, uninstall_stream_hooks
@@ -386,11 +387,21 @@ class Exchange:
         value = _query(query)
         if body is None or (isinstance(body, (bytes, bytearray, memoryview)) and len(body) == 0):
             self._value("input.value", value)
-        elif isinstance(body, (bytes, bytearray, memoryview)) and _text_type(mime):
+        elif (
+            isinstance(body, (bytes, bytearray, memoryview))
+            and _text_type(mime)
+            and supported_encodings(request.headers.get("content-encoding", ""))
+        ):
             if len(body) > self.cap:
                 self._value("input.value", truncated_marker(len(body)), cut=True)
                 return
-            parsed = _parse(bytes(body), mime)
+            decoded = decode_body(
+                bytes(body), request.headers.get("content-encoding", ""), self.cap
+            )
+            if decoded is None:
+                self._value("input.value", truncated_marker(len(body)), cut=True)
+                return
+            parsed = _parse(decoded, mime)
             if parsed is _ABSENT:
                 return
             if isinstance(parsed, dict):
@@ -449,14 +460,25 @@ class Exchange:
                 self.span.set_attribute("http.response.body.size", self.size)
             if (
                 self.bodies
-                and not self.encoded
                 and _text_type(self.headers.get("content-type", ""))
+                and (
+                    not self.encoded
+                    or supported_encodings(self.headers.get("content-encoding", ""))
+                )
             ):
                 mime = self.headers["content-type"]
                 if self.size > self.cap or (not complete and self.size):
                     self._value("output.value", truncated_marker(self.size), cut=True)
                 elif complete:
-                    body = _parse(bytes(self.buffer), mime)
+                    decoded = decode_body(
+                        bytes(self.buffer),
+                        self.headers.get("content-encoding", "") if self.encoded else "",
+                        self.cap,
+                    )
+                    if decoded is None:
+                        self._value("output.value", truncated_marker(self.size), cut=True)
+                        return
+                    body = _parse(decoded, mime)
                     if body is not _ABSENT:
                         self._value("output.value", body)
         except Exception:
@@ -590,6 +612,7 @@ def _received(kind: str, response: Any, exchange: Exchange) -> None:
         exchange.observe(response.__dict__["_content"])
         exchange.finish(complete=True)
     elif kind == "urllib3" and isinstance(response.__dict__.get("_body"), bytes):
+        exchange.encoded = not response.decode_content
         exchange.observe(response.__dict__["_body"])
         exchange.finish(complete=True)
     else:
