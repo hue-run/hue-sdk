@@ -142,6 +142,7 @@ The [tracing reliability contract](./RELIABILITY.md) maps failure isolation and 
 | [Gmail summary tools](./examples/gmail-summary-tool) | TypeScript and Python helpers return summaries while HTTP children record Gmail list/get responses. Offline checks use synthetic Gmail and OTLP receivers. |
 | [Python agent](./examples/python-agent) | Public wheel imports, model/tool spans, correlated logs and optional instrumented OpenAI calls. |
 | [Python evaluation](./examples/python-evaluation) | Frozen datasets, local targets/scorers, resumable uploads and historical rescoring. |
+| [World login and cleanup hooks](./examples/world-lifecycle-hooks) | A standalone helper for typed login test outcomes and application cleanup after a World seals. Works with any application language through a JSON adapter. |
 
 For applications that already use OpenTelemetry, follow the [existing-provider guide](https://docs.hue.run/integrations/opentelemetry), including its Next.js streaming recipe.
 
