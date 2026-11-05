@@ -1,11 +1,13 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import type { LookupFunction } from "node:net";
 import { context, ROOT_CONTEXT, SpanStatusCode, trace, type Tracer } from "@opentelemetry/api";
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { validateOptions } from "./config.js";
 import { json, uuid } from "./evals/json.js";
 import type { JsonValue } from "./types.js";
+import { uploadLookup } from "./upload-destination.js";
 
 const MIB = 1024 * 1024;
 const MAX_FILE = 25 * MIB;
@@ -289,11 +291,12 @@ export function createManagedTargetHandler(
         const artifactId = uuid(reserved.artifactId as string);
         if (reserved.state !== "ready") {
           const uploadUrl = safeUploadUrl(reserved.uploadUrl);
+          const lookup = uploadLookup(new URL(uploadUrl), baseUrl);
           const headers = uploadHeaders(reserved.headers, file.contentType);
           // Never replay a signed write. Completion independently verifies the
           // stored hash, so it can settle a lost successful acknowledgement.
           try {
-            await api.upload(uploadUrl, file.data, headers, finalEnd);
+            await api.upload(uploadUrl, file.data, headers, finalEnd, lookup);
           } catch {
             /* Verify below. */
           }
@@ -414,7 +417,13 @@ class InvocationApi {
       false,
     );
   }
-  async upload(url: string, data: Uint8Array, headers: Record<string, string>, deadline: number) {
+  async upload(
+    url: string,
+    data: Uint8Array,
+    headers: Record<string, string>,
+    deadline: number,
+    lookup: LookupFunction | undefined,
+  ) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error("deadline");
     const signal = AbortSignal.timeout(remaining);
@@ -437,6 +446,7 @@ class InvocationApi {
         {
           method: "PUT",
           agent: false,
+          ...(lookup ? { lookup } : {}),
           signal,
           maxHeaderSize: 16 * 1024,
           headers: { ...headers, "content-length": String(data.byteLength) },
