@@ -5,7 +5,8 @@ import { open, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { constants } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
-import { MAX_FILE_DATA_BYTES, isLoopbackHost } from "../config.js";
+import { MAX_FILE_DATA_BYTES } from "../config.js";
+import { pinnedFetch, uploadRoute, type UploadRoute } from "../upload-target.js";
 import { sdkVersion } from "../version.js";
 import { createWorldClient, HueWorldError, type WorldClient } from "../world/client.js";
 import {
@@ -45,7 +46,8 @@ export interface WorldCommandIo {
   stderr?: NodeJS.WritableStream;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
-  /** The fetch for Hue's World creation routes, the uploads and the app export. */
+  /** The fetch for Hue's World creation routes, the uploads and the app export. An upload a
+   * remote Hue names connects to its checked addresses instead (`pinnedFetch`). */
   fetch?: typeof fetch;
   /** Waits `ms`, resolving early when the command is stopped. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -452,7 +454,7 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
     url = creation.url;
     ctx.note(`World creation ${creation.id} started${url ? `: ${url}` : ""}`);
     if (groups.size) {
-      await upload(ctx, answer, groups);
+      await upload(ctx, origin, answer, groups);
       creation = creationOf(
         await hueJson(ctx, hue, "POST", `/api/v1/world-creations/${creation.id}/uploaded`),
       );
@@ -786,7 +788,12 @@ async function digest(path: string): Promise<{ byteSize: number; sha256: string 
 }
 
 /** Sends each file Hue asks for to its signed URL. The URLs are capabilities: never printed. */
-async function upload(ctx: Context, answer: JsonObject, groups: Map<string, Upload[]>) {
+async function upload(
+  ctx: Context,
+  origin: string,
+  answer: JsonObject,
+  groups: Map<string, Upload[]>,
+) {
   const asked = Array.isArray(answer.uploads) ? answer.uploads : [];
   for (const entry of asked) {
     if (!isObject(entry) || typeof entry.app !== "string" || typeof entry.file !== "number")
@@ -805,12 +812,19 @@ async function upload(ctx: Context, answer: JsonObject, groups: Map<string, Uplo
     } catch {
       throw new WorldCommandError(`Hue answered no upload URL for ${source.label}`);
     }
-    if (
-      target.protocol !== "https:" &&
-      !(target.protocol === "http:" && isLoopbackHost(target.hostname))
-    )
-      throw new WorldCommandError(`Hue answered an insecure upload URL for ${source.label}`);
     ctx.secrets.push(target.href, target.search);
+    if (entry.method !== undefined && entry.method !== "PUT")
+      throw new WorldCommandError(`Hue answered a method other than PUT for ${source.label}`);
+    let route: UploadRoute | undefined;
+    try {
+      route = await uploadRoute(target, origin);
+    } catch {
+      throw new WorldCommandError(`The upload store for ${source.label} could not be resolved`);
+    }
+    if (!route)
+      throw new WorldCommandError(
+        `Hue answered an upload URL for ${source.label} that is not https on a public address`,
+      );
     const headers: Record<string, string> = {};
     if (isObject(entry.uploadHeaders))
       for (const [name, value] of Object.entries(entry.uploadHeaders))
@@ -819,13 +833,15 @@ async function upload(ctx: Context, answer: JsonObject, groups: Map<string, Uplo
     const { status } = await send(
       "The upload store",
       {
-        method: typeof entry.method === "string" ? entry.method : "PUT",
+        method: "PUT",
         url: target.href,
         headers,
         body: new Uint8Array(await source.bytes()),
         timeoutMs: UPLOAD_TIMEOUT_MS,
       },
-      ctx.transport,
+      route.addresses
+        ? { ...ctx.transport, fetch: pinnedFetch(route.addresses) as typeof fetch }
+        : ctx.transport,
       slowDown,
     );
     if (status < 200 || status >= 300)
