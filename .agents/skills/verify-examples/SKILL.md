@@ -31,6 +31,7 @@ Then follow the feature file for the example you changed.
 | [python-evaluation](features/python-evaluation.md) | ruff + `--help` (needs a Hue project to run fully) | 2 s |
 | [gmail-summary-tool](features/gmail-summary-tool.md) | run TypeScript and Python installed consumers against their own synthetic Gmail and OTLP servers | about 10 s |
 | Python examples lint | `ruff check` / `ruff format --check` on `examples/python-*` | 1 s |
+| [world-lifecycle-hooks](features/world-lifecycle-hooks.md) | standalone install, typecheck and twelve real-process tests; no SDK archive or OTLP stub | about 3 min |
 
 ## Evidence
 
