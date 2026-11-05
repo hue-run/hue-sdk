@@ -23,6 +23,7 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 
 from ._inline_files import is_media_content_type
 from ._otel_compat import suppress_instrumentation
+from ._upload_destination import mount, upload_adapter
 from .evals._json import MISSING, encode, json_value, uuid
 from .transport import DEFAULT_BASE_URL, normalize_base_url
 
@@ -299,6 +300,7 @@ class ManagedTargetHandler:
                 artifact_id = uuid(reserved["artifactId"])
                 if reserved.get("state") != "ready":
                     upload_url = _upload_url(reserved["uploadUrl"])
+                    adapter = upload_adapter(upload_url, self._base_url)
                     upload_headers = _upload_headers(reserved.get("headers"), file.content_type)
                     try:
                         api.request(
@@ -310,6 +312,7 @@ class ManagedTargetHandler:
                             retry=False,
                             upload=True,
                             upload_headers=upload_headers,
+                            adapter=adapter,
                         )
                     except Exception:
                         # Never replay a signed write. Completion verifies the
@@ -396,6 +399,7 @@ class _InvocationApi:
         content_type: str | None = None,
         upload: bool = False,
         upload_headers: dict[str, str] | None = None,
+        adapter: requests.adapters.HTTPAdapter | None = None,
     ) -> bytes:
         @suppress_instrumentation()
         def send() -> bytes:
@@ -405,6 +409,7 @@ class _InvocationApi:
             # No netrc/proxy credentials, automatic retries or redirected bearer tokens.
             with requests.Session() as session:
                 session.trust_env = False
+                mount(session, adapter)
                 with session.request(
                     method,
                     path if upload else self._url + path,
