@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readdir, realpath, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { connectOwnedApplication, requestOwnedApplication } from "./socket.js";
@@ -150,7 +150,7 @@ export type SetupCommandRunner = (command: SetupCommand) => Promise<void>;
 
 function inside(parent: string, child: string): boolean {
   const path = relative(parent, child);
-  return path === "" || (!path.startsWith("..") && !path.startsWith("/"));
+  return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 
 async function safeDirectory(path: string): Promise<void> {

@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants, type Stats } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { validSetupCredentialIdentity } from "./credential.js";
 
 const MAX_FILE_BYTES = 32 * 1024;
@@ -149,7 +149,7 @@ export interface SetupInstallationRecord {
 
 function inside(parent: string, child: string): boolean {
   const path = relative(parent, child);
-  return path === "" || (!path.startsWith("..") && !path.startsWith("/"));
+  return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 
 async function rejectSymlink(path: string, missing = false): Promise<void> {
