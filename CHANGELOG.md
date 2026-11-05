@@ -41,6 +41,9 @@ refuses to publish a version without a matching entry below.
 - HTTP capture decodes gzip, deflate and br responses before applying the text and size policy,
   so a compressed JSON or text response records `output.value` instead of its size only. The
   application still receives its usual bytes. Undecodable bytes record a truncation marker.
+- `client.media.fetch` and `resolve` download a media link only over HTTPS to a host whose every
+  address is public, connected to the address that was checked, unless the client's Hue origin
+  is loopback. A link to this machine or a private network fails with `failed` before any request.
 
 #### Added
 

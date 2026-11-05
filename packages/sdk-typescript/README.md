@@ -492,7 +492,9 @@ key cannot read recorded content, or reads a snapshot without **Read and write**
 connection failure, a timeout, a redirect or another unexpected answer). Hue is asked for the link
 once more after a connection failure or a timeout, never after an unexpected answer; a download
 ends once no byte has arrived for the client's timeout, at least two minutes, and is not retried.
-`{ snapshotId, sha256 }` reads a trace snapshot's pinned copy instead
+Unless the client's `baseUrl` is loopback, the link must be HTTPS to a host whose every address is
+public, and the download connects to the address that was checked; a link to this machine or a
+private network fails with `failed` before any request. `{ snapshotId, sha256 }` reads a trace snapshot's pinned copy instead
 (`GET /api/v1/trace-snapshots/{snapshotId}/blobs/{sha256}`), which carries no media type or name.
 
 `resolve` downloads each distinct digest once, four at a time (`concurrency`, up to 16), and returns
