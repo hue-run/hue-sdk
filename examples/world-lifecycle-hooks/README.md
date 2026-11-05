@@ -71,6 +71,8 @@ Once the helper has persisted a terminal World receipt, cleanup retries use that
 
 Failed metadata reads discard the cached MCP connection. The next poll initializes a new session and checks the project pin again, including after server-side session expiry.
 
+If another process holds the database lock during startup, the helper waits up to five seconds to enable SQLite's write-ahead log. Persistent contention stops startup before the ready message. The retry runs no application action. Other database errors are not retried.
+
 The local adapter is trusted application code. Environment filtering is not an operating-system sandbox: a process running under the same account can read files or inspect other processes permitted to that account. Use a dedicated account or container when you need that isolation. Do not give the adapter production banking credentials.
 
 ## Submit a login outcome

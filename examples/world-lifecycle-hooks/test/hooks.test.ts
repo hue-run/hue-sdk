@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:http";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -9,6 +9,7 @@ import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { Worker as NodeWorker } from "node:worker_threads";
 import { z } from "zod";
 import {
   configSchema,
@@ -273,6 +274,81 @@ async function post(url: string, body: unknown, credential = token) {
   });
 }
 const login = { requestId: "request-1", subjectId: "user-1", stage: "oauth", outcome: "succeeded" };
+
+test("store initialization recovers from a real WAL lock and bounds persistent contention", async (t) => {
+  const f = await fixture();
+  mkdirSync(f.stateDir, { mode: 0o700 });
+  const release = new Int32Array(new SharedArrayBuffer(4));
+  const lock = new NodeWorker(
+    `const { parentPort, workerData } = require("node:worker_threads");
+     const { DatabaseSync } = require("node:sqlite");
+     const db = new DatabaseSync(workerData.file);
+     db.exec("CREATE TABLE held(id); BEGIN IMMEDIATE");
+     parentPort.postMessage("locked");
+     Atomics.wait(new Int32Array(workerData.release), 0, 0, 15_000);
+     db.exec("ROLLBACK");
+     db.close();`,
+    {
+      eval: true,
+      workerData: { file: join(f.stateDir, "hooks.sqlite"), release: release.buffer },
+    },
+  );
+  const exited = once(lock, "exit");
+  let store: Store | undefined;
+  try {
+    assert.deepEqual(await once(lock, "message"), ["locked"]);
+    const execute = DatabaseSync.prototype.exec;
+    let observedBusy = 0;
+    // Observe the real SQLite error; never replace a database call or manufacture a failure.
+    const observer = t.mock.method(
+      DatabaseSync.prototype,
+      "exec",
+      function (this: DatabaseSync, sql: string) {
+        try {
+          return execute.call(this, sql);
+        } catch (error) {
+          if (error instanceof Error && "errcode" in error && error.errcode === 5) {
+            observedBusy++;
+            Atomics.store(release, 0, 1);
+            Atomics.notify(release, 0);
+          }
+          throw error;
+        }
+      },
+    );
+    store = new Store(f.stateDir, f.config);
+    observer.mock.restore();
+    assert.ok(observedBusy > 0, "the held write lock must cause a real SQLITE_BUSY");
+    assert.equal(store.db.prepare("PRAGMA journal_mode").get()?.journal_mode, "wal");
+    assert.deepEqual(store.status(), []);
+    store.close();
+    store = undefined;
+    await exited;
+
+    const holder = new DatabaseSync(join(f.stateDir, "hooks.sqlite"));
+    try {
+      holder.exec("PRAGMA journal_mode=DELETE; BEGIN IMMEDIATE");
+      const started = performance.now();
+      assert.throws(() => new Store(f.stateDir, f.config), { errcode: 5 });
+      const elapsed = performance.now() - started;
+      assert.ok(elapsed >= 4_900 && elapsed < 10_000, `bounded wait took ${elapsed}ms`);
+      holder.exec("ROLLBACK");
+    } finally {
+      holder.close();
+    }
+
+    writeFileSync(join(f.stateDir, "hooks.sqlite"), "not a SQLite database");
+    const started = performance.now();
+    assert.throws(() => new Store(f.stateDir, f.config), { errcode: 26 });
+    assert.ok(performance.now() - started < 1_000, "non-busy errors must fail immediately");
+  } finally {
+    Atomics.store(release, 0, 1);
+    Atomics.notify(release, 0);
+    await exited;
+    store?.close();
+    await f.cleanup();
+  }
+});
 
 test("metadata transport failures return a retryable response without queueing a login", async () => {
   const f = await fixture();
