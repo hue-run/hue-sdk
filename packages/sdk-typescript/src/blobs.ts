@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
+import type { LookupFunction } from "node:net";
 import { context, type HrTime } from "@opentelemetry/api";
 import { suppressTracing } from "@opentelemetry/core";
 import { suppressHttpCapture } from "./http-capture.js";
 import { isLoopbackHost } from "./config.js";
+import { uploadConnection } from "./upload-target.js";
 import {
   digestPart,
   hashInlineFiles,
@@ -911,6 +913,14 @@ export class BlobUploader {
     size: number,
     deadline: number,
   ): Promise<"stored" | "expired" | "failed" | "changed" | { retryAfter: number | undefined }> {
+    // The presigned store is on a host of its own, so only its addresses are checked.
+    const connection = await uploadConnection(
+      grant.url,
+      this.options.baseUrl,
+      AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+      true,
+    );
+    if (!connection) return "failed";
     const reply = await this.request(
       "PUT",
       grant.url,
@@ -919,6 +929,7 @@ export class BlobUploader {
       deadline,
       MAX_ERROR_RESPONSE_BYTES,
       size,
+      connection.lookup,
     );
     if (isByteSource(value) && value.changed) return "changed";
     if (!reply) return { retryAfter: undefined };
@@ -947,6 +958,7 @@ export class BlobUploader {
     deadline: number,
     maxResponseBytes: number,
     length?: number,
+    lookup?: LookupFunction,
   ): Promise<Reply | undefined> {
     if (this.closed || deadline <= Date.now()) return undefined;
     let http: typeof import("node:http");
@@ -992,7 +1004,7 @@ export class BlobUploader {
               // Uploads are the SDK's own export traffic: an http instrumentation must not trace them.
               request = http.request(
                 url,
-                { method, headers: requestHeaders, agent: false },
+                { method, headers: requestHeaders, agent: false, ...(lookup ? { lookup } : {}) },
                 (response: IncomingMessage) => {
                   const chunks: Buffer[] = [];
                   let size = 0;

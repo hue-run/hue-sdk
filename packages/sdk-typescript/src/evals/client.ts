@@ -1,5 +1,6 @@
 import { isLoopbackHost, validateOptions } from "../config.js";
 import type { ProjectConnection } from "../types.js";
+import { connectedFetch, uploadConnection } from "../upload-target.js";
 import { json, uuid, valueBounds } from "./json.js";
 import { MediaClient } from "./media.js";
 import {
@@ -543,16 +544,16 @@ export class EvaluationClient {
     const headers = signedUploadHeaders(upload.headers, contentType);
     // Storage refuses a body of unknown length, which a stream would otherwise be sent as.
     if (byteSize !== undefined) headers["content-length"] = String(byteSize);
+    const signal = AbortSignal.timeout(Math.max(this.timeoutMillis, 120_000));
     let response: Response;
     try {
-      response = await fetch(uploadUrl, {
-        method: "PUT",
-        headers,
-        body,
-        ...(byteSize !== undefined ? { duplex: "half" } : {}),
-        redirect: "error",
-        signal: AbortSignal.timeout(Math.max(this.timeoutMillis, 120_000)),
-      });
+      const connection = await uploadConnection(new URL(uploadUrl), this.baseUrl, signal);
+      if (!connection) throw new HueApiError();
+      response = await connectedFetch(
+        uploadUrl,
+        { method: "PUT", headers, body, signal },
+        connection.lookup,
+      );
     } catch {
       throw new HueApiError();
     }

@@ -41,6 +41,13 @@ refuses to publish a version without a matching entry below.
 - HTTP capture decodes gzip, deflate and br responses before applying the text and size policy,
   so a compressed JSON or text response records `output.value` instead of its size only. The
   application still receives its usual bytes. Undecodable bytes record a truncation marker.
+- When the Hue origin is not on this machine, artifact uploads (`uploadArtifactBytes`,
+  `uploadArtifactStream`, case files, generated output files), managed-target output files and
+  `hue world create` files go only to an HTTPS upload URL on the origin's own host, and every
+  upload, trace values included, only to public addresses. A host name is resolved once and the
+  upload connects to an address that lookup checked, so a later DNS answer cannot move it onto
+  this machine's network. Artifact uploads use `node:http(s)` like the SDK's other uploads, so
+  Bun no longer sends them through `HTTPS_PROXY`.
 
 #### Added
 
@@ -2096,6 +2103,11 @@ No registry release is claimed until publication and registry acceptance complet
   can also enable HTTP clients' own Brotli negotiation; the base install adds no decoder.
 - World handoffs and temporary MCP files retain only remote HTTP connection fields. Unsupported
   transports are rejected and executable configuration fields are omitted.
+- When the Hue origin is not on this machine, `upload_artifact_bytes` (and the case files that use
+  it) and managed-target output files go only to an HTTPS upload URL on the origin's own host, and
+  every upload, trace values included, only to public addresses. A host name is resolved once and
+  the upload connects to an address that lookup checked, so a later DNS answer cannot move it
+  onto this machine's network; such an upload does not go through a proxy from the environment.
 
 ### [0.14.0] - 2026-10-25
 

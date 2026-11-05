@@ -1112,27 +1112,31 @@ class EvaluationClient:
     @suppress_instrumentation()
     def upload_artifact_bytes(self, upload: dict[str, Any], data: bytes, content_type: str) -> None:
         """Stage bytes at the storage capability Hue issued; the Hue key is never sent there."""
+        from .._upload_target import DIRECT, pinned
         from ..managed import _upload_headers, _upload_url
 
         try:
             if not isinstance(upload, dict) or upload.get("method") != "PUT":
                 raise ValueError
-            url = _upload_url(upload.get("uploadUrl"))
+            url, address = _upload_url(upload.get("uploadUrl"), self.base_url)
             headers = _upload_headers(upload.get("headers"), content_type)
         except ValueError:
             raise HueApiError(reason="malformed_response") from None
         try:
-            with requests.put(
-                url,
-                data=data,
-                headers=headers,
-                auth=_no_auth,
-                timeout=max(self._timeout, 120),
-                allow_redirects=False,
-                stream=True,
-            ) as response:
-                if not 200 <= response.status_code < 300:
-                    raise HueApiError(response.status_code, _retry_after_seconds(response))
+            with requests.Session() as session:
+                target, host = pinned(session, url, address)
+                with session.put(
+                    target,
+                    data=data,
+                    headers={**headers, **host},
+                    auth=_no_auth,
+                    timeout=max(self._timeout, 120),
+                    allow_redirects=False,
+                    stream=True,
+                    proxies=DIRECT if address else None,
+                ) as response:
+                    if not 200 <= response.status_code < 300:
+                        raise HueApiError(response.status_code, _retry_after_seconds(response))
         except requests.RequestException:
             raise HueApiError() from None
 
