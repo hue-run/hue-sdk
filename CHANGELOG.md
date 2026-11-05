@@ -2099,6 +2099,10 @@ No registry release is claimed until publication and registry acceptance complet
   can also enable HTTP clients' own Brotli negotiation; the base install adds no decoder.
 - World handoffs and temporary MCP files retain only remote HTTP connection fields. Unsupported
   transports are rejected and executable configuration fields are omitted.
+- `client.media.fetch` and `resolve` download a media link only over HTTPS to a host whose every
+  address is public, connected directly to the address that was checked, unless the client's Hue
+  origin is loopback. A link to this machine or a private network raises `failed` before any
+  request, and the download no longer goes through the environment's proxy.
 
 ### [0.14.0] - 2026-10-25
 
