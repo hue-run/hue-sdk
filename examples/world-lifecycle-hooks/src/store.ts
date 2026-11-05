@@ -6,6 +6,25 @@ import { z } from "zod";
 import { digest, eventSchema, type HookConfig, type HookEvent } from "./contracts.ts";
 
 const rowSchema = z.object({ event_key: z.string(), payload: z.string() });
+
+function enableWal(db: DatabaseSync) {
+  const deadline = performance.now() + 5_000;
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    db.exec(`PRAGMA busy_timeout=${Math.max(0, Math.ceil(deadline - performance.now()))}`);
+    try {
+      db.exec("PRAGMA journal_mode=WAL");
+      return;
+    } catch (error) {
+      // WAL lock promotion can return SQLITE_BUSY without invoking busy_timeout.
+      const remaining = deadline - performance.now();
+      if (!(error instanceof Error && "errcode" in error && error.errcode === 5) || remaining <= 0)
+        throw error;
+      Atomics.wait(wait, 0, 0, Math.min(25, remaining));
+    }
+  }
+}
+
 export class Store {
   readonly db: DatabaseSync;
   constructor(directory: string, config: HookConfig) {
@@ -22,27 +41,30 @@ export class Store {
     if (!lstatSync(file).isFile()) throw new Error("state_file_not_regular");
     chmodSync(file, 0o600);
     this.db = new DatabaseSync(file);
-    this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+    try {
+      enableWal(this.db);
+      this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS binding (id INTEGER PRIMARY KEY CHECK(id=1), digest TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS event (event_key TEXT PRIMARY KEY, payload TEXT NOT NULL, kind TEXT NOT NULL,
         state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
         next_at INTEGER NOT NULL DEFAULT 0, lease TEXT, lease_until INTEGER NOT NULL DEFAULT 0, error TEXT);`);
-    // Bind the adapter too: a restarted helper must not silently deliver old work to another command.
-    const binding = digest({
-      origin: new URL(config.origin).origin,
-      projectId: config.projectId,
-      worldId: config.worldId,
-      connectionId: config.connectionId,
-      command: config.command,
-      envNames: config.envNames,
-    });
-    this.db.prepare("INSERT OR IGNORE INTO binding VALUES (1, ?)").run(binding);
-    const saved = z
-      .object({ digest: z.string() })
-      .parse(this.db.prepare("SELECT digest FROM binding WHERE id=1").get());
-    if (saved.digest !== binding) {
+      // Bind the adapter too: a restarted helper must not silently deliver old work to another command.
+      const binding = digest({
+        origin: new URL(config.origin).origin,
+        projectId: config.projectId,
+        worldId: config.worldId,
+        connectionId: config.connectionId,
+        command: config.command,
+        envNames: config.envNames,
+      });
+      this.db.prepare("INSERT OR IGNORE INTO binding VALUES (1, ?)").run(binding);
+      const saved = z
+        .object({ digest: z.string() })
+        .parse(this.db.prepare("SELECT digest FROM binding WHERE id=1").get());
+      if (saved.digest !== binding) throw new Error("state_binding_mismatch");
+    } catch (error) {
       this.db.close();
-      throw new Error("state_binding_mismatch");
+      throw error;
     }
   }
   enqueue(event: HookEvent) {
