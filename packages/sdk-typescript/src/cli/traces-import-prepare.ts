@@ -1,7 +1,19 @@
 import { createHash } from "node:crypto";
-import type { Dirent } from "node:fs";
-import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, join, relative, resolve, sep } from "node:path";
+import { constants, type Dirent, type Stats } from "node:fs";
+import {
+  type FileHandle,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  stat,
+  unlink,
+} from "node:fs/promises";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 import { sdkVersion } from "../version.js";
 import { MIN_DAMAGED_BYTES, MIN_FRAME_BYTES } from "./import-formats/containers.js";
@@ -218,39 +230,150 @@ export function defaultOutputDirectory(input: string): string {
   return `${path.endsWith(sep) ? path.slice(0, -1) : path}.hue-import`;
 }
 
+/** Whether only this user or root can rename `directory` or any directory above it: each is owned
+ * by one of them, and each above it is writable by no one else or is sticky. */
+async function othersCannotReplace(directory: string): Promise<boolean> {
+  const uid = process.getuid?.();
+  if (uid === undefined) return false;
+  for (let path = directory; ; path = dirname(path)) {
+    const info = await lstat(path);
+    if (info.uid !== uid && info.uid !== 0) return false;
+    if (path !== directory && info.mode & 0o022 && !(info.mode & 0o1000)) return false;
+    if (dirname(path) === path) return true;
+  }
+}
+
+/**
+ * A bundle directory opened once, never through a symbolic link. Its files are listed, created
+ * (`O_EXCL | O_NOFOLLOW`, mode 0600) and renamed through the opened directory (`/proc/self/fd`),
+ * so its path later swapped for a link or another directory is not written. Where the system
+ * offers no such path, the directory is taken only when no other user can rename it or any
+ * directory above it.
+ */
+export class BundleDirectory {
+  private constructor(
+    readonly path: string,
+    private readonly handle: FileHandle,
+    private readonly opened: Stats,
+    private readonly root: string,
+  ) {}
+
+  /** Opens `path`; with `create`, creates it (mode 0700) first when it is absent. */
+  static async open(path: string, create = false): Promise<BundleDirectory> {
+    if (constants.O_NOFOLLOW === undefined || constants.O_DIRECTORY === undefined)
+      throw new PrepareError(
+        "A trace import bundle needs POSIX filesystem semantics; on Windows, use WSL2",
+      );
+    if (create) {
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      await mkdir(path, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "EEXIST") throw error;
+      });
+    }
+    let handle: FileHandle;
+    try {
+      handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ELOOP" || code === "ENOTDIR")
+        throw new PrepareError(
+          `${path} is a symbolic link or not a directory; choose another --out`,
+        );
+      throw error;
+    }
+    try {
+      const opened = await handle.stat();
+      const same = (info: Stats) => info.dev === opened.dev && info.ino === opened.ino;
+      const bound = `/proc/self/fd/${handle.fd}`;
+      if (await stat(bound).then(same, () => false))
+        return new BundleDirectory(path, handle, opened, bound);
+      const real = await realpath(path);
+      if (!same(await lstat(real)) || !(await othersCannotReplace(real)))
+        throw new PrepareError(
+          `${path} could be replaced by another user (a directory above it is theirs or writable by them); choose another --out`,
+        );
+      return new BundleDirectory(path, handle, opened, real);
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
+  }
+
+  /** Whether `other` is the same directory. */
+  is(other: BundleDirectory): boolean {
+    return this.opened.dev === other.opened.dev && this.opened.ino === other.opened.ino;
+  }
+
+  /** Whether the path still names the directory opened. */
+  async unchanged(): Promise<boolean> {
+    const info = await lstat(this.path).catch(() => undefined);
+    return !!info && info.dev === this.opened.dev && info.ino === this.opened.ino;
+  }
+
+  /** `name` in the opened directory. */
+  entry(name: string): string {
+    return join(this.root, name);
+  }
+
+  list(): Promise<string[]> {
+    return readdir(this.root);
+  }
+
+  /** Writes `name` through `<name>.tmp` and an atomic rename. */
+  async write(name: string, bytes: Uint8Array | string): Promise<void> {
+    const temporary = this.entry(`${name}.tmp`);
+    await unlink(temporary).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    const file = await open(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      await file.writeFile(bytes);
+    } finally {
+      await file.close();
+    }
+    await rename(temporary, this.entry(name));
+  }
+
+  close(): Promise<void> {
+    return this.handle.close();
+  }
+}
+
 /** Creates the output directory (mode 0700), or accepts one that holds only an earlier
  * preparation's files; a directory an upload has started in is refused. */
-async function prepareOutputDirectory(directory: string): Promise<void> {
-  let existing: string[];
+async function prepareOutputDirectory(path: string): Promise<BundleDirectory> {
+  const directory = await BundleDirectory.open(path, true);
   try {
-    existing = await readdir(directory);
+    const existing = await directory.list();
+    if (existing.includes(PROGRESS_FILE))
+      throw new PrepareError(
+        `${path} holds an upload in progress (${PROGRESS_FILE}); choose another --out`,
+      );
+    const own = (name: string) =>
+      name === MANIFEST_FILE || BATCH_FILE.test(name) || BLOB_FILE.test(name);
+    /** A temporary file this helper writes before its rename (`<file>.tmp`), left behind when a
+     * preparation or an upload was interrupted between the two. */
+    const ownTemporary = (name: string) =>
+      name.endsWith(".tmp") && (own(name.slice(0, -4)) || name.slice(0, -4) === PROGRESS_FILE);
+    const foreign = existing.filter((name) => !own(name) && !ownTemporary(name));
+    if (foreign.length)
+      throw new PrepareError(`${path} is not empty (${foreign[0]}); choose another --out`);
+    for (const name of existing.filter(ownTemporary)) {
+      const regular = await lstat(directory.entry(name))
+        .then((info) => info.isFile())
+        .catch(() => false);
+      if (!regular) throw new PrepareError(`${path} is not empty (${name}); choose another --out`);
+      // The file it stood for is written again from scratch.
+      await rm(directory.entry(name), { force: true });
+    }
+    return directory;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    return;
-  }
-  if (existing.includes(PROGRESS_FILE))
-    throw new PrepareError(
-      `${directory} holds an upload in progress (${PROGRESS_FILE}); choose another --out`,
-    );
-  const own = (name: string) =>
-    name === MANIFEST_FILE || BATCH_FILE.test(name) || BLOB_FILE.test(name);
-  /** A temporary file this helper writes before its rename (`<file>.tmp`), left behind when a
-   * preparation or an upload was interrupted between the two. */
-  const ownTemporary = (name: string) =>
-    name.endsWith(".tmp") && (own(name.slice(0, -4)) || name.slice(0, -4) === PROGRESS_FILE);
-  const foreign = existing.filter((name) => !own(name) && !ownTemporary(name));
-  if (foreign.length)
-    throw new PrepareError(`${directory} is not empty (${foreign[0]}); choose another --out`);
-  for (const name of existing.filter(ownTemporary)) {
-    const path = join(directory, name);
-    const regular = await stat(path)
-      .then((info) => info.isFile())
-      .catch(() => false);
-    if (!regular)
-      throw new PrepareError(`${directory} is not empty (${name}); choose another --out`);
-    // The file it stood for is written again from scratch.
-    await rm(path, { force: true });
+    await directory.close();
+    throw error;
   }
 }
 
@@ -265,12 +388,6 @@ export function manifestTooLarge(bytes: Uint8Array): string | undefined {
   if (wire > traceImportLimits.manifestWireBytes)
     return `The manifest is ${mebibytes(wire)} compressed, over the ${mebibytes(traceImportLimits.manifestWireBytes)} a registration takes; prepare the input in smaller parts`;
   return undefined;
-}
-
-async function writePrivate(path: string, bytes: Uint8Array | string): Promise<void> {
-  const temporary = `${path}.tmp`;
-  await writeFile(temporary, bytes, { mode: 0o600, flag: "w" });
-  await rename(temporary, path);
 }
 
 export interface PrepareOptions {
@@ -340,131 +457,136 @@ export async function prepareTraceBundle(
     throw new PrepareError(
       `The input holds ${traces.length} traces; one import takes at most ${traceImportLimits.traces}`,
     );
-  await prepareOutputDirectory(outputDirectory);
-
-  const manifestTraces: ManifestTrace[] = [];
-  const formats = new Set<TraceImportFormat>();
-  const formatCounts: Record<string, number> = {};
-  const timing: Record<string, number> = {};
-  const byOrigin: Record<TraceImportOrigin, number> = {
-    production: 0,
-    evaluation: 0,
-    simulation: 0,
-    unknown: 0,
-  };
-  const written = new Set<string>();
-  let withoutIdentity = 0;
-  let remappedTraces = 0;
-  let remappedSpans = 0;
-  let blobCount = 0;
-  for (const trace of traces) {
-    const problem =
-      trace.entries.length > traceImportLimits.spansPerTrace
-        ? `more than ${traceImportLimits.spansPerTrace} spans`
-        : trace.blobs.length > traceImportLimits.blobsPerTrace
-          ? `more than ${traceImportLimits.blobsPerTrace} large values`
-          : undefined;
-    if (problem) {
-      refused.push({ trace_id: trace.traceId, reason: problem });
-      continue;
-    }
-    let batches: ReturnType<typeof batchEntries>;
-    // A span no batch holds alone has its largest values stored apart as well.
-    const blobs = new BlobSink(trace.blobs);
-    try {
-      batches = batchEntries(trace.entries, blobs);
-    } catch (error) {
-      if (!(error instanceof ConversionError)) throw error;
-      refused.push({ trace_id: trace.traceId, reason: error.message });
-      continue;
-    }
-    trace.blobs = blobs.sorted();
-    if (trace.blobs.length > traceImportLimits.blobsPerTrace) {
-      refused.push({
-        trace_id: trace.traceId,
-        reason: `more than ${traceImportLimits.blobsPerTrace} large values`,
-      });
-      continue;
-    }
-    if (batches.length > traceImportLimits.batchesPerTrace) {
-      refused.push({
-        trace_id: trace.traceId,
-        reason: `more than ${traceImportLimits.batchesPerTrace} batches`,
-      });
-      continue;
-    }
-    for (const batch of batches) {
-      const name = `${trace.traceId}.${batch.sha256}.json.gz`;
-      if (!written.has(name)) await writePrivate(join(outputDirectory, name), batch.body);
-      written.add(name);
-    }
-    for (const blob of trace.blobs) {
-      const name = `${blob.sha256}.blob`;
-      if (!written.has(name)) await writePrivate(join(outputDirectory, name), blob.bytes);
-      written.add(name);
-    }
-    const sourceDigest = trace.sourceDigests.size === 1 ? [...trace.sourceDigests][0] : undefined;
-    const declared: ManifestTrace = {
-      trace_id: trace.traceId,
-      span_count: trace.entries.length,
-      batches: batches.map((batch) => ({
-        sha256: batch.sha256,
-        bytes: batch.body.byteLength,
-        span_count: batch.spanIds.length,
-      })),
-      blobs: trace.blobs.map((blob) => ({
-        sha256: blob.sha256,
-        byte_size: blob.byteSize,
-        content_type: blob.contentType,
-      })),
-      ...(trace.identity ? { identity: trace.identity } : {}),
-      origin: trace.origin,
-      ...(sourceDigest ? { source_digest: sourceDigest } : {}),
+  const directory = await prepareOutputDirectory(outputDirectory);
+  try {
+    const manifestTraces: ManifestTrace[] = [];
+    const formats = new Set<TraceImportFormat>();
+    const formatCounts: Record<string, number> = {};
+    const timing: Record<string, number> = {};
+    const byOrigin: Record<TraceImportOrigin, number> = {
+      production: 0,
+      evaluation: 0,
+      simulation: 0,
+      unknown: 0,
     };
-    manifestTraces.push(declared);
-    // What was written is let go: the run holds each trace's spans only until they are on disk.
-    trace.entries = [];
-    for (const blob of trace.blobs) blob.bytes = new Uint8Array(0);
-    formats.add(adapterById(trace.format)!.manifestFormat);
-    formatCounts[trace.format] = (formatCounts[trace.format] ?? 0) + 1;
-    for (const rule of trace.inferredTiming ?? []) timing[rule] = (timing[rule] ?? 0) + 1;
-    byOrigin[trace.origin]++;
-    if (!manifestTraceHasIdentity(declared)) withoutIdentity++;
-    if (trace.remappedTraceId || trace.remappedSpans) remappedTraces++;
-    remappedSpans += trace.remappedSpans;
-    blobCount += trace.blobs.length;
+    const written = new Set<string>();
+    let withoutIdentity = 0;
+    let remappedTraces = 0;
+    let remappedSpans = 0;
+    let blobCount = 0;
+    for (const trace of traces) {
+      const problem =
+        trace.entries.length > traceImportLimits.spansPerTrace
+          ? `more than ${traceImportLimits.spansPerTrace} spans`
+          : trace.blobs.length > traceImportLimits.blobsPerTrace
+            ? `more than ${traceImportLimits.blobsPerTrace} large values`
+            : undefined;
+      if (problem) {
+        refused.push({ trace_id: trace.traceId, reason: problem });
+        continue;
+      }
+      let batches: ReturnType<typeof batchEntries>;
+      // A span no batch holds alone has its largest values stored apart as well.
+      const blobs = new BlobSink(trace.blobs);
+      try {
+        batches = batchEntries(trace.entries, blobs);
+      } catch (error) {
+        if (!(error instanceof ConversionError)) throw error;
+        refused.push({ trace_id: trace.traceId, reason: error.message });
+        continue;
+      }
+      trace.blobs = blobs.sorted();
+      if (trace.blobs.length > traceImportLimits.blobsPerTrace) {
+        refused.push({
+          trace_id: trace.traceId,
+          reason: `more than ${traceImportLimits.blobsPerTrace} large values`,
+        });
+        continue;
+      }
+      if (batches.length > traceImportLimits.batchesPerTrace) {
+        refused.push({
+          trace_id: trace.traceId,
+          reason: `more than ${traceImportLimits.batchesPerTrace} batches`,
+        });
+        continue;
+      }
+      for (const batch of batches) {
+        const name = `${trace.traceId}.${batch.sha256}.json.gz`;
+        if (!written.has(name)) await directory.write(name, batch.body);
+        written.add(name);
+      }
+      for (const blob of trace.blobs) {
+        const name = `${blob.sha256}.blob`;
+        if (!written.has(name)) await directory.write(name, blob.bytes);
+        written.add(name);
+      }
+      const sourceDigest = trace.sourceDigests.size === 1 ? [...trace.sourceDigests][0] : undefined;
+      const declared: ManifestTrace = {
+        trace_id: trace.traceId,
+        span_count: trace.entries.length,
+        batches: batches.map((batch) => ({
+          sha256: batch.sha256,
+          bytes: batch.body.byteLength,
+          span_count: batch.spanIds.length,
+        })),
+        blobs: trace.blobs.map((blob) => ({
+          sha256: blob.sha256,
+          byte_size: blob.byteSize,
+          content_type: blob.contentType,
+        })),
+        ...(trace.identity ? { identity: trace.identity } : {}),
+        origin: trace.origin,
+        ...(sourceDigest ? { source_digest: sourceDigest } : {}),
+      };
+      manifestTraces.push(declared);
+      // What was written is let go: the run holds each trace's spans only until they are on disk.
+      trace.entries = [];
+      for (const blob of trace.blobs) blob.bytes = new Uint8Array(0);
+      formats.add(adapterById(trace.format)!.manifestFormat);
+      formatCounts[trace.format] = (formatCounts[trace.format] ?? 0) + 1;
+      for (const rule of trace.inferredTiming ?? []) timing[rule] = (timing[rule] ?? 0) + 1;
+      byOrigin[trace.origin]++;
+      if (!manifestTraceHasIdentity(declared)) withoutIdentity++;
+      if (trace.remappedTraceId || trace.remappedSpans) remappedTraces++;
+      remappedSpans += trace.remappedSpans;
+      blobCount += trace.blobs.length;
+    }
+    if (!manifestTraces.length)
+      throw new PrepareError(`No trace of ${input} could be prepared: ${refused[0]?.reason ?? ""}`);
+    const manifest: TraceImportManifest = {
+      version: 1,
+      source: {
+        formats: traceImportFormats.filter((format) => formats.has(format)),
+        helper: "hue-sdk",
+        helper_version: sdkVersion,
+      },
+      traces: manifestTraces,
+    };
+    const invalid = validateManifest(manifest);
+    if (invalid) throw new PrepareError(`The prepared manifest is not valid: ${invalid}`);
+    const bytes = Buffer.from(JSON.stringify(manifest), "utf8");
+    const tooLarge = manifestTooLarge(bytes);
+    if (tooLarge) throw new PrepareError(tooLarge);
+    await directory.write(MANIFEST_FILE, bytes);
+    if (!(await directory.unchanged()))
+      throw new PrepareError(`${outputDirectory} was replaced while the bundle was written`);
+    return {
+      manifest_digest: createHash("sha256").update(bytes).digest("hex"),
+      totals: manifestTotals(manifest),
+      source: manifest.source,
+      output_directory: outputDirectory,
+      formats: formatCounts,
+      files: { supported: read.supported, unsupported, skipped: read.skipped, notes: read.notes },
+      traces: {
+        without_identity: withoutIdentity,
+        by_origin: byOrigin,
+        remapped: { traces: remappedTraces, spans: remappedSpans },
+        timing,
+        refused,
+      },
+      blobs: blobCount,
+    };
+  } finally {
+    await directory.close();
   }
-  if (!manifestTraces.length)
-    throw new PrepareError(`No trace of ${input} could be prepared: ${refused[0]?.reason ?? ""}`);
-  const manifest: TraceImportManifest = {
-    version: 1,
-    source: {
-      formats: traceImportFormats.filter((format) => formats.has(format)),
-      helper: "hue-sdk",
-      helper_version: sdkVersion,
-    },
-    traces: manifestTraces,
-  };
-  const invalid = validateManifest(manifest);
-  if (invalid) throw new PrepareError(`The prepared manifest is not valid: ${invalid}`);
-  const bytes = Buffer.from(JSON.stringify(manifest), "utf8");
-  const tooLarge = manifestTooLarge(bytes);
-  if (tooLarge) throw new PrepareError(tooLarge);
-  await writePrivate(join(outputDirectory, MANIFEST_FILE), bytes);
-  return {
-    manifest_digest: createHash("sha256").update(bytes).digest("hex"),
-    totals: manifestTotals(manifest),
-    source: manifest.source,
-    output_directory: outputDirectory,
-    formats: formatCounts,
-    files: { supported: read.supported, unsupported, skipped: read.skipped, notes: read.notes },
-    traces: {
-      without_identity: withoutIdentity,
-      by_origin: byOrigin,
-      remapped: { traces: remappedTraces, spans: remappedSpans },
-      timing,
-      refused,
-    },
-    blobs: blobCount,
-  };
 }

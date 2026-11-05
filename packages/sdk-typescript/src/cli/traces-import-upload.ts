@@ -1,5 +1,5 @@
-import { readFile, rename, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { sdkVersion } from "../version.js";
 import {
@@ -9,7 +9,13 @@ import {
   type TraceImportManifest,
   type TraceImportTotals,
 } from "./traces-import-convert.js";
-import { MANIFEST_FILE, manifestTooLarge, PROGRESS_FILE } from "./traces-import-prepare.js";
+import {
+  BundleDirectory,
+  MANIFEST_FILE,
+  manifestTooLarge,
+  PrepareError,
+  PROGRESS_FILE,
+} from "./traces-import-prepare.js";
 
 /**
  * `hue traces import upload`: delivers a prepared bundle to Hue's import routes with the
@@ -232,9 +238,11 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
 /** Writes `progress.json` (mode 0600, through a temporary file and an atomic rename) after each
- * verified step, coalescing writes that fall within the interval. */
+ * verified step, coalescing writes that fall within the interval. Every write goes to the bundle
+ * directory the first one opened (see {@link BundleDirectory}). */
 export class Progress {
   private dirty = false;
+  private directory: BundleDirectory | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private writing: Promise<void> = Promise.resolve();
   private lastWrite = 0;
@@ -285,8 +293,15 @@ export class Progress {
     this.writing = this.writing.then(async () => {
       if (this.failure) return;
       try {
-        await writeFile(`${this.path}.tmp`, bytes, { mode: 0o600 });
-        await rename(`${this.path}.tmp`, this.path);
+        const directory = await BundleDirectory.open(dirname(this.path));
+        try {
+          this.directory ??= directory;
+          if (!directory.is(this.directory))
+            throw new PrepareError(`${directory.path} was replaced during the upload`);
+          await directory.write(basename(this.path), bytes);
+        } finally {
+          await directory.close();
+        }
       } catch (error) {
         this.failure = error as NodeJS.ErrnoException;
         this.onFailure?.();
