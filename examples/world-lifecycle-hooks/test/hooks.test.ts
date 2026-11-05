@@ -10,7 +10,13 @@ import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
-import { configSchema, endedEvent, loginEvent, loginSchema } from "../src/contracts.ts";
+import {
+  configSchema,
+  endedEvent,
+  loginEvent,
+  loginSchema,
+  worldSchema,
+} from "../src/contracts.ts";
 import { Store } from "../src/store.ts";
 import { Worker } from "../src/worker.ts";
 
@@ -37,6 +43,9 @@ async function fixture() {
   let statusCode = 200;
   let sessionId = randomUUID();
   let initializations = 0;
+  let dropWorldReads = false;
+  let worldReads = 0;
+  let heldRead: { entered: () => void; wait: Promise<void> } | undefined;
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "", "http://127.0.0.1");
     assert.equal(url.pathname, "/api/mcp");
@@ -87,6 +96,11 @@ async function fixture() {
       else {
         assert.equal(rpc.params?.name, "get_instance");
         assert.deepEqual(rpc.params.arguments, { instance_id: worldId });
+        worldReads++;
+        if (dropWorldReads) {
+          response.destroy();
+          return;
+        }
         structuredContent = {
           instance: {
             instance_id: status.worldId,
@@ -96,6 +110,11 @@ async function fixture() {
             sealed_at: status.sealedAt,
           },
         };
+        const held = heldRead;
+        if (held) {
+          held.entered();
+          await held.wait;
+        }
       }
       result = {
         content: [{ type: "text", text: JSON.stringify(structuredContent) }],
@@ -192,6 +211,7 @@ async function fixture() {
         status: value,
         sealedAt: new Date().toISOString(),
       };
+      return worldSchema.parse(status);
     },
     wrongProject: () => {
       status = { ...status, projectId: randomUUID() };
@@ -212,6 +232,24 @@ async function fixture() {
       sessionId = randomUUID();
     },
     initializations: () => initializations,
+    dropWorldReads: (value: boolean) => {
+      dropWorldReads = value;
+    },
+    worldReads: () => worldReads,
+    holdWorldReads: () => {
+      assert.equal(heldRead, undefined);
+      let count = 0;
+      const released = Promise.withResolvers<void>();
+      const held = { entered: () => count++, wait: released.promise };
+      heldRead = held;
+      return {
+        count: () => count,
+        release: () => {
+          if (heldRead === held) heldRead = undefined;
+          released.resolve();
+        },
+      };
+    },
     cleanup: async () => {
       for (const child of children) await stop(child);
       for (const row of receiver.prepare("SELECT pid FROM active_adapters").all()) {
@@ -235,6 +273,93 @@ async function post(url: string, body: unknown, credential = token) {
   });
 }
 const login = { requestId: "request-1", subjectId: "user-1", stage: "oauth", outcome: "succeeded" };
+
+test("metadata transport failures return a retryable response without queueing a login", async () => {
+  const f = await fixture();
+  try {
+    const helper = await f.start();
+    await until(() => f.worldReads() >= 2);
+    f.dropWorldReads(true);
+    const unavailable = await post(helper.url, login);
+    assert.equal(unavailable.status, 503);
+    assert.equal(unavailable.headers.get("retry-after"), "5");
+    assert.deepEqual(await unavailable.json(), { error: "world_status_unavailable" });
+    assert.equal((await post(helper.url, { ...login, stage: "unknown" })).status, 400);
+    const queue = new Store(f.stateDir, f.config);
+    try {
+      assert.equal(queue.status().length, 0);
+      assert.equal(f.receiver.prepare("SELECT count(*) AS n FROM receipts").get()?.n, 0);
+      f.dropWorldReads(false);
+      assert.equal((await post(helper.url, login)).status, 202);
+      await until(() => queue.status()[0]?.state === "done");
+      assert.equal(f.receiver.prepare("SELECT count(*) AS n FROM auth_effects").get()?.n, 1);
+    } finally {
+      queue.close();
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("terminal observation fences delayed HTTP submissions and stale worker claims", async () => {
+  const f = await fixture();
+  let held: ReturnType<typeof f.holdWorldReads> | undefined;
+  const observer = new Store(f.stateDir, f.config);
+  try {
+    const helper = await f.start();
+    await until(() => f.worldReads() >= 2);
+    held = f.holdWorldReads();
+    const submission = post(helper.url, login);
+    // The worker permits only one poll in flight, so two held reads include the HTTP submission.
+    await until(() => held?.count() === 2);
+    observer.enqueue(endedEvent(f.config, f.seal()));
+    held.release();
+    const refused = await submission;
+    assert.equal(refused.status, 409);
+    assert.deepEqual(await refused.json(), { error: "world_not_live" });
+    assert.throws(
+      () => observer.enqueue(loginEvent(f.config, loginSchema.parse(login))),
+      /world_not_live/,
+    );
+    assert.equal(observer.status().filter((event) => event.kind === "auth.outcome").length, 0);
+    assert.equal(f.receiver.prepare("SELECT count(*) AS n FROM auth_effects").get()?.n, 0);
+  } finally {
+    held?.release();
+    observer.close();
+    await f.cleanup();
+  }
+
+  const second = await fixture();
+  const store = new Store(second.stateDir, second.config);
+  const terminalWriter = new Store(second.stateDir, second.config);
+  const worker = new Worker(second.config, store, second.environment);
+  let stale: ReturnType<typeof second.holdWorldReads> | undefined;
+  try {
+    await worker.initialize();
+    const event = loginEvent(second.config, loginSchema.parse(login));
+    store.enqueue(event);
+    stale = second.holdWorldReads();
+    const work = worker.tick();
+    await until(() => stale?.count() === 1);
+    terminalWriter.enqueue(endedEvent(second.config, second.seal()));
+    stale.release();
+    await work;
+    assert.equal(store.claim("auth.outcome"), null);
+    assert.equal(second.receiver.prepare("SELECT count(*) AS n FROM auth_effects").get()?.n, 0);
+    // Identical replays remain readable; they cannot create another delivery.
+    assert.doesNotThrow(() => terminalWriter.enqueue(event));
+    await worker.tick();
+    assert.equal(store.status().find((row) => row.kind === "auth.outcome")?.state, "cancelled");
+    assert.equal(second.receiver.prepare("SELECT count(*) AS n FROM connections").get()?.n, 2);
+    assert.equal(second.receiver.prepare("SELECT count(*) AS n FROM receipts").get()?.n, 1);
+  } finally {
+    stale?.release();
+    await worker.close();
+    store.close();
+    terminalWriter.close();
+    await second.cleanup();
+  }
+});
 
 test("typed outcomes use the real HTTP/child path, reject spoofed or conflicting requests, and exclude control credentials", async () => {
   const f = await fixture();

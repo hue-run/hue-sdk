@@ -18,12 +18,13 @@ bun run typecheck
 bun run test
 ```
 
-The ten tests start real HTTP, MCP, helper and adapter processes with synthetic
+The twelve tests start real HTTP, MCP, helper and adapter processes with synthetic
 credentials and temporary SQLite databases. They prove authenticated typed
 outcomes, fixed project and World scope, idempotent retries and conflicts,
 private state, environment isolation, terminal cleanup, interrupted delivery,
 late callback refusal, concurrent claims, MCP session recovery, and a detached
-descendant that retains stdout. The expected result is ten passing tests with
+descendant that retains stdout, retryable metadata failures, and delayed live
+responses after a terminal receipt. The expected result is twelve passing tests with
 no failures or skipped tests. Keep the command output and source-file hashes.
 
 These tests do not contact Hue or any customer application. A separate live

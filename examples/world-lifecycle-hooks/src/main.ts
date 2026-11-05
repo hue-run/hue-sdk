@@ -63,7 +63,12 @@ const server = createServer(async (request, response) => {
         response.writeHead(409).end('{"error":"world_not_live"}');
         return;
       }
-      const world = await worker.world();
+      const world = await worker.world().catch(() => null);
+      if (!world) {
+        response.setHeader("retry-after", "5");
+        response.writeHead(503).end('{"error":"world_status_unavailable"}');
+        return;
+      }
       if (world.lifecycle !== "live" || world.activity !== "active") {
         response.writeHead(409).end('{"error":"world_not_live"}');
         return;
@@ -75,15 +80,15 @@ const server = createServer(async (request, response) => {
       .end(JSON.stringify({ idempotencyKey: event.idempotencyKey, accepted: true }));
   } catch (error) {
     const conflict = error instanceof Error && error.message === "idempotency_conflict";
-    const unavailable = error instanceof Error && error.message === "world_status_unavailable";
+    const notLive = error instanceof Error && error.message === "world_not_live";
     const full = error instanceof Error && error.message === "queue_full";
-    if (unavailable || full) response.setHeader("retry-after", "5");
-    response.writeHead(conflict ? 409 : unavailable ? 503 : full ? 429 : 400).end(
+    if (full) response.setHeader("retry-after", "5");
+    response.writeHead(conflict || notLive ? 409 : full ? 429 : 400).end(
       JSON.stringify({
         error: conflict
           ? "idempotency_conflict"
-          : unavailable
-            ? "world_status_unavailable"
+          : notLive
+            ? "world_not_live"
             : full
               ? "queue_full"
               : "request_refused",

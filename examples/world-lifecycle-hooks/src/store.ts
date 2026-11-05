@@ -57,12 +57,11 @@ export class Store {
   }
   private insert(event: HookEvent) {
     const payload = JSON.stringify(event);
-    if (
-      event.type === "auth.outcome" &&
-      !this.existing(event) &&
-      Number(this.db.prepare("SELECT count(*) AS count FROM event").get()?.count) >= 999
-    )
-      throw new Error("queue_full");
+    if (event.type === "auth.outcome" && !this.existing(event)) {
+      if (this.terminal()) throw new Error("world_not_live");
+      if (Number(this.db.prepare("SELECT count(*) AS count FROM event").get()?.count) >= 999)
+        throw new Error("queue_full");
+    }
     this.db
       .prepare("INSERT OR IGNORE INTO event(event_key,payload,kind) VALUES(?,?,?)")
       .run(event.idempotencyKey, payload, event.type);
@@ -106,6 +105,7 @@ export class Store {
         `UPDATE event SET lease=?, lease_until=?, attempts=attempts+1
       WHERE event_key=(SELECT event_key FROM event WHERE state='pending' AND kind=? AND next_at<=? AND lease_until<=?
         AND NOT EXISTS(SELECT 1 FROM event WHERE state='pending' AND lease_until>?)
+        AND (kind='world.ended' OR NOT EXISTS(SELECT 1 FROM event WHERE kind='world.ended'))
         ORDER BY rowid LIMIT 1) RETURNING event_key,payload`,
       )
       .get(lease, now + 30_000, kind, now, now, now);

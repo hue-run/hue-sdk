@@ -90,6 +90,8 @@ POST JSON to the helper's loopback `/auth/outcomes` endpoint with `Authorization
 
 The project, World and connection come only from the fixed configuration. Repeating a request ID and stage with the same body returns the same idempotency key. Changing that outcome or subject returns `409`. Use a new request ID for a new attempt. A `202` means the outcome is durably queued, not that the application handled it. Authenticated `GET /status` reports `pending`, `done`, or `cancelled` for each event. New login outcomes require a live World. When the World seals, queued login outcomes that have not been delivered are cancelled before cleanup.
 
+If World metadata cannot be read, the helper returns `503 world_status_unavailable` with `Retry-After: 5` and does not queue the outcome. Retry the same request after metadata access recovers. Once any helper process saves a terminal receipt, the database refuses new login rows and claims even if another request has an older live response. Identical recorded outcomes can still return their existing receipt; an adapter already claimed before terminal observation still needs the application fencing described below.
+
 Login delivery also requires the server's activity to be `active`. An expired or issuer-inactive World can still have an unsealed `live` lifecycle; the helper pauses login effects in that state and waits for the actual seal before cleanup.
 
 An outcome does not change Hue's own login or the agent's credentials. Your adapter maps it to your application's test callback and observes the resulting behavior, such as the agent's Slack reply. That mapping requires the application's actual callback contract; this helper does not invent one.
