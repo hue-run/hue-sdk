@@ -41,6 +41,13 @@ refuses to publish a version without a matching entry below.
 - HTTP capture decodes gzip, deflate and br responses before applying the text and size policy,
   so a compressed JSON or text response records `output.value` instead of its size only. The
   application still receives its usual bytes. Undecodable bytes record a truncation marker.
+- An upload URL that a remote Hue answers must use HTTPS (plain HTTP only with
+  `allowInsecureHttp`) on a host whose every address is public, and the upload connects only to
+  the addresses that were checked. This covers trace import
+  values, `hue world create` files, values over the inline limit, evaluation artifacts and managed
+  output files. A later DNS answer can no longer redirect an upload to this machine or a private
+  network. Trace import and World uploads are always `PUT`. A Hue origin on loopback can still
+  name loopback HTTP stores for local development.
 
 #### Added
 

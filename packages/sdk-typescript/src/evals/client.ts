@@ -1,5 +1,6 @@
 import { isLoopbackHost, validateOptions } from "../config.js";
 import type { ProjectConnection } from "../types.js";
+import { pinnedFetch, uploadRoute } from "../upload-target.js";
 import { json, uuid, valueBounds } from "./json.js";
 import { MediaClient } from "./media.js";
 import {
@@ -545,7 +546,9 @@ export class EvaluationClient {
     if (byteSize !== undefined) headers["content-length"] = String(byteSize);
     let response: Response;
     try {
-      response = await fetch(uploadUrl, {
+      const route = await uploadRoute(new URL(uploadUrl), this.baseUrl);
+      if (!route) throw new HueApiError();
+      response = await (route.addresses ? pinnedFetch(route.addresses) : fetch)(uploadUrl, {
         method: "PUT",
         headers,
         body,
