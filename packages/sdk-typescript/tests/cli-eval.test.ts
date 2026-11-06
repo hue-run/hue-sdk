@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { tmpdir } from "node:os";
@@ -29,6 +29,13 @@ const cli = join(import.meta.dir, "../src/setup/cli.ts");
 const key = "synthetic-eval-key-canary";
 const mcpToken = "hue_sim_synthetic_token_canary";
 const worldToken = `hue_world_${"c".repeat(64)}.${"s".repeat(43)}`;
+/** Per-surface credentials the world hands the agent, distinct from the world token and from
+ * each other. The short one is under the redactor's minimum length. */
+const gmailSurfaceToken = "placeholder-gmail-surface-token";
+const slackSurfaceToken = "placeholder-slack-surface-token";
+const slackBearer = "placeholder-slack-mcp-bearer";
+const shortSurfaceToken = "tiny-token";
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 /** The world's clock at creation: a recorded start, months from any wall clock. */
 const worldNowText = "2026-03-02T15:00:00.000Z";
 const digest = "d".repeat(64);
@@ -66,6 +73,8 @@ function hueStandIn(
     ciScoringTransitions?: boolean;
     /** Hold one acknowledgement after durable completion so the runner can be killed. */
     ciLoseCompletionAck?: string;
+    /** Add per-surface tokens and a second MCP bearer that are not the world token. */
+    surfaceCredentials?: boolean;
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
@@ -172,6 +181,19 @@ function hueStandIn(
     localRuns: [] as Record<string, unknown>[],
     judgeJobs: [] as { runId: string; body: Record<string, unknown> }[],
   };
+  const artifacts = new Map<
+    string,
+    {
+      id: string;
+      filename: string;
+      contentType: string;
+      byteSize: number;
+      sha256: string;
+      state: string;
+      bytes?: Uint8Array;
+    }
+  >();
+  const reservations = new Map<string, string>();
   const queue: { runId: string; experimentId: string; state: string; workerId?: string }[] = [];
   const agentId = randomUUID();
   function createExperiment(body: Record<string, unknown>) {
@@ -210,6 +232,12 @@ function hueStandIn(
     port: 0,
     async fetch(request) {
       const url = new URL(request.url);
+      if (url.pathname.startsWith("/blob/")) {
+        const stored = artifacts.get(url.pathname.slice("/blob/".length));
+        if (!stored) return new Response(null, { status: 404 });
+        stored.bytes = new Uint8Array(await request.arrayBuffer());
+        return new Response(null, { status: 200 });
+      }
       const path = url.pathname.replace("/api/v1", "");
       calls.requests.push(`${request.method} ${path}`);
       if (request.headers.get("authorization") !== `Bearer ${key}`)
@@ -467,6 +495,7 @@ function hueStandIn(
         };
         worlds.set(world.id, world);
         const mirror = `${url.origin}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
+        const slackMirror = `${url.origin}/api/sim/slack.com/api`;
         const expiresAt = new Date(Date.now() + 600_000).toISOString();
         const gateway = options.gateway
           ? {
@@ -484,6 +513,17 @@ function hueStandIn(
                   url: mirror,
                   alias: null,
                 },
+                ...(options.surfaceCredentials
+                  ? [
+                      {
+                        provider: "slack",
+                        surface: "slack/web",
+                        providerInstanceKey: "slack-primary",
+                        url: slackMirror,
+                        alias: null,
+                      },
+                    ]
+                  : []),
               ],
               env: {
                 HUE_WORLD_ID: world.id,
@@ -491,6 +531,14 @@ function hueStandIn(
                 HUE_WORLD_NOW: worldNowText,
                 BAGGAGE: `hue-world=${world.id}`,
                 HUE_SIM_GOOGLE_GMAIL_MCP_URL: mirror,
+                ...(options.surfaceCredentials
+                  ? {
+                      HUE_SIM_GOOGLE_GMAIL_MCP_TOKEN: gmailSurfaceToken,
+                      HUE_SIM_SLACK_WEB_API_URL: slackMirror,
+                      HUE_SIM_SLACK_WEB_API_TOKEN: slackSurfaceToken,
+                      HUE_SIM_NOTION_MCP_TOKEN: shortSurfaceToken,
+                    }
+                  : {}),
               },
               mcpConfig: {
                 mcpServers: {
@@ -499,6 +547,15 @@ function hueStandIn(
                     url: mirror,
                     headers: { Authorization: `Bearer ${worldToken}` },
                   },
+                  ...(options.surfaceCredentials
+                    ? {
+                        "slack-primary": {
+                          type: "http",
+                          url: slackMirror,
+                          headers: { Authorization: `Bearer ${slackBearer}` },
+                        },
+                      }
+                    : {}),
                 },
               },
               connection: null,
@@ -762,6 +819,82 @@ function hueStandIn(
         const subject = subjects.get(subjectMatch[1]!);
         return subject ? Response.json(subject) : new Response(null, { status: 404 });
       }
+      if (path === "/artifacts" && request.method === "POST") {
+        const reservationKey = String(body.idempotencyKey);
+        let id = reservations.get(reservationKey);
+        if (!id) {
+          id = randomUUID();
+          reservations.set(reservationKey, id);
+          artifacts.set(id, {
+            id,
+            filename: String(body.filename),
+            contentType: String(body.contentType),
+            byteSize: Number(body.byteSize),
+            sha256: String(body.sha256),
+            state: "reserved",
+          });
+        }
+        const stored = artifacts.get(id)!;
+        return Response.json(
+          {
+            id,
+            filename: stored.filename,
+            declaredContentType: stored.contentType,
+            declaredBytes: stored.byteSize,
+            declaredSha256: stored.sha256,
+            state: stored.state,
+            copyState: stored.state === "ready" ? "acknowledged" : "none",
+            verifiedBytes: null,
+            verifiedSha256: null,
+            failureCode: null,
+          },
+          { status: 201 },
+        );
+      }
+      const artifactAction = /^\/artifacts\/([^/]+)(?:\/(upload|complete))?$/.exec(path);
+      if (artifactAction) {
+        const stored = artifacts.get(artifactAction[1]!);
+        if (!stored) return new Response(null, { status: 404 });
+        if (request.method === "GET")
+          return Response.json({
+            id: stored.id,
+            filename: stored.filename,
+            declaredContentType: stored.contentType,
+            declaredBytes: stored.byteSize,
+            declaredSha256: stored.sha256,
+            state: stored.state,
+            copyState: stored.bytes ? "acknowledged" : "none",
+            verifiedBytes: stored.state === "ready" ? stored.byteSize : null,
+            verifiedSha256: stored.state === "ready" ? stored.sha256 : null,
+            failureCode: null,
+          });
+        if (artifactAction[2] === "upload")
+          return Response.json({
+            uploadUrl: `${url.origin}/blob/${stored.id}`,
+            method: "PUT",
+            headers: { "content-type": stored.contentType },
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          });
+        if (
+          !stored.bytes ||
+          stored.bytes.byteLength !== stored.byteSize ||
+          sha256(stored.bytes) !== stored.sha256
+        )
+          return new Response(null, { status: 409 });
+        stored.state = "ready";
+        return Response.json({
+          id: stored.id,
+          filename: stored.filename,
+          declaredContentType: stored.contentType,
+          declaredBytes: stored.byteSize,
+          declaredSha256: stored.sha256,
+          state: "ready",
+          copyState: "acknowledged",
+          verifiedBytes: stored.byteSize,
+          verifiedSha256: stored.sha256,
+          failureCode: null,
+        });
+      }
       throw new Error(`Unexpected request ${request.method} ${path}`);
     },
   });
@@ -776,6 +909,7 @@ function hueStandIn(
     scorerVersion,
     experiments,
     worlds,
+    artifacts,
     creationRequests,
     baselineRequests,
     results,
@@ -960,6 +1094,58 @@ writeFileSync(
 );
 `;
 
+/** Prints the world surface tokens and every MCP bearer, or writes them into the case output. */
+const surfaceSource = `import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const config = process.env.HUE_MCP_CONFIG
+  ? JSON.parse(readFileSync(process.env.HUE_MCP_CONFIG, "utf8"))
+  : { mcpServers: {} };
+const bearers = Object.values(config.mcpServers ?? {}).map((server) => {
+  const header = server?.headers?.Authorization ?? "";
+  const matched = /^Bearer ([^\\s]+)$/.exec(header);
+  return matched ? matched[1] : header;
+});
+const leaked = {
+  gmail: process.env.HUE_SIM_GOOGLE_GMAIL_MCP_TOKEN ?? null,
+  slack: process.env.HUE_SIM_SLACK_WEB_API_TOKEN ?? null,
+  notion: process.env.HUE_SIM_NOTION_MCP_TOKEN ?? null,
+  mirror: process.env.HUE_SIM_GOOGLE_GMAIL_MCP_URL ?? null,
+  world: process.env.HUE_WORLD_TOKEN ?? null,
+  bearers,
+};
+const out = process.env.HUE_CASE_OUTPUT_DIR;
+if (process.env.HUE_TEST_SURFACE_FILES) {
+  writeFileSync(join(out, "result.json"), JSON.stringify(leaked));
+  writeFileSync(
+    join(out, "notes.txt"),
+    "gmail " + leaked.gmail + "\\nslack " + leaked.slack + "\\nbearer " + bearers[1] + "\\n",
+  );
+  writeFileSync(join(out, "rows.json"), JSON.stringify([{ gmail: leaked.gmail, bearer: bearers[1] }]));
+  writeFileSync(join(out, "report-" + leaked.gmail + ".csv"), "a,b\\n");
+} else if (process.env.HUE_TEST_SURFACE_ERROR) {
+  writeFileSync(join(out, leaked.gmail + ".exe"), "x");
+} else {
+  process.stdout.write(JSON.stringify(leaked));
+}
+`;
+
+/** Throws with the surface tokens and the second MCP bearer, read from the world handoff. */
+const surfaceThrowSource = `export default async function runMyAgent(_inputs, context) {
+  const servers = Object.values(context.world.mcpConfig.mcpServers);
+  const header = servers[1].headers.Authorization;
+  const bearer = /^Bearer ([^\\s]+)$/.exec(header)[1];
+  const env = context.world.env;
+  throw new Error(
+    "surface " + env.HUE_SIM_GOOGLE_GMAIL_MCP_TOKEN +
+      " slack " + env.HUE_SIM_SLACK_WEB_API_TOKEN +
+      " notion " + env.HUE_SIM_NOTION_MCP_TOKEN +
+      " bearer " + bearer +
+      " world " + context.world.token +
+      " mirror " + env.HUE_SIM_GOOGLE_GMAIL_MCP_URL,
+  );
+}
+`;
+
 /** Throws with the world token in its message. */
 const throwingAdapterSource = `export default async function runMyAgent(_inputs, context) {
   throw new Error("could not reach the mirror with " + context.world.token + " and " + process.env.HUE_API_KEY);
@@ -984,6 +1170,20 @@ const frozenAdapterSource = `export default async function runMyAgent(_inputs, c
 const bananaSource = `process.stdout.write(JSON.stringify({ fruit: "banana" }));
 `;
 
+const longSurfaceSecrets = [gmailSurfaceToken, slackSurfaceToken, slackBearer, worldToken];
+
+/** The stored answer once every long world credential the agent printed has been cleared. */
+function clearedSurfaceAnswer(mirror: string) {
+  return {
+    gmail: "[redacted]",
+    slack: "[redacted]",
+    notion: shortSurfaceToken,
+    mirror,
+    world: "[redacted]",
+    bearers: ["[redacted]", "[redacted]"],
+  };
+}
+
 /** Every file under a directory whose text contains one of the values. */
 async function filesContaining(directory: string, values: string[]): Promise<string[]> {
   const found: string[] = [];
@@ -1007,6 +1207,8 @@ async function workspace() {
   await writeFile(join(directory, "hue-frozen.mjs"), frozenAdapterSource);
   await writeFile(join(directory, "agent-banana.mjs"), bananaSource);
   await writeFile(join(directory, "agent-result-file.mjs"), resultFileSource);
+  await writeFile(join(directory, "agent-surface.mjs"), surfaceSource);
+  await writeFile(join(directory, "hue-surface-throwing.mjs"), surfaceThrowSource);
   await writeFile(join(directory, "hue-throwing.mjs"), throwingAdapterSource);
   return directory;
 }
@@ -2053,6 +2255,247 @@ describe("hue eval", () => {
       }
     },
     SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "world surface tokens and a later MCP bearer are cleared from the stored answer and its text files",
+    async () => {
+      const cwd = await workspace();
+      const answered = hueStandIn({ gateway: true, surfaceCredentials: true });
+      const filed = hueStandIn({ gateway: true, surfaceCredentials: true });
+      try {
+        const mirror = `${answered.baseUrl}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
+        const stdout = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-surface.mjs`,
+            "--origin",
+            answered.baseUrl,
+            "--wait",
+            "0",
+            "--checkpoint-dir",
+            join(cwd, "stdout-checkpoints"),
+          ],
+          { cwd },
+        );
+        expect(stdout.status).toBe(0);
+        expect(answered.calls.completions[0]).toMatchObject({
+          output: clearedSurfaceAnswer(mirror),
+        });
+        expect(JSON.stringify(answered.calls.completions)).not.toContain(gmailSurfaceToken);
+        expect(JSON.stringify(answered.calls.completions)).not.toContain(slackSurfaceToken);
+        expect(JSON.stringify(answered.calls.completions)).not.toContain(slackBearer);
+        expect(Buffer.concat(answered.calls.otlpBodies).includes(gmailSurfaceToken)).toBe(false);
+        expect(Buffer.concat(answered.calls.otlpBodies).includes(slackBearer)).toBe(false);
+        expect(await filesContaining(join(cwd, "stdout-checkpoints"), longSurfaceSecrets)).toEqual(
+          [],
+        );
+
+        const written = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-surface.mjs`,
+            "--origin",
+            filed.baseUrl,
+            "--wait",
+            "0",
+            "--checkpoint-dir",
+            join(cwd, "file-checkpoints"),
+          ],
+          { cwd, env: { HUE_TEST_SURFACE_FILES: "1" } },
+        );
+        expect(written.status).toBe(0);
+        const fileMirror = `${filed.baseUrl}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
+        expect(filed.calls.completions[0]).toMatchObject({
+          output: clearedSurfaceAnswer(fileMirror),
+        });
+        const uploaded = (name: string) =>
+          Buffer.from(
+            [...filed.artifacts.values()].find((stored) => stored.filename === name)!.bytes!,
+          ).toString();
+        expect(uploaded("notes.txt")).toBe(
+          "gmail [redacted]\nslack [redacted]\nbearer [redacted]\n",
+        );
+        expect(JSON.parse(uploaded("rows.json"))).toEqual([
+          { gmail: "[redacted]", bearer: "[redacted]" },
+        ]);
+        expect(uploaded("report-[redacted].csv")).toBe("a,b\n");
+        const stored = JSON.stringify(filed.calls.completions);
+        for (const secret of longSurfaceSecrets) expect(stored).not.toContain(secret);
+        for (const artifact of filed.artifacts.values()) {
+          expect(artifact.filename).not.toContain(gmailSurfaceToken);
+          expect(Buffer.from(artifact.bytes ?? []).includes(gmailSurfaceToken)).toBe(false);
+          expect(Buffer.from(artifact.bytes ?? []).includes(slackSurfaceToken)).toBe(false);
+          expect(Buffer.from(artifact.bytes ?? []).includes(slackBearer)).toBe(false);
+        }
+        expect(await filesContaining(join(cwd, "file-checkpoints"), longSurfaceSecrets)).toEqual(
+          [],
+        );
+      } finally {
+        answered.stop();
+        filed.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "a command failure and an adapter failure are stored without world surface tokens",
+    async () => {
+      const cwd = await workspace();
+      const command = hueStandIn({ gateway: true, surfaceCredentials: true });
+      const adapter = hueStandIn({ gateway: true, surfaceCredentials: true });
+      try {
+        const failedCommand = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-surface.mjs`,
+            "--origin",
+            command.baseUrl,
+            "--wait",
+            "0",
+            "--checkpoint-dir",
+            join(cwd, "command-error-checkpoints"),
+          ],
+          { cwd, env: { HUE_TEST_SURFACE_ERROR: "1" } },
+        );
+        expect(failedCommand.status).toBe(1);
+        expect(command.calls.completions[0]).toMatchObject({
+          state: "error",
+          error: {
+            type: "TargetError",
+            message: expect.stringContaining("[redacted].exe"),
+          },
+        });
+        expect(JSON.stringify(command.calls.completions)).not.toContain(gmailSurfaceToken);
+        expect(
+          await filesContaining(join(cwd, "command-error-checkpoints"), [gmailSurfaceToken]),
+        ).toEqual([]);
+
+        const mirror = `${adapter.baseUrl}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
+        const failedAdapter = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "./hue-surface-throwing.mjs",
+            "--origin",
+            adapter.baseUrl,
+            "--wait",
+            "0",
+            "--checkpoint-dir",
+            join(cwd, "adapter-error-checkpoints"),
+          ],
+          { cwd },
+        );
+        expect(failedAdapter.status).toBe(1);
+        expect(adapter.calls.completions[0]).toMatchObject({
+          state: "error",
+          error: {
+            type: "TargetError",
+            message:
+              "surface [redacted] slack [redacted] notion " +
+              shortSurfaceToken +
+              " bearer [redacted] world [redacted] mirror " +
+              mirror,
+          },
+        });
+        const stored = JSON.stringify(adapter.calls.completions);
+        for (const secret of longSurfaceSecrets) expect(stored).not.toContain(secret);
+        expect(stored).toContain(shortSurfaceToken);
+        expect(Buffer.concat(adapter.calls.otlpBodies).includes(gmailSurfaceToken)).toBe(false);
+        expect(Buffer.concat(adapter.calls.otlpBodies).includes(slackBearer)).toBe(false);
+        expect(
+          await filesContaining(join(cwd, "adapter-error-checkpoints"), longSurfaceSecrets),
+        ).toEqual([]);
+      } finally {
+        command.stop();
+        adapter.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "a worker stores no world surface token from the case command",
+    async () => {
+      const standIn = hueStandIn({ gateway: true, surfaceCredentials: true });
+      standIn.enqueueRun();
+      const cwd = await workspace();
+      try {
+        const mirror = `${standIn.baseUrl}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
+        const result = await hue(
+          [
+            "--worker",
+            "--command",
+            `${process.execPath} agent-surface.mjs`,
+            "--origin",
+            standIn.baseUrl,
+            "--max-runs",
+            "1",
+            "--wait",
+            "0",
+            "--checkpoint-dir",
+            join(cwd, "worker-checkpoints"),
+          ],
+          { cwd },
+        );
+        expect(result.status).toBe(0);
+        expect(standIn.calls.completions[0]).toMatchObject({
+          output: clearedSurfaceAnswer(mirror),
+        });
+        const stored = JSON.stringify(standIn.calls.completions);
+        for (const secret of longSurfaceSecrets) expect(stored).not.toContain(secret);
+        expect(await filesContaining(join(cwd, "worker-checkpoints"), longSurfaceSecrets)).toEqual(
+          [],
+        );
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "a CI world case stores no world surface token from the case command",
+    async () => {
+      const standIn = hueStandIn({ gateway: true, surfaceCredentials: true });
+      const cwd = await workspace();
+      try {
+        await writeFile(
+          join(cwd, "hue.eval.json"),
+          JSON.stringify({
+            evalSetVersionId: standIn.version.id,
+            command: `${process.execPath} "$HUE_PROJECT_DIR/agent-surface.mjs"`,
+            scoringTimeoutSeconds: 2,
+          }),
+        );
+        const mirror = `${standIn.baseUrl}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
+        const result = await hue(
+          ["--ci", "--json", "--checkpoint-dir", join(cwd, "ci-checkpoints")],
+          { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+        );
+        expect(result.status).toBe(0);
+        expect(standIn.calls.completions[0]).toMatchObject({
+          output: clearedSurfaceAnswer(mirror),
+        });
+        const stored = JSON.stringify(standIn.calls.completions);
+        for (const secret of longSurfaceSecrets) expect(stored).not.toContain(secret);
+        expect(await filesContaining(join(cwd, "ci-checkpoints"), longSurfaceSecrets)).toEqual([]);
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
   );
 
   test(
