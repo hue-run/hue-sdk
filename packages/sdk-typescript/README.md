@@ -1180,7 +1180,9 @@ the record is sent first and its bytes follow:
    is uploaded, or with a presigned URL.
 3. The bytes go straight to the project's evidence store in one `PUT` to that URL, with exactly the
    headers Hue signed and never the project key (over HTTPS, or plain HTTP to a loopback store or
-   with `allowInsecureHttp`), and
+   with `allowInsecureHttp`; an HTTPS `baseUrl` other than loopback may name only HTTPS on a host
+   whose every address is public, and the PUT connects only to an address that check admitted),
+   and
    the upload is confirmed with `POST /api/v1/otlp/blobs/complete`. A PUT the store answers with
    412 (the same value uploaded at the same time by another span) counts as stored.
 

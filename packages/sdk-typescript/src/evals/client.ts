@@ -1,5 +1,6 @@
 import { isLoopbackHost, validateOptions } from "../config.js";
 import type { ProjectConnection } from "../types.js";
+import { pinnedFetch, uploadLookup } from "../upload-destination.js";
 import { json, uuid, valueBounds } from "./json.js";
 import { MediaClient } from "./media.js";
 import {
@@ -545,7 +546,8 @@ export class EvaluationClient {
     if (byteSize !== undefined) headers["content-length"] = String(byteSize);
     let response: Response;
     try {
-      response = await fetch(uploadUrl, {
+      const lookup = uploadLookup(new URL(uploadUrl), this.baseUrl);
+      response = await (lookup ? pinnedFetch(lookup) : fetch)(uploadUrl, {
         method: "PUT",
         headers,
         body,

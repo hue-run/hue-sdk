@@ -64,7 +64,9 @@ existing recording provider. Its own span contains no prompt/output content.
 Returned `bytes` are uploaded with stable idempotency keys, including valid
 secondary files on an error result. Ready reservations are reused. Signed upload
 URLs receive only the permitted content-type/private-access headers, never either
-invocation credential. Files are limited to 16, 25 MiB each and 64 MiB total.
+invocation credential. Unless `base_url` is a loopback origin, an upload URL must use
+HTTPS on a host whose every address is public, and the PUT connects only to an address
+that check admitted, never through a proxy. Files are limited to 16, 25 MiB each and 64 MiB total.
 Output JSON is bounded; omitted output means unavailable while `None` means JSON
 null. At most one file may be primary. Return only safe public error summaries,
 never raw provider errors, stack traces or credentials.

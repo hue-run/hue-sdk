@@ -2,10 +2,12 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync } from "node:fs";
 import { open, readdir, readFile, realpath, stat } from "node:fs/promises";
+import type { LookupFunction } from "node:net";
 import { constants } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
 import { MAX_FILE_DATA_BYTES, isLoopbackHost } from "../config.js";
+import { pinnedFetch, uploadLookup } from "../upload-destination.js";
 import { sdkVersion } from "../version.js";
 import { createWorldClient, HueWorldError, type WorldClient } from "../world/client.js";
 import {
@@ -452,7 +454,7 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
     url = creation.url;
     ctx.note(`World creation ${creation.id} started${url ? `: ${url}` : ""}`);
     if (groups.size) {
-      await upload(ctx, answer, groups);
+      await upload(ctx, origin, answer, groups);
       creation = creationOf(
         await hueJson(ctx, hue, "POST", `/api/v1/world-creations/${creation.id}/uploaded`),
       );
@@ -786,7 +788,12 @@ async function digest(path: string): Promise<{ byteSize: number; sha256: string 
 }
 
 /** Sends each file Hue asks for to its signed URL. The URLs are capabilities: never printed. */
-async function upload(ctx: Context, answer: JsonObject, groups: Map<string, Upload[]>) {
+async function upload(
+  ctx: Context,
+  origin: string,
+  answer: JsonObject,
+  groups: Map<string, Upload[]>,
+) {
   const asked = Array.isArray(answer.uploads) ? answer.uploads : [];
   for (const entry of asked) {
     if (!isObject(entry) || typeof entry.app !== "string" || typeof entry.file !== "number")
@@ -810,6 +817,14 @@ async function upload(ctx: Context, answer: JsonObject, groups: Map<string, Uplo
       !(target.protocol === "http:" && isLoopbackHost(target.hostname))
     )
       throw new WorldCommandError(`Hue answered an insecure upload URL for ${source.label}`);
+    let lookup: LookupFunction | undefined;
+    try {
+      lookup = uploadLookup(target, origin);
+    } catch {
+      throw new WorldCommandError(
+        `Hue answered an upload URL on a private network for ${source.label}`,
+      );
+    }
     ctx.secrets.push(target.href, target.search);
     const headers: Record<string, string> = {};
     if (isObject(entry.uploadHeaders))
@@ -825,7 +840,7 @@ async function upload(ctx: Context, answer: JsonObject, groups: Map<string, Uplo
         body: new Uint8Array(await source.bytes()),
         timeoutMs: UPLOAD_TIMEOUT_MS,
       },
-      ctx.transport,
+      lookup ? { ...ctx.transport, fetch: pinnedFetch(lookup) as typeof fetch } : ctx.transport,
       slowDown,
     );
     if (status < 200 || status >= 300)
