@@ -335,7 +335,9 @@ A World is filled from your files, from a description, or both:
   in the export is sent as its `name`: its path under `<dir>`, or with several apps under
   `<dir>/<app>/` (`channels/general/2026-01-05.json`). An empty file or a symbolic link is
   skipped with a note: a link is never followed, so a planted one cannot read a file outside the
-  directory into the upload. A file larger than 25 MiB is refused before anything is created.
+  directory into the upload. `<dir>` itself must not be a link, and a link swapped into the tree
+  while the command runs, or a file with a second hard link, is refused: each file is checked on
+  its open descriptor, so `--files` needs Linux or macOS. A file larger than 25 MiB is refused before anything is created.
 - `--describe "<text>"` asks Hue to generate the apps' data from the description.
   `--dry-run` prints the outline and estimate Hue answers and creates nothing.
 - `--export-from <list>` reads the named apps on your machine with your own access and uploads
@@ -664,6 +666,9 @@ npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authoriza
 
 **Prepare.** `prepare <path>` reads a file, a directory tree or a ZIP archive (members are inflated
 in memory; encrypted members, unsafe paths and nested archives are listed, not read) and
+never follows a symbolic link: `<path>` must not be one, a link in the tree is listed, not read,
+and one swapped in while it runs, or a file with a second hard link, is refused, so `prepare`
+needs Linux or macOS. It
 recognizes each file by its content, never by its name. A file may be gzip (every member) or zstd
 (every frame, skippable frames passed over; zstd needs Node.js 22.15 or later) compressed, at most
 64 MiB decompressed, and hold one JSON document, a JSON array of records, JSON Lines or binary OTLP,

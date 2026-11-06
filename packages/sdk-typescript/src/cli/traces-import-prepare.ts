@@ -1,7 +1,16 @@
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, join, relative, resolve, sep } from "node:path";
+import {
+  type FileHandle,
+  mkdir,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 import { sdkVersion } from "../version.js";
 import { MIN_DAMAGED_BYTES, MIN_FRAME_BYTES } from "./import-formats/containers.js";
@@ -24,6 +33,7 @@ import {
   type TraceImportTotals,
 } from "./traces-import-convert.js";
 import { isZipSignature, ZipArchive, ZipError } from "./traces-import-zip.js";
+import { canonicalDirectory, openInTree, readUpTo } from "./tree-files.js";
 
 /**
  * `hue traces import prepare`: reads a file, a directory or a ZIP archive, converts every trace
@@ -93,21 +103,12 @@ interface SourceFile {
 
 const posixPath = (path: string) => path.split(sep).join("/");
 
-async function readHead(path: string, length: number): Promise<Uint8Array> {
-  const handle = await open(path, "r");
-  try {
-    const buffer = Buffer.alloc(length);
-    const { bytesRead } = await handle.read(buffer, 0, length, 0);
-    return buffer.subarray(0, bytesRead);
-  } finally {
-    await handle.close();
-  }
-}
-
 /**
  * The source files under `input`: a file, every regular file of a directory tree (symbolic links
- * are listed and left unread), and every readable member of a ZIP archive found at either place.
- * The walk is bounded and its order does not matter: the manifest is sorted by trace id.
+ * are listed and left unread, and `input` itself must not be one), and every readable member of a
+ * ZIP archive found at either place. Each file is opened once and read through that descriptor
+ * while the walk waits. The walk is bounded and its order does not matter: the manifest is sorted
+ * by trace id.
  */
 async function* sourceFiles(
   input: string,
@@ -115,6 +116,7 @@ async function* sourceFiles(
 ): AsyncGenerator<SourceFile> {
   const root = resolve(input);
   const info = await stat(root);
+  let base = root;
   let count = 0;
   const seen = () => {
     if (++count > PREPARE_LIMITS.files)
@@ -125,33 +127,40 @@ async function* sourceFiles(
     const code = (error as NodeJS.ErrnoException).code;
     return `the ${what} could not be read${code ? ` (${code})` : ""}`;
   };
-  async function* file(path: string, name: string): AsyncGenerator<SourceFile> {
+  async function* file(parent: string, label: string, name: string): AsyncGenerator<SourceFile> {
     seen();
-    let size: number;
-    let head: Uint8Array;
+    let handle: FileHandle | undefined;
     try {
-      size = (await stat(path)).size;
-      head = await readHead(path, 4);
-    } catch (error) {
-      // A file the walk can list but not open (permissions, a file removed meanwhile) is
-      // reported; the rest of the input is still prepared.
-      unsupported.push({ file: name, reason: unreadable("file", error) });
-      return;
+      let size: number;
+      let head: Uint8Array;
+      try {
+        handle = await openInTree(parent, label);
+        size = (await handle.stat()).size;
+        head = await readUpTo(handle, 4);
+      } catch (error) {
+        // A file the walk can list but not open (permissions, a file removed or swapped for a
+        // link meanwhile) is reported; the rest of the input is still prepared.
+        unsupported.push({ file: name, reason: unreadable("file", error) });
+        return;
+      }
+      if (isZipSignature(head)) {
+        yield* archive(handle, name);
+        return;
+      }
+      if (size > PREPARE_LIMITS.fileBytes) {
+        unsupported.push({ file: name, reason: `larger than ${PREPARE_LIMITS.fileBytes} bytes` });
+        return;
+      }
+      const opened = handle;
+      yield { name, size, read: () => readUpTo(opened, size) };
+    } finally {
+      await handle?.close().catch(() => {});
     }
-    if (isZipSignature(head)) {
-      yield* archive(path, name);
-      return;
-    }
-    if (size > PREPARE_LIMITS.fileBytes) {
-      unsupported.push({ file: name, reason: `larger than ${PREPARE_LIMITS.fileBytes} bytes` });
-      return;
-    }
-    yield { name, size, read: () => readFile(path) };
   }
-  async function* archive(path: string, name: string): AsyncGenerator<SourceFile> {
+  async function* archive(handle: FileHandle, name: string): AsyncGenerator<SourceFile> {
     let zip: ZipArchive;
     try {
-      zip = await ZipArchive.open(path);
+      zip = await ZipArchive.open(handle);
     } catch (error) {
       unsupported.push({
         file: name,
@@ -187,7 +196,7 @@ async function* sourceFiles(
       if (depth === 0) throw error;
       seen();
       unsupported.push({
-        file: posixPath(relative(root, path)),
+        file: posixPath(relative(base, path)),
         reason: unreadable("directory", error),
       });
       return;
@@ -195,20 +204,33 @@ async function* sourceFiles(
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     for (const entry of entries) {
       const child = join(path, entry.name);
-      const name = posixPath(relative(root, child));
+      const label = relative(base, child);
+      const name = posixPath(label);
       if (entry.isSymbolicLink()) {
         seen();
         unsupported.push({ file: name, reason: "a symbolic link" });
       } else if (entry.isDirectory()) yield* directory(child, depth + 1);
-      else if (entry.isFile()) yield* file(child, name);
+      else if (entry.isFile()) yield* file(base, label, name);
       else {
         seen();
         unsupported.push({ file: name, reason: "not a regular file" });
       }
     }
   }
-  if (info.isDirectory()) yield* directory(root, 0);
-  else if (info.isFile()) yield* file(root, basename(root));
+  const canonical = (path: string) =>
+    canonicalDirectory(path).catch((error: unknown) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ELOOP")
+        throw new PrepareError(`${input} is a symbolic link; name the directory itself`);
+      if (code === "ENOTSUP") throw new PrepareError((error as Error).message);
+      throw error;
+    });
+  if (info.isDirectory()) {
+    base = await canonical(root);
+    yield* directory(base, 0);
+  } else if (info.isFile())
+    // Only the file named must not be a link; the directories leading to it are the caller's.
+    yield* file(await canonical(await realpath(dirname(root))), basename(root), basename(root));
   else throw new PrepareError("The input is neither a file nor a directory");
 }
 
