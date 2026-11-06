@@ -936,6 +936,16 @@ function printReport(print: (line: string) => void, report: JsonObject) {
       if (value === true) print("The report lists its first rows only.");
       continue;
     }
+    if (key === "users" && Array.isArray(value)) {
+      printUsers(print, value.filter(isObject));
+      continue;
+    }
+    if (key === "readings" && Array.isArray(value)) {
+      const omitted = typeof report.readingsOmitted === "number" ? report.readingsOmitted : 0;
+      printReadings(print, value.filter(isObject), omitted);
+      continue;
+    }
+    if (key === "readingsOmitted" && Array.isArray(report.readings)) continue;
     const section = Object.hasOwn(REPORT_SECTIONS, key) ? REPORT_SECTIONS[key] : undefined;
     if (!Array.isArray(value)) {
       // A value Hue adds later prints as it comes, and only when it holds something.
@@ -946,7 +956,10 @@ function printReport(print: (line: string) => void, report: JsonObject) {
     const rows = value.filter(isObject);
     // A section Hue adds later prints only when it has entries, its rows named by their fields.
     if (!section && !rows.length) continue;
-    const count = (row: JsonObject) => (typeof row.count === "number" ? row.count : 0);
+    // Rows of a section Hue adds later may carry no count: each such row is one entry.
+    const counted = rows.some((row) => typeof row.count === "number");
+    const count = (row: JsonObject) =>
+      typeof row.count === "number" ? row.count : counted || section ? 0 : 1;
     print(
       `${section?.label ?? key}: ${rows.length ? rows.reduce((sum, row) => sum + count(row), 0) : "none"}`,
     );
@@ -954,12 +967,55 @@ function printReport(print: (line: string) => void, report: JsonObject) {
       const account = typeof row.account === "string" && row.account ? ` (${row.account})` : "";
       const names =
         section?.names ??
-        Object.keys(row).filter((field) => !ROW_IDENTITY.has(field) && field !== "count");
+        Object.keys(row).filter(
+          (field) =>
+            !ROW_IDENTITY.has(field) &&
+            field !== "count" &&
+            (typeof row[field] === "string" || typeof row[field] === "number"),
+        );
       const name = names.map((field) => text(row[field], "?")).join(".");
       print(`  ${text(row.app, "?")}${account} ${name}: ${count(row)}`);
     }
     if (rows.length > LISTED) print(`  ... and ${rows.length - LISTED} more`);
   }
+}
+
+/** The users a users file or document gave each app account, such as
+ * `  slack: 6 (states login, role, slack_connection; 20 inferred)`. */
+function printUsers(print: (line: string) => void, rows: JsonObject[]) {
+  if (!rows.length) return;
+  const count = (row: JsonObject) => (typeof row.count === "number" ? row.count : 0);
+  print(`Users: ${rows.reduce((sum, row) => sum + count(row), 0)}`);
+  for (const row of rows.slice(0, LISTED)) {
+    const account = typeof row.account === "string" && row.account ? ` (${row.account})` : "";
+    const instance =
+      typeof row.instanceKey === "string" && row.instanceKey && row.instanceKey !== row.app
+        ? ` ${row.instanceKey}`
+        : "";
+    const states = Array.isArray(row.states)
+      ? row.states.filter((state): state is string => typeof state === "string")
+      : [];
+    const details = [
+      ...(states.length ? [`states ${states.join(", ")}`] : []),
+      ...(typeof row.inferred === "number" && row.inferred > 0 ? [`${row.inferred} inferred`] : []),
+    ];
+    print(
+      `  ${text(row.app, "?")}${instance}${account}: ${count(row)}${details.length ? ` (${details.join("; ")})` : ""}`,
+    );
+  }
+  if (rows.length > LISTED) print(`  ... and ${rows.length - LISTED} more`);
+}
+
+/** What Hue read from a users document, one line per reading, such as `  users_doc: Ana leads support.` */
+function printReadings(print: (line: string) => void, rows: JsonObject[], omitted: number) {
+  if (!rows.length && !omitted) return;
+  print(`Readings: ${rows.length + omitted}`);
+  for (const row of rows.slice(0, LISTED)) {
+    const said = typeof row.text === "string" ? row.text : describe(row);
+    print(`  ${typeof row.label === "string" && row.label ? `${row.label}: ` : ""}${said}`);
+  }
+  const more = Math.max(0, rows.length - LISTED) + omitted;
+  if (more) print(`  ... and ${more} more`);
 }
 
 // ---------------------------------------------------------------------------------------------
