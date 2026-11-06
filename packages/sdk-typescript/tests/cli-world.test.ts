@@ -505,6 +505,62 @@ describe("hue world create", () => {
     expect(created.stdout).toContain(`World version: ${VERSION}`);
   });
 
+  test("prints a users file's users by app with their states, and counts a users document's readings", async () => {
+    const states = ["login", "role", "slack_connection"];
+    const summary = async (report: Record<string, unknown>) => {
+      const stand = hue({ report });
+      const dir = await scratch();
+      await writeFile(join(dir, "users.csv"), "email,name\nana@acme.test,Ana\n");
+      const result = await world(
+        ["create", "--apps", "slack", "--files", ".", "--origin", stand.origin],
+        { cwd: dir },
+      );
+      expect(result.code).toBe(0);
+      const lines = result.stdout.split("\n");
+      return lines.slice(
+        2,
+        lines.findIndex((line) => line.startsWith("Run your agent")),
+      );
+    };
+
+    // A users file: the users and their states, no inferred count, and no readings.
+    expect(
+      await summary({
+        stored: [{ app: "slack", instanceKey: "slack", collection: "users", count: 6 }],
+        users: [{ app: "slack", instanceKey: "slack", count: 6, states }],
+        readings: [],
+      }),
+    ).toEqual([
+      "Stored: 6",
+      "  slack users: 6",
+      `Users: 6`,
+      `  slack: 6 (states ${states.join(", ")})`,
+    ]);
+
+    // A users document: what the model inferred, and one line per reading under their real count.
+    const readings = [1, 2, 3, 4, 5].map((n) => ({ label: "users_doc", text: `Sentence ${n}.` }));
+    expect(
+      await summary({
+        users: [
+          { app: "slack", instanceKey: "slack", read: "model", count: 6, states, inferred: 20 },
+        ],
+        readings,
+      }),
+    ).toEqual([
+      "Users: 6",
+      `  slack: 6 (states ${states.join(", ")}; 20 inferred)`,
+      "Readings: 5",
+      ...readings.map((reading) => `  users_doc: ${reading.text}`),
+    ]);
+
+    // Readings the report left out to keep within its bound count too, named but not listed.
+    expect(await summary({ readings, readingsOmitted: 2 })).toEqual([
+      "Readings: 7",
+      ...readings.map((reading) => `  users_doc: ${reading.text}`),
+      "  ... and 2 more",
+    ]);
+  });
+
   test("retries a busy upload and exits 1 with the error code of a failed World", async () => {
     const stand = hue({ statuses: ["importing", "failed"], putFailures: 1 });
     const dir = await scratch();
