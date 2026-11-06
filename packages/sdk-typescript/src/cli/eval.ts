@@ -591,13 +591,19 @@ function parseAnswer(text: string): JsonValue | undefined {
  * still gets the `hue_sim_` capability under the same `HUE_MCP_*` names.
  */
 /**
- * Credential values a case's answer must never carry into Hue or a checkpoint: the world token
- * and MCP headers handed to the case, its legacy MCP token and attempt bearers, and every Hue
+ * Credential values a case's answer must never carry into Hue or a checkpoint: the world token,
+ * each surface token, every `…TOKEN` variable of the world's environment, every MCP header and
+ * the credential after its scheme, the legacy MCP token and attempt bearers, and every Hue
  * control-plane credential in the CLI's environment, which an in-process adapter can read and
  * `--allow-hue-credentials` hands to a command. Longest first, so a header is replaced whole.
  */
 interface CaseCredentials {
-  world?: { token?: unknown; mcpConfig?: { mcpServers?: Record<string, { headers?: unknown }> } };
+  world?: {
+    token?: unknown;
+    env?: unknown;
+    surfaces?: unknown;
+    mcpConfig?: { mcpServers?: Record<string, { headers?: unknown }> };
+  };
   mcp?: { token?: unknown };
   connectionBundle?: unknown;
 }
@@ -616,9 +622,18 @@ function caseSecrets(context: CaseCredentials): string[] {
   for (const [name, value] of Object.entries(process.env))
     if (isHueControlPlaneCredential(name, value)) add(value);
   add(context.world?.token);
+  if (context.world?.env && typeof context.world.env === "object")
+    for (const [name, value] of Object.entries(context.world.env))
+      if (/TOKEN$/i.test(name)) add(value);
+  if (Array.isArray(context.world?.surfaces))
+    for (const surface of context.world.surfaces as { token?: unknown }[]) add(surface?.token);
   for (const server of Object.values(context.world?.mcpConfig?.mcpServers ?? {}))
     if (server.headers && typeof server.headers === "object")
-      for (const header of Object.values(server.headers)) add(header);
+      for (const header of Object.values(server.headers)) {
+        add(header);
+        // `Bearer <token>`: an agent that reads the config prints the credential without it.
+        if (typeof header === "string") add(/^\s*[A-Za-z][\w.-]*\s+(\S+)\s*$/.exec(header)?.[1]);
+      }
   add(context.mcp?.token);
   const bearers = (value: unknown, depth: number): void => {
     if (depth > 16 || !value || typeof value !== "object") return;
