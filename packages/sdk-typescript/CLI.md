@@ -924,7 +924,11 @@ the report as one object:
   `hue.import.original_trace_id` and `hue.import.original_span_id`.
 
 An existing `--out` directory is accepted only while it holds nothing but an earlier preparation
-and no upload has started in it.
+and no upload has started in it. A symbolic link at `--out` is refused. `prepare` and `upload`
+write every file through the directory they opened (`/proc/self/fd` on Linux), so a path later
+swapped for a link or another directory is not written. Where the system has no such path (macOS),
+`--out` and every directory above it must be owned by you or root, and none above it writable by
+another user unless it is sticky (as `/tmp` is). Windows needs WSL2.
 
 **Authorize.** Call `prepare_trace_import` over the Hue MCP with the report's `manifest_digest`,
 `totals` and `source`. It answers the import id, `upload_url` and an `authorization` (`hue_it_` and
