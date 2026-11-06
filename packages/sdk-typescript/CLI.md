@@ -1311,8 +1311,9 @@ only from the agent's own instrumentation. Case outputs, error messages and expl
 stored in Hue independently of the telemetry capture setting, so a case's answer can be graded and read on
 its run page. A `--command`'s stdout is its answer unless it writes a result file, and is stored,
 so it must not print credentials or debug logs there; before storing, `hue eval` replaces the
-credentials it handed the case (the world token and MCP headers, a legacy MCP token, attempt
-bearers) and every Hue control-plane credential in its environment with `[redacted]`, in the
+credentials it handed the case (the world token, surface tokens and every `…TOKEN` variable of
+the world's environment, each MCP header and its bearer, a legacy MCP token, attempt bearers) and
+every Hue control-plane credential in its environment with `[redacted]`, in the
 answer, an adapter's thrown message and name, generated file names and the local checkpoint.
 `--no-output` keeps outputs, error messages and explanations out of a one-shot run's stored
 results; captured telemetry still carries the output. Pass `--no-output --no-content` to omit both. `--worker` always stores them, because a run launched from Hue is read
