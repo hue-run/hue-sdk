@@ -1,9 +1,5 @@
 import { createHash } from "node:crypto";
-import { lookup } from "node:dns/promises";
-import { request as httpsRequest } from "node:https";
-import { BlockList, isIP } from "node:net";
-import { pipeline, Readable, type Transform } from "node:stream";
-import * as zlib from "node:zlib";
+import { isIP } from "node:net";
 import {
   SpanKind,
   SpanStatusCode,
@@ -34,7 +30,10 @@ import {
   type InlineFilePart,
   type MediaValue,
 } from "../inline-files.js";
+import { isInternalAddress, pinnedDownload, resolvedAddresses } from "../pinned-download.js";
 import { sdkVersion } from "../version.js";
+
+export { isInternalAddress, pinnedDownload };
 
 /**
  * Reading a Langfuse project through its public API and converting what it holds into the
@@ -695,40 +694,6 @@ export class LangfuseApi {
   }
 }
 
-/** Addresses a media download may not reach: this machine, private networks, link-local
- * (cloud metadata), shared, benchmarking, multicast and reserved ranges. IPv4-mapped IPv6
- * addresses are checked as their IPv4 address. */
-const INTERNAL_ADDRESSES = new BlockList();
-for (const [network, prefix] of [
-  ["0.0.0.0", 8],
-  ["10.0.0.0", 8],
-  ["100.64.0.0", 10],
-  ["127.0.0.0", 8],
-  ["169.254.0.0", 16],
-  ["172.16.0.0", 12],
-  ["192.0.0.0", 24],
-  ["192.168.0.0", 16],
-  ["198.18.0.0", 15],
-  ["224.0.0.0", 3],
-] as const)
-  INTERNAL_ADDRESSES.addSubnet(network, prefix, "ipv4");
-for (const [network, prefix] of [
-  ["::", 128],
-  ["::1", 128],
-  ["64:ff9b::", 96],
-  ["fc00::", 7],
-  ["fe80::", 10],
-  ["fec0::", 10],
-  ["ff00::", 8],
-] as const)
-  INTERNAL_ADDRESSES.addSubnet(network, prefix, "ipv6");
-
-/** Whether an IP address is one {@link INTERNAL_ADDRESSES} holds; false for anything else. */
-export function isInternalAddress(address: string): boolean {
-  const version = isIP(address);
-  return version !== 0 && INTERNAL_ADDRESSES.check(address, version === 4 ? "ipv4" : "ipv6");
-}
-
 /** Whether one media download link may be fetched: `refused` with the reason, or `allowed`, with
  * the public addresses the connection must be pinned to when its host was resolved by name. */
 export type DownloadVerdict =
@@ -749,7 +714,7 @@ export async function refusedDownload(
   url: URL,
   langfuse: URL,
   signal: AbortSignal,
-  lookupAddresses: (host: string, signal: AbortSignal) => Promise<string[]> = resolved,
+  lookupAddresses: (host: string, signal: AbortSignal) => Promise<string[]> = resolvedAddresses,
 ): Promise<DownloadVerdict> {
   const refused = (reason: string): DownloadVerdict => ({ kind: "refused", reason });
   if (url.href.length > MAX_LINK_LENGTH) return refused("is too long");
@@ -777,94 +742,6 @@ export async function refusedDownload(
     return refused("names an address on this machine or a private network");
   // An IP literal is where the connection goes already; only a name needs the pin.
   return isIP(host) ? { kind: "allowed" } : { kind: "allowed", addresses: [first, ...rest] };
-}
-
-/** The decoders that undo the answer's content codings, applied last first; null when a coding
- * cannot be undone here (one this runtime has no decoder for), so the body must pass through as
- * it came, as fetch passes an unknown coding through. */
-function contentDecoders(header: string | undefined): Transform[] | null {
-  const decoders: Transform[] = [];
-  const encodings = (header ?? "")
-    .split(",")
-    .map((encoding) => encoding.trim().toLowerCase())
-    .filter((encoding) => encoding && encoding !== "identity");
-  for (const encoding of encodings.reverse()) {
-    if (encoding === "gzip" || encoding === "x-gzip") decoders.push(zlib.createGunzip());
-    else if (encoding === "deflate") decoders.push(zlib.createInflate());
-    else if (encoding === "br") decoders.push(zlib.createBrotliDecompress());
-    else if (encoding === "zstd" && typeof zlib.createZstdDecompress === "function")
-      decoders.push(zlib.createZstdDecompress());
-    else return null;
-  }
-  return decoders;
-}
-
-/**
- * One GET of `url` connected to `address` rather than a lookup of its own, so a media download
- * reaches exactly the public addresses {@link refusedDownload} verified and a second DNS answer
- * cannot rebind it onto a private network. TLS still validates the certificate against the URL's
- * hostname (`servername`), and the Host header carries it. Content codings are decoded as fetch
- * decodes them, so a store that serves pre-compressed objects still imports readable bytes and
- * the size bound reads decoded bytes. Redirects are answered, never followed, like the plain
- * transport; `tls` lets a test name its own authority.
- */
-export function pinnedDownload(
-  url: URL,
-  init: { headers: Record<string, string>; signal: AbortSignal },
-  address: string,
-  tls: { ca?: string | Buffer } = {},
-): Promise<Response> {
-  return new Promise((resolve, reject) => {
-    const request = httpsRequest(
-      {
-        host: address,
-        port: url.port === "" ? 443 : Number(url.port),
-        path: `${url.pathname}${url.search}`,
-        servername: url.hostname,
-        headers: { ...init.headers, host: url.host },
-        signal: init.signal,
-        ...tls,
-      },
-      (answer) => {
-        const headers = new Headers();
-        for (const [name, value] of Object.entries(answer.headers)) {
-          if (typeof value === "string") headers.set(name, value);
-          else if (Array.isArray(value)) headers.set(name, value.join(", "));
-        }
-        let stream: Readable = answer;
-        const decoders = contentDecoders(answer.headers["content-encoding"]) ?? [];
-        if (decoders.length) {
-          stream = decoders[decoders.length - 1]!;
-          // Cancelling the body or a failed decoder must close every upstream stream too.
-          pipeline([answer, ...decoders], () => undefined);
-        }
-        const status = answer.statusCode ?? 502;
-        // node:stream/web's ReadableStream and the global one are the same object at runtime;
-        // their declarations only differ. A null-body status must construct with a null body.
-        const body =
-          status === 204 || status === 205 || status === 304
-            ? null
-            : (Readable.toWeb(stream) as unknown as ReadableStream);
-        resolve(new Response(body, { status, headers }));
-      },
-    );
-    request.once("error", reject);
-    request.end();
-  });
-}
-
-/** Every address `host` resolves to; rejects once `signal` aborts, since a lookup cannot be
- * cancelled. */
-function resolved(host: string, signal: AbortSignal): Promise<string[]> {
-  return new Promise((resolve, reject) => {
-    const stop = () => reject(new Error("The lookup was abandoned"));
-    if (signal.aborted) return stop();
-    signal.addEventListener("abort", stop, { once: true });
-    lookup(host, { all: true }).then(
-      (entries) => resolve(entries.map((entry) => entry.address)),
-      reject,
-    );
-  });
 }
 
 // ---------------------------------------------------------------------------------------------

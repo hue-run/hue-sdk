@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import random
 import re
+import socket
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +26,8 @@ from urllib.parse import urlsplit
 
 import requests
 import urllib3
+import urllib3.util.connection
+from requests.adapters import HTTPAdapter
 
 from .._inline_files import loads_message
 from .._otel_compat import suppress_instrumentation
@@ -186,8 +190,12 @@ def _route(
     return f"/traces/{trace_id.lower()}/blobs/{digest}{query}", digest
 
 
-def _link(value: object) -> str | None:
-    """A download link Hue issued: HTTPS, or HTTP to loopback, without credentials or a fragment."""
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def _link(value: object, loopback_origin: bool) -> str | None:
+    """A download link Hue issued: HTTPS, or, from a loopback Hue origin, HTTP to loopback,
+    without credentials or a fragment."""
     if (
         not isinstance(value, str)
         or len(value) > 8192
@@ -196,13 +204,103 @@ def _link(value: object) -> str | None:
         return None
     try:
         url = urlsplit(value)
-        loopback = url.hostname in ("localhost", "127.0.0.1", "::1")
-        allowed = url.scheme == "https" or (url.scheme == "http" and loopback)
+        loopback = url.hostname in _LOOPBACK_HOSTS
+        allowed = url.scheme == "https" or (loopback_origin and url.scheme == "http" and loopback)
         if not url.hostname or not allowed or url.username or url.password or url.fragment:
             return None
     except ValueError:
         return None
     return value
+
+
+# Addresses a download link from a remote Hue origin may not reach, as the TypeScript SDK's
+# ``isInternalAddress`` lists them, besides any address Python does not count as global.
+_INTERNAL_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in (
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.0.0.0/24",
+        "192.168.0.0/16",
+        "198.18.0.0/15",
+        "224.0.0.0/3",
+        "::/128",
+        "::1/128",
+        "64:ff9b::/96",
+        "fc00::/7",
+        "fe80::/10",
+        "fec0::/10",
+        "ff00::/8",
+    )
+)
+
+
+def _public(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_global and not any(address in network for network in _INTERNAL_NETWORKS)
+
+
+def _pinned_address(link: str) -> str:
+    """The one address a link from a remote Hue origin is downloaded from: its host when that is
+    an IP literal, else the first address its name resolves to, looked up once and connected to,
+    since a second lookup could answer a private one (DNS rebinding). A host on this machine or a
+    private network, or any address of a name there, raises before any request is sent."""
+    url = urlsplit(link)
+    host = url.hostname or ""
+    if host == "localhost" or host.endswith(".localhost"):
+        raise MediaFetchError("failed")
+    try:
+        try:
+            addresses = [ipaddress.ip_address(host)]
+        except ValueError:
+            answers = socket.getaddrinfo(host, url.port or 443, type=socket.SOCK_STREAM)
+            addresses = [ipaddress.ip_address(str(answer[4][0])) for answer in answers]
+    except (OSError, ValueError, UnicodeError):
+        raise MediaFetchError("failed") from None
+    if not addresses or not all(_public(address) for address in addresses):
+        raise MediaFetchError("failed")
+    return str(addresses[0])
+
+
+class _PinnedAdapter(HTTPAdapter):
+    """Connects to ``address`` instead of looking the link's host up again, never through the
+    environment's proxy, which would look it up itself; TLS still verifies the certificate for the
+    link's host. ``_new_conn`` is urllib3's socket factory in 1.26 and 2.x, the hook
+    ``world.client`` extends too."""
+
+    def __init__(self, address: str) -> None:
+        super().__init__()
+        self._address = address
+
+    def send(self, request: Any, *args: Any, **kwargs: Any) -> Any:
+        kwargs["proxies"] = {}
+        return super().send(request, *args, **kwargs)
+
+    def get_connection_with_tls_context(self, *args: Any, **kwargs: Any) -> Any:
+        pool: Any = super().get_connection_with_tls_context(*args, **kwargs)
+        address = self._address
+        base: type[Any] = pool.ConnectionCls
+
+        def _new_conn(connection: Any) -> socket.socket:
+            try:
+                return urllib3.util.connection.create_connection(
+                    (address, connection.port),
+                    connection.timeout,
+                    source_address=connection.source_address,
+                    socket_options=connection.socket_options,
+                )
+            except OSError as error:
+                raise urllib3.exceptions.NewConnectionError(
+                    connection, f"Failed to establish a new connection: {error}"
+                ) from None
+
+        pool.ConnectionCls = type(base.__name__, (base,), {"_new_conn": _new_conn})
+        return pool
 
 
 def _retry_after(response: requests.Response) -> int | None:
@@ -246,9 +344,9 @@ class _Grant:
     file_name: str | None
 
 
-def _grant(answer: Any, sha256: str) -> _Grant:
+def _grant(answer: Any, sha256: str, loopback_origin: bool) -> _Grant:
     fields = answer if isinstance(answer, dict) else None
-    url = _link(fields.get("url")) if fields else None
+    url = _link(fields.get("url"), loopback_origin) if fields else None
     size = fields.get("size") if fields else None
     if (
         fields is None
@@ -278,14 +376,16 @@ class MediaClient:
     digest part of a recorded value written back with its bytes (``resolve``).
 
     The project key is sent to Hue only; the file itself comes from a short-lived link fetched
-    without it. Created by ``EvaluationClient``; it needs a key that may read recorded content
-    (Read, or Read and write), and a Read and write key for a snapshot's copies.
+    without it. Unless Hue's origin is loopback, that link must be HTTPS to a host whose every
+    address is public. Created by ``EvaluationClient``; it needs a key that may read recorded
+    content (Read, or Read and write), and a Read and write key for a snapshot's copies.
     """
 
     def __init__(self, base_url: str, headers: dict[str, str], timeout_seconds: float) -> None:
         self._base_url = base_url
         self._headers = headers
         self._timeout = timeout_seconds
+        self._loopback_origin = urlsplit(base_url).hostname in _LOOPBACK_HOSTS
 
     def __repr__(self) -> str:
         return "MediaClient()"
@@ -434,7 +534,7 @@ class MediaClient:
                     elif not 200 <= status < 300:
                         raise MediaFetchError("failed", status)
                     else:
-                        return _grant(_answer(response), sha256)
+                        return _grant(_answer(response), sha256, self._loopback_origin)
             except requests.RequestException:
                 if attempt > 0:
                     raise MediaFetchError("failed") from None
@@ -446,25 +546,30 @@ class MediaClient:
     def _download(self, grant: _Grant, sha256: str) -> bytes:
         """The bytes behind a link, fetched without the key, stopped past the reported size and
         checked against the digest. The download ends once no byte has arrived for the client's
-        timeout, at least two minutes; a large file that keeps arriving is never cut off."""
+        timeout, at least two minutes; a large file that keeps arriving is never cut off. From a
+        remote Hue origin the connection goes to the address ``_pinned_address`` checked."""
+        address = None if self._loopback_origin else _pinned_address(grant.url)
         hasher = hashlib.sha256()
         data = bytearray()
         try:
-            with requests.get(
-                grant.url,
-                auth=_no_auth,
-                # A read timeout bounds each wait for bytes, not the whole download.
-                timeout=max(self._timeout, _MIN_DOWNLOAD_IDLE_SECONDS),
-                allow_redirects=False,
-                stream=True,
-            ) as response:
-                if not 200 <= response.status_code < 300:
-                    raise MediaFetchError("failed", response.status_code)
-                for chunk in response.iter_content(chunk_size=65536):
-                    if len(data) + len(chunk) > grant.size:
-                        raise MediaFetchError("digest_mismatch")
-                    hasher.update(chunk)
-                    data += chunk
+            with requests.Session() as session:
+                if address is not None:
+                    session.mount("https://", _PinnedAdapter(address))
+                with session.get(
+                    grant.url,
+                    auth=_no_auth,
+                    # A read timeout bounds each wait for bytes, not the whole download.
+                    timeout=max(self._timeout, _MIN_DOWNLOAD_IDLE_SECONDS),
+                    allow_redirects=False,
+                    stream=True,
+                ) as response:
+                    if not 200 <= response.status_code < 300:
+                        raise MediaFetchError("failed", response.status_code)
+                    for chunk in response.iter_content(chunk_size=65536):
+                        if len(data) + len(chunk) > grant.size:
+                            raise MediaFetchError("digest_mismatch")
+                        hasher.update(chunk)
+                        data += chunk
         except requests.RequestException:
             raise MediaFetchError("failed") from None
         if len(data) != grant.size or hasher.hexdigest() != sha256:
