@@ -41,6 +41,9 @@ refuses to publish a version without a matching entry below.
 - HTTP capture decodes gzip, deflate and br responses before applying the text and size policy,
   so a compressed JSON or text response records `output.value` instead of its size only. The
   application still receives its usual bytes. Undecodable bytes record a truncation marker.
+- `hue world create --files` never reads a file through a symbolic link anywhere in its path,
+  including a directory swapped for a link while the command runs. A `--files` directory that is
+  itself a link is refused, and `--files` runs on Linux and macOS only.
 
 #### Added
 
