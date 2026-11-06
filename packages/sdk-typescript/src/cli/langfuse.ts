@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
-import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
-import { BlockList, isIP } from "node:net";
+import { isIP } from "node:net";
 import { pipeline, Readable, type Transform } from "node:stream";
 import * as zlib from "node:zlib";
 import {
@@ -14,6 +13,9 @@ import {
 import type { Resource } from "@opentelemetry/resources";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import { MAX_CONTENT_BYTES, MAX_FILE_DATA_BYTES, isLoopbackHost } from "../config.js";
+import { isInternalAddress, resolved } from "../upload-target.js";
+
+export { isInternalAddress };
 import {
   BLOBS_KEY,
   MAX_BLOB_ENTRIES,
@@ -695,40 +697,6 @@ export class LangfuseApi {
   }
 }
 
-/** Addresses a media download may not reach: this machine, private networks, link-local
- * (cloud metadata), shared, benchmarking, multicast and reserved ranges. IPv4-mapped IPv6
- * addresses are checked as their IPv4 address. */
-const INTERNAL_ADDRESSES = new BlockList();
-for (const [network, prefix] of [
-  ["0.0.0.0", 8],
-  ["10.0.0.0", 8],
-  ["100.64.0.0", 10],
-  ["127.0.0.0", 8],
-  ["169.254.0.0", 16],
-  ["172.16.0.0", 12],
-  ["192.0.0.0", 24],
-  ["192.168.0.0", 16],
-  ["198.18.0.0", 15],
-  ["224.0.0.0", 3],
-] as const)
-  INTERNAL_ADDRESSES.addSubnet(network, prefix, "ipv4");
-for (const [network, prefix] of [
-  ["::", 128],
-  ["::1", 128],
-  ["64:ff9b::", 96],
-  ["fc00::", 7],
-  ["fe80::", 10],
-  ["fec0::", 10],
-  ["ff00::", 8],
-] as const)
-  INTERNAL_ADDRESSES.addSubnet(network, prefix, "ipv6");
-
-/** Whether an IP address is one {@link INTERNAL_ADDRESSES} holds; false for anything else. */
-export function isInternalAddress(address: string): boolean {
-  const version = isIP(address);
-  return version !== 0 && INTERNAL_ADDRESSES.check(address, version === 4 ? "ipv4" : "ipv6");
-}
-
 /** Whether one media download link may be fetched: `refused` with the reason, or `allowed`, with
  * the public addresses the connection must be pinned to when its host was resolved by name. */
 export type DownloadVerdict =
@@ -850,20 +818,6 @@ export function pinnedDownload(
     );
     request.once("error", reject);
     request.end();
-  });
-}
-
-/** Every address `host` resolves to; rejects once `signal` aborts, since a lookup cannot be
- * cancelled. */
-function resolved(host: string, signal: AbortSignal): Promise<string[]> {
-  return new Promise((resolve, reject) => {
-    const stop = () => reject(new Error("The lookup was abandoned"));
-    if (signal.aborted) return stop();
-    signal.addEventListener("abort", stop, { once: true });
-    lookup(host, { all: true }).then(
-      (entries) => resolve(entries.map((entry) => entry.address)),
-      reject,
-    );
   });
 }
 

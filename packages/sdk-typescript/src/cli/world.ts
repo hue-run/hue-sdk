@@ -6,6 +6,7 @@ import { constants } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
 import { MAX_FILE_DATA_BYTES, isLoopbackHost } from "../config.js";
+import { connectedFetch, uploadConnection } from "../upload-target.js";
 import { sdkVersion } from "../version.js";
 import { createWorldClient, HueWorldError, type WorldClient } from "../world/client.js";
 import {
@@ -452,7 +453,7 @@ async function createWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pr
     url = creation.url;
     ctx.note(`World creation ${creation.id} started${url ? `: ${url}` : ""}`);
     if (groups.size) {
-      await upload(ctx, answer, groups);
+      await upload(ctx, origin, answer, groups);
       creation = creationOf(
         await hueJson(ctx, hue, "POST", `/api/v1/world-creations/${creation.id}/uploaded`),
       );
@@ -786,7 +787,12 @@ async function digest(path: string): Promise<{ byteSize: number; sha256: string 
 }
 
 /** Sends each file Hue asks for to its signed URL. The URLs are capabilities: never printed. */
-async function upload(ctx: Context, answer: JsonObject, groups: Map<string, Upload[]>) {
+async function upload(
+  ctx: Context,
+  origin: string,
+  answer: JsonObject,
+  groups: Map<string, Upload[]>,
+) {
   const asked = Array.isArray(answer.uploads) ? answer.uploads : [];
   for (const entry of asked) {
     if (!isObject(entry) || typeof entry.app !== "string" || typeof entry.file !== "number")
@@ -811,6 +817,16 @@ async function upload(ctx: Context, answer: JsonObject, groups: Map<string, Uplo
     )
       throw new WorldCommandError(`Hue answered an insecure upload URL for ${source.label}`);
     ctx.secrets.push(target.href, target.search);
+    const connection = await uploadConnection(
+      target,
+      origin,
+      AbortSignal.any([ctx.transport.signal, AbortSignal.timeout(UPLOAD_TIMEOUT_MS)]),
+    );
+    if (!connection)
+      throw new WorldCommandError(
+        `Hue answered an upload URL for ${source.label} that is not on ${origin} or not public`,
+      );
+    const { lookup } = connection;
     const headers: Record<string, string> = {};
     if (isObject(entry.uploadHeaders))
       for (const [name, value] of Object.entries(entry.uploadHeaders))
@@ -825,7 +841,13 @@ async function upload(ctx: Context, answer: JsonObject, groups: Map<string, Uplo
         body: new Uint8Array(await source.bytes()),
         timeoutMs: UPLOAD_TIMEOUT_MS,
       },
-      ctx.transport,
+      lookup
+        ? {
+            ...ctx.transport,
+            fetch: ((input, init) =>
+              connectedFetch(String(input), init ?? {}, lookup)) as typeof fetch,
+          }
+        : ctx.transport,
       slowDown,
     );
     if (status < 200 || status >= 300)
