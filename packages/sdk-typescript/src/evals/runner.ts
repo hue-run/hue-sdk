@@ -6,7 +6,7 @@ import { ROOT_CONTEXT } from "@opentelemetry/api";
 import type { HueClient } from "../client.js";
 import { HueExportError } from "../transport.js";
 import type { HueSpan } from "../types.js";
-import { EvaluationClient, HueApiError } from "./client.js";
+import { EvaluationClient, HueApiError, UntrustedCapabilityError } from "./client.js";
 import { loadEnvironmentEvidence } from "./environment-evidence.js";
 import { serviceFailureCause, serviceFailureType } from "./failure.js";
 import { CheckpointStore } from "./checkpoint.js";
@@ -487,7 +487,8 @@ function systemic(error: unknown): boolean {
   return (
     error instanceof HueApiError ||
     error instanceof HueExportError ||
-    error instanceof TargetOutcomeUncertainError
+    error instanceof TargetOutcomeUncertainError ||
+    error instanceof UntrustedCapabilityError
   );
 }
 /** Runs every case, `concurrency` at a time. One case's own failure (an attempt without a saved
@@ -993,7 +994,11 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
                   generated = result.files;
                 } else output = result;
               } catch (error) {
-                if (error instanceof TargetOutcomeUncertainError) throw error;
+                if (
+                  error instanceof TargetOutcomeUncertainError ||
+                  error instanceof UntrustedCapabilityError
+                )
+                  throw error;
                 // A stop the caller asked for is no outcome: the execution stays open for the
                 // resumed run to replace instead of being scored as cancelled.
                 if (error instanceof TargetCancelledError && options.signal?.aborted) {

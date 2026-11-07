@@ -145,6 +145,15 @@ function retryable(method: string, body: unknown, idempotent?: boolean): boolean
   );
 }
 
+/** Hue issued an MCP capability whose URL is not on its own origin. The bearer is never handed to
+ * an agent, and the run stops rather than recording the refusal as the case's own error. */
+export class UntrustedCapabilityError extends Error {
+  constructor() {
+    super("Hue issued an MCP capability outside its origin; the agent was not started");
+    this.name = "UntrustedCapabilityError";
+  }
+}
+
 /** An artifact download that ran past the size its caller expected; the rest is not read. */
 export class ArtifactSizeError extends Error {
   constructor(
@@ -1334,9 +1343,14 @@ export class EvaluationClient {
   getCaseConversion(id: string) {
     return this.request<CaseConversion>("GET", `/case-conversions/${uuid(id)}`);
   }
-  /** Creates the legacy execution-scoped generic MCP capability for one world. */
-  createSimulationMcpCapability(input: { runId: string; executionId: string }) {
-    return this.request<SimulationMcpCapability>(
+  /** Creates the legacy execution-scoped generic MCP capability for one world.
+   *
+   * @throws UntrustedCapabilityError when the capability URL is not on this client's origin. */
+  async createSimulationMcpCapability(input: {
+    runId: string;
+    executionId: string;
+  }): Promise<SimulationMcpCapability> {
+    const capability = await this.request<unknown>(
       "POST",
       "/local-agent-worker/mcp-capability",
       input,
@@ -1344,6 +1358,7 @@ export class EvaluationClient {
       undefined,
       true,
     );
+    return simulationMcpCapability(capability, this.baseUrl);
   }
 }
 /**
@@ -1353,6 +1368,33 @@ export class EvaluationClient {
  */
 export function createEvaluationClient(options: EvaluationClientOptions): EvaluationClient {
   return new EvaluationClient(options);
+}
+
+/** The capability's bearer goes to the agent, which sends it to the URL: only the Hue origin
+ * that issued it may receive it. The agent gets the parsed URL, not the server's text. */
+function simulationMcpCapability(value: unknown, origin: string): SimulationMcpCapability {
+  if (!value || typeof value !== "object") throw new UntrustedCapabilityError();
+  const { url, token, expiresAt } = value as Record<string, unknown>;
+  if (
+    typeof url !== "string" ||
+    url.length > 8192 ||
+    // eslint-disable-next-line no-control-regex -- control characters are rejected deliberately
+    /[\x00-\x20\x7f\\?#]/u.test(url) ||
+    typeof token !== "string" ||
+    // eslint-disable-next-line no-control-regex -- control characters are rejected deliberately
+    !/^[^\x00-\x20\x7f]{1,4096}$/u.test(token) ||
+    typeof expiresAt !== "string"
+  )
+    throw new UntrustedCapabilityError();
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new UntrustedCapabilityError();
+  }
+  if (parsed.origin !== origin || parsed.username || parsed.password)
+    throw new UntrustedCapabilityError();
+  return { url: parsed.href, token, expiresAt };
 }
 
 function signedUploadUrl(value: unknown): string {

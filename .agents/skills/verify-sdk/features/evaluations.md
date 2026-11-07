@@ -86,6 +86,14 @@ sends, so a hostile origin cannot set proxy, loader or Git variables on the spaw
 `uv run --frozen --all-groups pytest tests/test_environment.py -q -k documented_env_carriers`
 from `packages/sdk-python`.
 
+A legacy world (one the simulation gateway does not serve) gets its MCP capability from
+`createSimulationMcpCapability`, which accepts only a URL on the client's own Hue origin, with no
+userinfo, query or fragment, and hands the agent the parsed URL. Anything else throws
+`UntrustedCapabilityError` before the target starts: the runner stops instead of recording a case
+error, and `runLocalAgent` (`hue eval --worker`) exits with it. Run `bun test
+tests/cli-eval.test.ts -t "runs a published case with capture flags"` from
+`packages/sdk-typescript` for the same-origin path the agent still receives.
+
 Run `bun test tests/world-readiness.test.ts tests/world-models.test.ts` from
 `packages/sdk-typescript` and `uv run --frozen --all-groups pytest
 tests/test_world_readiness.py tests/test_world_preparation.py -q` from `packages/sdk-python`
