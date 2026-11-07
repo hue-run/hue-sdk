@@ -493,6 +493,7 @@ export async function runEnvironmentTarget(
         return undefined;
       }
       connectionBundle = validateAttemptConnectionBundleV2(prepared.bundle, {
+        origin: options.client.baseUrl,
         requireFresh: true,
       });
       const projected = projectMcpConnectionV2(

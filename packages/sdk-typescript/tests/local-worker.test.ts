@@ -445,7 +445,7 @@ function fixture(options: {
               ...provider.provider,
               surfaces: provider.provider.surfaces.map((surface) => ({
                 ...surface,
-                endpoint: "https://simulation.invalid/gmail-mcp",
+                endpoint: `https://${url.host}/gmail-mcp`,
                 bearer,
               })),
             },
@@ -593,6 +593,7 @@ function fixture(options: {
   return {
     server,
     baseUrl,
+    mcpEndpoint: `https://127.0.0.1:${server.port}/gmail-mcp`,
     calls,
     worlds,
     experiment,
@@ -858,20 +859,14 @@ describe("local agent worker", () => {
       expect(f.item.metadata).toEqual({ provenance: "evaluator-private" });
       expect(received?.environmentRunId).toBe(received?.connectionBundle?.environmentRunId);
       expect(received?.mcp).toEqual({
-        url: "https://simulation.invalid/gmail-mcp",
+        url: f.mcpEndpoint,
         token: f.bearer,
         expiresAt: f.expiresAt,
       });
       expect(received?.connectionBundle?.parity.actualManifest).toEqual(f.provider.actualManifest);
       expect(process.env.HUE_MCP_URL).toBe(priorMcpUrl);
       const saved = await checkpointContents(directory);
-      for (const secret of [
-        f.bearer,
-        "https://simulation.invalid/gmail-mcp",
-        f.expiresAt,
-        '"connectionBundle"',
-        '"bearer"',
-      ])
+      for (const secret of [f.bearer, f.mcpEndpoint, f.expiresAt, '"connectionBundle"', '"bearer"'])
         expect(saved).not.toContain(secret);
     } finally {
       await hue.shutdown();
