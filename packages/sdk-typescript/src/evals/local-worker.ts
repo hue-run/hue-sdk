@@ -9,7 +9,7 @@ import type {
   AttemptConnectionBundleV2,
   RequestedAttemptProviderV2,
 } from "./attempt.js";
-import { HueApiError, isTransientApiError } from "./client.js";
+import { HueApiError, UntrustedCapabilityError, isTransientApiError } from "./client.js";
 import { HueExportError } from "../transport.js";
 import type { EvaluationClient } from "./client.js";
 import { CheckpointStore, checkpointPath, checkpointSegment } from "./checkpoint.js";
@@ -352,6 +352,13 @@ function resumable(error: unknown, seen = new Set<unknown>()): boolean {
   return error.errors.every((nested: unknown) => resumable(nested, seen));
 }
 
+function untrustedCapability(error: unknown): boolean {
+  return (
+    error instanceof UntrustedCapabilityError ||
+    (error instanceof AggregateError && error.errors.some(untrustedCapability))
+  );
+}
+
 /**
  * Starts an outbound-only worker for one fixed local agent entry point. Hue chooses
  * only the registered key/revision; no command or source is received from the cloud.
@@ -572,6 +579,8 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
         // The run is completed in the queue: a failure after that is the caller's own
         // (`onCompleted` threw) and is thrown as itself, not reported as a retry that cannot be.
         if (queueCompleted || handoffFailed) throw error;
+        // Hue handed a capability for another origin: stop taking work from it.
+        if (untrustedCapability(error)) throw error;
         if (experimentFinished && error instanceof HueApiError && error.status === 409) {
           // The experiment finished, but Hue no longer accepts this worker's completion: the
           // run was released or cancelled meanwhile. Its outcome is recorded; nothing to resume.
