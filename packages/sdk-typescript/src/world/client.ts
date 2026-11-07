@@ -30,6 +30,7 @@ import type {
 } from "./types.js";
 
 import type { PublishableWorldDefinition, WorldVersion } from "./definitions.js";
+import { withinOrigin } from "./world.js";
 
 /** Connection and retry options for {@link createEnvironmentClient}. */
 export interface EnvironmentClientOptions {
@@ -382,7 +383,7 @@ export class WorldClient {
       },
       options,
       true,
-    );
+    ).then((run) => withinOrigin(run, this.baseUrl));
   }
   /** Reads authoritative current or sealed world state. */
   async getRun(runId: string, options: { signal?: AbortSignal } = {}) {

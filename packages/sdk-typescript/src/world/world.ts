@@ -1,7 +1,79 @@
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { EnvironmentRun, LegacyMcpCapability, WorldHandoff, WorldMcpServer } from "./types.js";
+import type {
+  EnvironmentRun,
+  LegacyMcpCapability,
+  WorldHandoff,
+  WorldMcpServer,
+  WorldSurface,
+} from "./types.js";
+
+/** True for an absolute URL on `origin` (a validated Hue origin), with that origin written as
+ * its scheme and authority. Comparing the text as well as the parsed origin keeps a client that
+ * parses URLs differently (userinfo, backslashes, numeric hosts) on the same host. */
+export function isOnOrigin(value: unknown, origin: string): boolean {
+  // eslint-disable-next-line no-control-regex -- control characters are rejected deliberately
+  if (typeof value !== "string" || /[\x00-\x20\x7f\\]/u.test(value)) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.origin !== origin) return false;
+  const pathStart = value.indexOf("/", url.protocol.length + 2);
+  const written = (pathStart === -1 ? value : value.slice(0, pathStart)).toLowerCase();
+  return written === origin || written === `${origin}:${url.protocol === "https:" ? 443 : 80}`;
+}
+
+const URL_CARRIER = /_(?:URL|ALIAS)$/;
+/** A value a client would connect to; such a value must stay on the Hue origin. */
+const CONNECTABLE = /^\s*(?:https?|wss?):/i;
+
+function surfaceOnOrigin(surface: WorldSurface, origin: string): boolean {
+  const endpoints: unknown[] = [surface.url];
+  if (surface.alias != null) endpoints.push(surface.alias);
+  if (surface.connection) {
+    endpoints.push(surface.connection.root?.url);
+    for (const hint of surface.connection.clients ?? [])
+      for (const option of hint.options)
+        if (typeof option.value === "string" && CONNECTABLE.test(option.value))
+          endpoints.push(option.value);
+  }
+  return endpoints.every((endpoint) => isOnOrigin(endpoint, origin));
+}
+
+/**
+ * `run` without the mirrors, MCP servers and URL carriers that leave `origin`, the Hue origin
+ * that answered. The server names them and the agent sends the world token to each, so one
+ * elsewhere (another host, a loopback or private address, another scheme) is never handed on.
+ */
+export function withinOrigin(run: EnvironmentRun, origin: string): EnvironmentRun {
+  const { surfaces, env, mcpConfig } = run;
+  return {
+    ...run,
+    ...(surfaces && { surfaces: surfaces.filter((surface) => surfaceOnOrigin(surface, origin)) }),
+    ...(env && {
+      env: Object.fromEntries(
+        Object.entries(env).filter(
+          ([name, value]) =>
+            !(URL_CARRIER.test(name) || CONNECTABLE.test(String(value))) ||
+            isOnOrigin(value, origin),
+        ),
+      ),
+    }),
+    ...(mcpConfig && {
+      mcpConfig: {
+        mcpServers: Object.fromEntries(
+          Object.entries(mcpConfig.mcpServers).filter(([, server]) =>
+            isOnOrigin(server?.url, origin),
+          ),
+        ),
+      },
+    }),
+  };
+}
 
 /** The environment carriers a world may hand an agent (the handoff's documented `env`): the
  * world's own `HUE_WORLD_*` values, the trace context, and each surface's `HUE_SIM_*` URL, alias

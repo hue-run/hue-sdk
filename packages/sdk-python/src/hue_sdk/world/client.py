@@ -35,6 +35,7 @@ from .types import (
     StepPage,
     WorldEvidenceSection,
 )
+from .world import within_origin
 
 _RETRYABLE = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -490,7 +491,7 @@ class WorldClient:
         ):
             raise ValueError("agent_revision must be 1–256 characters.")
         try:
-            return self._request(
+            run = self._request(
                 "POST",
                 "/environment-runs",
                 {
@@ -510,6 +511,7 @@ class WorldClient:
             raise WorldCreationError(
                 error.status, error.retry_after, error.diagnostic, error.preparation
             ) from None
+        return within_origin(run, self.base_url)
 
     def get_run(self, run_id: str) -> RunState:
         run = self._request("GET", f"/environment-runs/{uuid(run_id)}")

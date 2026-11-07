@@ -17,7 +17,8 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import cast
+from typing import Any, cast
+from urllib.parse import urlsplit
 
 from .types import EnvironmentRun, LegacyMcpCapability, WorldHandoff, WorldMcpConfig, WorldMcpServer
 
@@ -91,6 +92,75 @@ def _has_hue_control_plane_credential(value: str) -> bool:
 _HANDOFF_ENV = re.compile(
     r"^(?:HUE_WORLD_[A-Z0-9_]+|BAGGAGE|TRACEPARENT|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS|TOKEN))$"
 )
+
+
+_UNSAFE_URL_CHARACTER = re.compile(r"[\x00-\x20\x7f\\]")
+_URL_CARRIER = re.compile(r"_(?:URL|ALIAS)$")
+# A value a client would connect to; such a value must stay on the Hue origin.
+_CONNECTABLE = re.compile(r"\s*(?:https?|wss?):", re.IGNORECASE)
+
+
+def _origin(base_url: str) -> str:
+    parsed = urlsplit(base_url)
+    scheme = parsed.scheme.lower()
+    default_port = ":443" if scheme == "https" else ":80"
+    return f"{scheme}://{parsed.netloc.lower().removesuffix(default_port)}"
+
+
+def _on_origin(value: object, origin: str) -> bool:
+    """True for an absolute URL whose scheme and authority, as written, are ``origin`` (a
+    validated Hue origin): no userinfo, backslash or other spelling another parser could read
+    as a different host."""
+    if not isinstance(value, str) or _UNSAFE_URL_CHARACTER.search(value):
+        return False
+    scheme, separator, rest = value.partition("://")
+    if not separator:
+        return False
+    written = f"{scheme}://{rest.split('/', 1)[0]}".lower()
+    default_port = ":443" if scheme.lower() == "https" else ":80"
+    return written in (origin, origin + default_port)
+
+
+def _surface_on_origin(surface: Mapping[str, object], origin: str) -> bool:
+    endpoints: list[object] = [surface.get("url")]
+    if surface.get("alias") is not None:
+        endpoints.append(surface["alias"])
+    connection = cast("Mapping[str, Any] | None", surface.get("connection"))
+    if connection is not None:
+        endpoints.append((connection.get("root") or {}).get("url"))
+        for hint in connection.get("clients") or []:
+            for option in hint.get("options") or []:
+                value = option.get("value")
+                if isinstance(value, str) and _CONNECTABLE.match(value):
+                    endpoints.append(value)
+    return all(_on_origin(endpoint, origin) for endpoint in endpoints)
+
+
+def within_origin(run: EnvironmentRun, base_url: str) -> EnvironmentRun:
+    """``run`` without the mirrors, MCP servers and URL carriers that leave ``base_url``, the Hue
+    origin that answered. The server names them and the agent sends the world token to each, so
+    one elsewhere (another host, a loopback or private address, another scheme) is never handed
+    on."""
+    origin = _origin(base_url)
+    kept = cast("dict[str, Any]", dict(run))
+    if run.get("surfaces"):
+        kept["surfaces"] = [s for s in run["surfaces"] if _surface_on_origin(s, origin)]
+    if run.get("env"):
+        kept["env"] = {
+            name: value
+            for name, value in run["env"].items()
+            if not (_URL_CARRIER.search(name) or _CONNECTABLE.match(str(value)))
+            or _on_origin(value, origin)
+        }
+    if run.get("mcpConfig"):
+        kept["mcpConfig"] = {
+            "mcpServers": {
+                name: server
+                for name, server in run["mcpConfig"]["mcpServers"].items()
+                if _on_origin(server.get("url"), origin)
+            }
+        }
+    return cast("EnvironmentRun", kept)
 
 
 def _http_mcp_config(config: WorldMcpConfig) -> WorldMcpConfig:

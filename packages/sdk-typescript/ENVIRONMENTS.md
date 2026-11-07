@@ -229,7 +229,10 @@ per surface, with a surface's `_ALIAS` or `_TOKEN` where it has one; `worldHando
 other name the server sends, so no response can set proxy, loader or Git variables on a spawned
 agent) and `mcpConfig` (the common `mcpServers` shape with the token in the `Authorization`
 header). The agent is pointed at the mirrors by configuration only: its own Gmail MCP or REST
-client, the mirror URL, the world token where the Google credential went.
+client, the mirror URL, the world token where the Google credential went. `createRun` keeps only
+mirrors on the client's own Hue origin: a surface, MCP server or `*_URL`/`*_ALIAS` carrier naming
+another scheme, host or port (a loopback, private or external address) is dropped before the
+handoff, so the world token is never sent elsewhere.
 
 The world has its own date. A trace-built world's clock is frozen at the recorded start, so a
 run that begins days or months after the recording still finds the recorded emails, events and

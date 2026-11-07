@@ -86,6 +86,16 @@ sends, so a hostile origin cannot set proxy, loader or Git variables on the spaw
 `uv run --frozen --all-groups pytest tests/test_environment.py -q -k documented_env_carriers`
 from `packages/sdk-python`.
 
+`createRun` (`WorldClient`, both SDKs) keeps only mirrors on the client's own Hue origin, written
+as that origin: a surface (URL, alias, connection root or client-hint URL), MCP server or
+`*_URL`/`*_ALIAS` carrier elsewhere is dropped before the handoff, and the legacy
+`createSimulationMcpCapability` refuses a URL off the origin. Run
+`bun test --timeout 20000 tests/world-handoff-origin.test.ts` from `packages/sdk-typescript` and
+`uv run --frozen --all-groups pytest tests/test_world_handoff_origin.py -q` from
+`packages/sdk-python` (both from hue-run/hue-sdk#412): `hue world run`, `hue eval --command` and
+`runEnvironmentTarget` never hand the agent, its environment or `mcp.json` an off-origin URL, and
+the stand-in attacker host receives no request.
+
 Run `bun test tests/world-readiness.test.ts tests/world-models.test.ts` from
 `packages/sdk-typescript` and `uv run --frozen --all-groups pytest
 tests/test_world_readiness.py tests/test_world_preparation.py -q` from `packages/sdk-python`

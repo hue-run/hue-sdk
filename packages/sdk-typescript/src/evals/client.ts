@@ -1,5 +1,6 @@
 import { isLoopbackHost, validateOptions } from "../config.js";
 import type { ProjectConnection } from "../types.js";
+import { isOnOrigin } from "../world/world.js";
 import { json, uuid, valueBounds } from "./json.js";
 import { MediaClient } from "./media.js";
 import {
@@ -1335,8 +1336,8 @@ export class EvaluationClient {
     return this.request<CaseConversion>("GET", `/case-conversions/${uuid(id)}`);
   }
   /** Creates the legacy execution-scoped generic MCP capability for one world. */
-  createSimulationMcpCapability(input: { runId: string; executionId: string }) {
-    return this.request<SimulationMcpCapability>(
+  async createSimulationMcpCapability(input: { runId: string; executionId: string }) {
+    const capability = await this.request<SimulationMcpCapability>(
       "POST",
       "/local-agent-worker/mcp-capability",
       input,
@@ -1344,6 +1345,9 @@ export class EvaluationClient {
       undefined,
       true,
     );
+    // The agent sends the capability's token to its URL, so the URL must stay on this origin.
+    if (!isOnOrigin(capability?.url, this.baseUrl)) throw new HueApiError();
+    return capability;
   }
 }
 /**
