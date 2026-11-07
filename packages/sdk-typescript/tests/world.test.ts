@@ -33,8 +33,9 @@ const executionId = randomUUID();
 const token = `hue_world_${"c".repeat(64)}.${"s".repeat(43)}`;
 /** The world's clock at creation: a recorded start, months from any wall clock. */
 const worldNowText = "2026-03-02T15:00:00.000Z";
-const mirror = "https://app.hue.test/api/sim/gmailmcp.googleapis.com/mcp/v1";
-const rest = "https://app.hue.test/api/sim/gmail.googleapis.com/gmail/v1";
+const hueOrigin = "https://app.hue.test";
+const mirror = `${hueOrigin}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
+const rest = `${hueOrigin}/api/sim/gmail.googleapis.com/gmail/v1`;
 
 /** A create response for a world the gateway serves (docs/environment-contract.md#create). */
 function gatewayRun(overrides: Partial<EnvironmentRun> = {}): EnvironmentRun {
@@ -146,7 +147,11 @@ function worldApi(
       if (path === "/environment-runs" && request.method === "POST") {
         if (options.create) return options.create(body!);
         created ??= gatewayRun({ traceparent: (body!.traceparent as string) ?? null });
-        return Response.json(created, { status: 201 });
+        // A Hue serves the mirrors on its own origin; the client drops any elsewhere.
+        return new Response(JSON.stringify(created).replaceAll(hueOrigin, url.origin), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        });
       }
       if (path.endsWith("/finish")) {
         finished ??= {
@@ -777,7 +782,11 @@ describe("environment target with a gateway world", () => {
     // The agent got the world and its first MCP mirror as `mcp`; no legacy capability was minted
     // and no Hue-native tools were bound for a gateway world.
     expect(seen.world).toMatchObject({ id: runId, token });
-    expect(seen.mcp).toEqual({ url: mirror, token, expiresAt: seen.world!.expiresAt });
+    expect(seen.mcp).toEqual({
+      url: mirror.replace(hueOrigin, api.baseUrl),
+      token,
+      expiresAt: seen.world!.expiresAt,
+    });
     expect(seen.tools).toEqual({});
     expect(api.requests.some((request) => request.path.endsWith("/mcp-capability"))).toBe(false);
     expect(warnings).toEqual([]);
