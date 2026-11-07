@@ -943,7 +943,8 @@ value, sends it to the URL Hue answers and completes it, posts each batch with i
 when Hue confirms every span. It then reconciles and completes the import. Progress is written to
 `progress.json` in the bundle as it goes; running the same command again resumes there, and what
 Hue already holds is not sent twice (a batch sent again after a lost acknowledgement is taken as
-duplicates). Connection failures, timeouts, `408`, `429` and `5xx` answers are retried after 1, 2,
+duplicates). A batch file that no longer matches its digest, or does not inflate to JSON of at most
+3 MiB, fails the upload with `bundle_invalid` before it is sent. Connection failures, timeouts, `408`, `429` and `5xx` answers are retried after 1, 2,
 4, 8, 16 and 30 seconds, waiting for `Retry-After`; after eight retries the command stops and the
 next run resumes. Ctrl+C or `SIGTERM` finishes the requests in flight, saves progress and exits
 `130`; a second signal stops at once.
