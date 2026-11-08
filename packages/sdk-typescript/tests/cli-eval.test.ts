@@ -16,6 +16,7 @@ import { digest as identityDigest } from "../src/evals/json.js";
 import type { CaseVerdict, ExperimentVerdicts } from "../src/evals/verdicts.js";
 import { TargetCancelledError } from "../src/evals.js";
 import { createEvalInvocationInput, type EvalInvocation } from "../src/evals/invocations.js";
+import { trialReport } from "../src/cli/eval-reports.js";
 import type {
   Completion,
   Execution,
@@ -60,6 +61,8 @@ function hueStandIn(
     /** Project id the stand-in reports; a hostile origin may return anything. */
     projectId?: string;
     ciVerdict?: "pass" | "fail" | "incomplete";
+    /** Decide each receipt from the run's answer: pass when it equals the case's expected value. */
+    ciGradeOutput?: boolean;
     ciCreateFailures?: number;
     ciNoReceipt?: boolean;
     ciBuiltin?: boolean;
@@ -201,6 +204,7 @@ function hueStandIn(
     return experiment;
   }
   let invocation: EvalInvocation | undefined;
+  const invocations = new Map<string, EvalInvocation>();
   let baseline: EvalInvocation | undefined;
   const creationRequests: unknown[] = [];
   const baselineRequests: unknown[] = [];
@@ -214,11 +218,14 @@ function hueStandIn(
       calls.requests.push(`${request.method} ${path}`);
       if (request.headers.get("authorization") !== `Bearer ${key}`)
         return new Response(null, { status: 401 });
-      if (path === "/eval-invocations" && request.method === "GET")
-        return invocation ? Response.json({ invocation }) : new Response(null, { status: 404 });
+      if (path === "/eval-invocations" && request.method === "GET") {
+        const found = invocations.get(url.searchParams.get("idempotencyKey") ?? "");
+        return found ? Response.json({ invocation: found }) : new Response(null, { status: 404 });
+      }
       if (path === "/eval-invocations" && request.method === "POST") {
         const body = createEvalInvocationInput.parse(await request.json());
         creationRequests.push(body);
+        invocation = invocations.get(body.idempotencyKey);
         if (!invocation) {
           const experiment = createExperiment({
             name: body.name ?? "CI",
@@ -261,6 +268,7 @@ function hueStandIn(
               baselineRunId: null,
             },
           };
+          invocations.set(body.idempotencyKey, invocation);
         }
         if (creationRequests.length <= (options.ciCreateFailures ?? 0))
           return new Response(null, { status: 503 });
@@ -293,19 +301,44 @@ function hueStandIn(
         const selected =
           baseline && (path.includes(baseline.id) || path.includes(baseline.runId))
             ? baseline
-            : invocation;
+            : ([...invocations.values()].find(
+                (item) => path.includes(item.id) || path.includes(item.runId),
+              ) ?? invocation);
         if (request.method === "POST") {
           selected.state = path.endsWith("/cancel") ? "cancelled" : "finalized";
+          const passed = calls.completions.some(
+            (completion) =>
+              executions.get(String(completion.executionId))?.experimentId === selected.runId &&
+              completion.output === frozenCase.expected,
+          );
           if (!options.ciNoReceipt)
             selected.receipt = {
               id: randomUUID(),
               manifestDigest: selected.manifest.digest,
               runId: selected.runId,
               scoringRunId: selected.manifest.scoringRunId,
-              verdict: selected.state === "cancelled" ? "cancelled" : (options.ciVerdict ?? "pass"),
+              verdict:
+                selected.state === "cancelled"
+                  ? "cancelled"
+                  : options.ciGradeOutput
+                    ? passed
+                      ? "pass"
+                      : "fail"
+                    : (options.ciVerdict ?? "pass"),
               finalizedAt: new Date().toISOString(),
               executionIds: [],
-              results: [],
+              results: options.ciGradeOutput
+                ? [
+                    {
+                      caseId: frozenCase.id,
+                      executionId: randomUUID(),
+                      evaluatorVersionId: scorerVersion.id,
+                      resultId: randomUUID(),
+                      state: "scored",
+                      metrics: [{ name: "refund_recorded", value: passed, passed }],
+                    },
+                  ]
+                : [],
               reasons: [],
             };
         }
@@ -774,6 +807,7 @@ function hueStandIn(
     scenario,
     version,
     scorerVersion,
+    frozenCase,
     experiments,
     worlds,
     creationRequests,
@@ -2876,6 +2910,116 @@ describe("hue eval", () => {
   );
 });
 
+test("trial reports attribute failing receipts to cases and never excuse unexplained failures", () => {
+  const evaluatorVersionId = randomUUID();
+  const [a, b] = [randomUUID(), randomUUID()];
+  const trial = (
+    verdict: "pass" | "fail" | "error",
+    rows: [string, string, number][],
+    pins = [evaluatorVersionId],
+  ): EvalInvocation => ({
+    id: randomUUID(),
+    runId: randomUUID(),
+    runUrl: "https://example.com/run",
+    deadlineAt: "2026-12-01T00:00:00Z",
+    state: "finalized",
+    manifest: {
+      version: 1,
+      digest,
+      evalSetId: randomUUID(),
+      evalSetVersionId: randomUUID(),
+      scoringRunId: randomUUID(),
+      config: {},
+      policy: {
+        thresholds: [{ evaluatorVersionId, metric: "accuracy", operator: "gte", value: 0.9 }],
+      },
+      cases: [a, b].map((caseId) => ({
+        caseId,
+        contentDigest: digest,
+        evaluatorVersionIds: pins,
+        world: null,
+      })),
+      evaluators: [],
+      baselineRunId: null,
+    },
+    receipt: {
+      id: randomUUID(),
+      manifestDigest: digest,
+      runId: randomUUID(),
+      scoringRunId: randomUUID(),
+      verdict,
+      finalizedAt: "2026-11-04T00:00:00Z",
+      executionIds: [],
+      results: rows.map(([caseId, state, accuracy]) => ({
+        caseId,
+        executionId: randomUUID(),
+        evaluatorVersionId,
+        resultId: randomUUID(),
+        state,
+        metrics: [{ name: "accuracy", value: accuracy }],
+      })),
+      reasons: [],
+    },
+  });
+  const report = trialReport(
+    [
+      trial("pass", []),
+      // b misses its threshold; a's not-applicable row neither passes nor fails it.
+      trial("fail", [
+        [a, "scored", 0.95],
+        [a, "not_applicable", 0],
+        [b, "scored", 0.5],
+      ]),
+      // a has an errored result, so this trial cannot decide it.
+      trial("fail", [
+        [a, "error", 0],
+        [b, "scored", 0.2],
+      ]),
+    ],
+    0.5,
+  );
+  const gate = report.receipt as Extract<typeof report.receipt, { kind: "trials" }>;
+  expect(gate.cases.map((item) => item.states)).toEqual([
+    ["passed", "passed", "undecided"],
+    ["passed", "failed", "failed"],
+  ]);
+  expect(gate.cases.map((item) => item.passed)).toEqual([false, false]);
+  expect(report).toMatchObject({ verdict: "fail", exitCode: 1 });
+  // A failing receipt with no failing case result fails the gate even at a zero pass rate.
+  const unexplained = trialReport(
+    [
+      trial("fail", [
+        [a, "scored", 1],
+        [b, "scored", 1],
+      ]),
+    ],
+    0,
+  );
+  expect(unexplained.verdict).toBe("fail");
+  expect((unexplained.receipt as typeof gate).reasons).toEqual([
+    "Trial 1 failed without a failing case result",
+  ]);
+  expect(trialReport([trial("pass", []), trial("error", [])], 0).verdict).toBe("error");
+  // A pinned evaluator with no row leaves a case undecided; a failing row still decides one.
+  const partial = trialReport(
+    [
+      trial(
+        "fail",
+        [
+          [a, "scored", 1],
+          [b, "scored", 0.1],
+        ],
+        [evaluatorVersionId, randomUUID()],
+      ),
+    ],
+    0,
+  );
+  expect((partial.receipt as typeof gate).cases.map((item) => item.states)).toEqual([
+    ["undecided"],
+    ["failed"],
+  ]);
+});
+
 describe("CI invocation CLI", () => {
   test("CI recovers a legacy default-policy checkpoint without a new invocation", async () => {
     const fixture = hueStandIn({ answerOnlyScenario: true });
@@ -3152,6 +3296,17 @@ describe("CI invocation CLI", () => {
         category: "pass",
         exitCode: 0,
       });
+      expect(Object.keys(JSON.parse(result.stdout))).toEqual([
+        "schemaVersion",
+        "invocationId",
+        "runId",
+        "runUrl",
+        "verdict",
+        "receipt",
+        "category",
+        "errors",
+        "exitCode",
+      ]);
     } finally {
       fixture.stop();
       await rm(directory, { recursive: true, force: true });
@@ -3505,6 +3660,209 @@ describe("CI invocation CLI", () => {
     },
     15_000,
   );
+
+  /** An agent whose second run answers wrongly; it counts runs in the project directory. */
+  const flakyAgent = (second: string) => `
+    import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+    const file = process.env.HUE_PROJECT_DIR + '/runs';
+    const run = existsSync(file) ? Number(readFileSync(file, 'utf8')) + 1 : 1;
+    writeFileSync(file, String(run));
+    ${second}
+    console.log(run === 2 ? 'wrong' : 'saved');
+  `;
+
+  test("CI trials gate each case on its pass rate and re-gate saved receipts", async () => {
+    const fixture = hueStandIn({ answerOnlyScenario: true, ciGradeOutput: true });
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-trials-"));
+    try {
+      await writeFile(join(directory, "agent.mjs"), flakyAgent(""));
+      await writeFile(
+        join(directory, "hue.eval.json"),
+        JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: 'node "$HUE_PROJECT_DIR/agent.mjs"',
+          name: "Refunds",
+          trials: 3,
+          scoringTimeoutSeconds: 2,
+        }),
+      );
+      const strict = await hue(["--ci", "--json"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect({ status: strict.status, stderr: strict.stderr }).toEqual({ status: 1, stderr: "" });
+      const report = JSON.parse(strict.stdout);
+      expect(report).toMatchObject({
+        invocationId: null,
+        runId: null,
+        runUrl: null,
+        verdict: "fail",
+        category: "quality_failure",
+        exitCode: 1,
+        receipt: {
+          kind: "trials",
+          verdict: "fail",
+          trials: 3,
+          minPassRate: 1,
+          cases: [
+            {
+              caseId: fixture.frozenCase.id,
+              passes: 2,
+              scored: 3,
+              trials: 3,
+              passed: false,
+              states: ["passed", "failed", "passed"],
+            },
+          ],
+        },
+      });
+      expect(report.receipt.passRate).toBeCloseTo(2 / 3);
+      expect(report.trials.map((trial: { verdict: string }) => trial.verdict)).toEqual([
+        "pass",
+        "fail",
+        "pass",
+      ]);
+      expect(new Set(report.trials.map((trial: { runUrl: string }) => trial.runUrl)).size).toBe(3);
+      expect(fixture.calls.completions.map((completion) => completion.output)).toEqual([
+        "saved",
+        "wrong",
+        "saved",
+      ]);
+      expect(fixture.creationRequests.map((request) => (request as { name: string }).name)).toEqual(
+        ["Refunds · trial 1/3", "Refunds · trial 2/3", "Refunds · trial 3/3"],
+      );
+      const junit = await readFile(join(directory, ".hue/reports/junit.xml"), "utf8");
+      expect(junit).toContain('tests="5" failures="2"');
+      expect(junit).toContain('name="pass rate"');
+      expect(junit).toContain(`name="${fixture.scorerVersion.id} · trial 2"`);
+      expect(await readFile(join(directory, ".hue/reports/summary.md"), "utf8")).toContain(
+        `| ${fixture.frozenCase.id} | 2/3 | fail |`,
+      );
+
+      const lenient = await hue(["--ci", "--min-pass-rate", "0.6"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect(lenient.status).toBe(0);
+      expect(lenient.stderr).toContain("Overall pass rate: 67%");
+      expect(lenient.stderr).toContain(`| ${fixture.frozenCase.id} | 2/3 | pass |`);
+      for (const trial of report.trials)
+        expect(lenient.stderr).toContain(`Trial ${trial.trial}: ${trial.verdict}`);
+      const saved = JSON.parse(
+        await readFile(join(directory, ".hue/reports/results.json"), "utf8"),
+      );
+      expect(saved).toMatchObject({ verdict: "pass", category: "pass", exitCode: 0, errors: [] });
+      expect(saved.receipt).toMatchObject({ verdict: "pass", minPassRate: 0.6, reasons: [] });
+      // Re-gating replays the saved invocations and runs no agent.
+      expect(fixture.calls.completions).toHaveLength(3);
+      expect(fixture.creationRequests.slice(3)).toEqual(fixture.creationRequests.slice(0, 3));
+
+      // A trial created on recovery keeps the deadline the first trial saved.
+      const [checkpoint] = await readdir(join(directory, ".hue/ci"));
+      await rm(join(directory, ".hue/ci", checkpoint!, "request-3.json"));
+      await sleep(5);
+      const recovered = await hue(["--ci", "--json"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect(recovered.status).toBe(1);
+      expect(fixture.calls.completions).toHaveLength(4);
+      const deadlines = fixture.creationRequests.map(
+        (request) => (request as { deadlineAt: string }).deadlineAt,
+      );
+      expect(new Set(deadlines)).toEqual(new Set([deadlines[0]]));
+    } finally {
+      fixture.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("CI trials resume an interrupted invocation without running finished trials again", async () => {
+    const fixture = hueStandIn({ answerOnlyScenario: true, ciGradeOutput: true });
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-trials-resume-"));
+    try {
+      await writeFile(
+        join(directory, "agent.mjs"),
+        flakyAgent(
+          "if (run === 2) { writeFileSync(process.env.HUE_PROJECT_DIR + '/started', ''); await new Promise((done) => setTimeout(done, 30_000)); }",
+        ),
+      );
+      await writeFile(
+        join(directory, "hue.eval.json"),
+        JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: 'node "$HUE_PROJECT_DIR/agent.mjs"',
+          trials: 2,
+          minPassRate: 0.5,
+          scoringTimeoutSeconds: 2,
+        }),
+      );
+      const env = { HUE_BASE_URL: fixture.baseUrl };
+      const interrupted = await hue(["--ci", "--json"], {
+        cwd: directory,
+        env,
+        interruptAfter: { file: join(directory, "started"), times: 1, signal: "SIGTERM" },
+      });
+      expect(interrupted.status).toBe(130);
+      expect(JSON.parse(interrupted.stdout)).toMatchObject({
+        category: "cancelled",
+        receipt: { verdict: "cancelled" },
+        trials: [
+          { trial: 1, verdict: "pass" },
+          { trial: 2, verdict: "cancelled" },
+        ],
+      });
+      const resumed = await hue(["--ci", "--json"], { cwd: directory, env });
+      expect(resumed.status).toBe(1);
+      const report = JSON.parse(resumed.stdout);
+      expect(report.trials.map((trial: { verdict: string }) => trial.verdict)).toEqual([
+        "pass",
+        "cancelled",
+      ]);
+      expect(report.receipt).toMatchObject({
+        verdict: "cancelled",
+        cases: [{ passes: 1, scored: 1, states: ["passed", "undecided"], passed: false }],
+      });
+      expect(fixture.calls.starts).toHaveLength(2);
+      expect(fixture.creationRequests).toHaveLength(4);
+      expect(fixture.creationRequests.slice(2)).toEqual(fixture.creationRequests.slice(0, 2));
+    } finally {
+      fixture.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test.each([
+    [{ trials: 0 }, []],
+    [{ trials: 11 }, []],
+    [{ minPassRate: 1.5 }, []],
+    [{}, ["--trials", "2.5"]],
+    [{}, ["--min-pass-rate", "-0.1"]],
+    [{}, ["--min-pass-rate", ""]],
+  ])("CI rejects trial settings %j %j before contacting Hue", async (config, flags) => {
+    const fixture = hueStandIn();
+    const directory = await mkdtemp(join(tmpdir(), "hue-ci-trials-invalid-"));
+    try {
+      await writeFile(
+        join(directory, "hue.eval.json"),
+        JSON.stringify({
+          evalSetVersionId: fixture.version.id,
+          command: "printf saved",
+          ...config,
+        }),
+      );
+      const result = await hue(["--ci", "--json", ...flags], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect(result.status).toBe(2);
+      expect(JSON.parse(result.stdout).category).toBe("configuration_error");
+      expect(fixture.calls.requests).toEqual([]);
+    } finally {
+      fixture.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
   test("CI invalid configuration writes setup reports", async () => {
     const directory = await mkdtemp(join(tmpdir(), "hue-ci-config-"));

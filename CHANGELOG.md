@@ -8,6 +8,16 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Added
+
+- `hue eval --ci` runs a selection several times with `trials` in `hue.eval.json` or `--trials`
+  (1 to 10, default 1). Each trial is its own Hue run. `minPassRate` or `--min-pass-rate` (default
+  1) sets the share of scored trials each case must pass. With more than one trial, the reports
+  show passes out of trials per case, the overall pass rate and every run URL, and `results.json`
+  carries each trial's receipt. One trial keeps the existing behavior and report fields.
+
 ### [0.27.1] - 2026-11-08
 
 #### Fixed

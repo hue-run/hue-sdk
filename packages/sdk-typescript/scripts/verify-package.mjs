@@ -1428,6 +1428,10 @@ void [transition, event, options, backend];
           '"../node_modules/@hue-run/sdk/dist/cli/eval-direct.js"',
         )
         .replaceAll('"../src/cli/eval.js"', '"../node_modules/@hue-run/sdk/dist/cli/eval.js"')
+        .replaceAll(
+          '"../src/cli/eval-reports.js"',
+          '"../node_modules/@hue-run/sdk/dist/cli/eval-reports.js"',
+        )
         .replaceAll('"../src/cli/listen.js"', '"../node_modules/@hue-run/sdk/dist/cli/listen.js"')
         .replaceAll('"../src/cli/import.js"', '"../node_modules/@hue-run/sdk/dist/cli/import.js"')
         .replaceAll(
