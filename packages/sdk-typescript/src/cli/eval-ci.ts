@@ -17,7 +17,7 @@ import {
   type CreateEvalInvocationInput,
 } from "../evals/invocations.js";
 import { UncertainExecutionError, TargetOutcomeUncertainError } from "../evals/runner.js";
-import { evalReport, trialReport, writeEvalReports } from "./eval-reports.js";
+import { evalReport, trialReport, trialRun, writeEvalReports } from "./eval-reports.js";
 import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
 
 const seconds = z.number().int().positive().max(2_147_483);
@@ -194,6 +194,8 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
   let report = evalReport();
   let invocation: EvalInvocation | undefined;
   let baseline: EvalInvocation | undefined;
+  /** Finished trials when more than one runs, so error reports keep them. */
+  let finished: EvalInvocation[] | undefined;
   let client: EvaluationClient | undefined;
   let store: CheckpointStore | undefined;
   const controller = new AbortController();
@@ -343,7 +345,8 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
         controller.abort(new Error("Deadline exceeded"));
       };
       const localScorers = config.localScorers.map((entry) => resolve(dirname(path), entry));
-      const finished: EvalInvocation[] = [];
+      const done: EvalInvocation[] = [];
+      if (trials > 1) finished = done;
       for (let trial = 1; trial <= trials; trial++) {
         // A single trial keeps the checkpoint keys, idempotency key and name it always had.
         const key = trials > 1 ? `-${trial}` : "";
@@ -363,7 +366,7 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
         }
         if (!request && !invocation) {
           // Later trials pin the eval set and evaluator versions the first trial froze.
-          const first = finished[0]?.manifest;
+          const first = done[0]?.manifest;
           const suffix = ` · trial ${trial}/${trials}`;
           request = createEvalInvocationInput.parse(
             JSON.parse(
@@ -385,7 +388,10 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
                 config: config.config,
                 policy: config.policy,
                 ci,
-                deadlineAt: new Date(startedAt + config.deadlineSeconds * 1000).toISOString(),
+                // Every trial shares the first trial's saved deadline, also after recovery.
+                deadlineAt:
+                  done[0]?.deadlineAt ??
+                  new Date(startedAt + config.deadlineSeconds * 1000).toISOString(),
                 baselineRunId: config.baselineRunId,
               }),
             ),
@@ -448,9 +454,9 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
             controller.signal,
           );
         }
-        finished.push(invocation);
+        done.push(invocation);
       }
-      report = trials > 1 ? trialReport(finished, minPassRate) : evalReport(invocation);
+      report = trials > 1 ? trialReport(done, minPassRate) : evalReport(invocation);
     }
   } catch (error) {
     if (invocation && client && controller.signal.aborted) {
@@ -475,6 +481,11 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
       }
     }
     report = evalReport(invocation);
+    if (finished)
+      report.trials = [
+        ...finished,
+        ...(invocation && !finished.includes(invocation) ? [invocation] : []),
+      ].map(trialRun);
     const auth =
       error instanceof AuthenticationError ||
       (error instanceof HueApiError && [401, 403].includes(error.status ?? 0));

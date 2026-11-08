@@ -2916,6 +2916,7 @@ test("trial reports attribute failing receipts to cases and never excuse unexpla
   const trial = (
     verdict: "pass" | "fail" | "error",
     rows: [string, string, number][],
+    pins = [evaluatorVersionId],
   ): EvalInvocation => ({
     id: randomUUID(),
     runId: randomUUID(),
@@ -2935,7 +2936,7 @@ test("trial reports attribute failing receipts to cases and never excuse unexpla
       cases: [a, b].map((caseId) => ({
         caseId,
         contentDigest: digest,
-        evaluatorVersionIds: [evaluatorVersionId],
+        evaluatorVersionIds: pins,
         world: null,
       })),
       evaluators: [],
@@ -2999,6 +3000,24 @@ test("trial reports attribute failing receipts to cases and never excuse unexpla
     "Trial 1 failed without a failing case result",
   ]);
   expect(trialReport([trial("pass", []), trial("error", [])], 0).verdict).toBe("error");
+  // A pinned evaluator with no row leaves a case undecided; a failing row still decides one.
+  const partial = trialReport(
+    [
+      trial(
+        "fail",
+        [
+          [a, "scored", 1],
+          [b, "scored", 0.1],
+        ],
+        [evaluatorVersionId, randomUUID()],
+      ),
+    ],
+    0,
+  );
+  expect((partial.receipt as typeof gate).cases.map((item) => item.states)).toEqual([
+    ["undecided"],
+    ["failed"],
+  ]);
 });
 
 describe("CI invocation CLI", () => {
@@ -3737,6 +3756,21 @@ describe("CI invocation CLI", () => {
       // Re-gating replays the saved invocations and runs no agent.
       expect(fixture.calls.completions).toHaveLength(3);
       expect(fixture.creationRequests.slice(3)).toEqual(fixture.creationRequests.slice(0, 3));
+
+      // A trial created on recovery keeps the deadline the first trial saved.
+      const [checkpoint] = await readdir(join(directory, ".hue/ci"));
+      await rm(join(directory, ".hue/ci", checkpoint!, "request-3.json"));
+      await sleep(5);
+      const recovered = await hue(["--ci", "--json"], {
+        cwd: directory,
+        env: { HUE_BASE_URL: fixture.baseUrl },
+      });
+      expect(recovered.status).toBe(1);
+      expect(fixture.calls.completions).toHaveLength(4);
+      const deadlines = fixture.creationRequests.map(
+        (request) => (request as { deadlineAt: string }).deadlineAt,
+      );
+      expect(new Set(deadlines)).toEqual(new Set([deadlines[0]]));
     } finally {
       fixture.stop();
       await rm(directory, { recursive: true, force: true });
@@ -3773,6 +3807,10 @@ describe("CI invocation CLI", () => {
       expect(JSON.parse(interrupted.stdout)).toMatchObject({
         category: "cancelled",
         receipt: { verdict: "cancelled" },
+        trials: [
+          { trial: 1, verdict: "pass" },
+          { trial: 2, verdict: "cancelled" },
+        ],
       });
       const resumed = await hue(["--ci", "--json"], { cwd: directory, env });
       expect(resumed.status).toBe(1);

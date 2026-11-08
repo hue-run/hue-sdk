@@ -1462,8 +1462,8 @@ pass. The CLI reads each case's outcome from the trial's receipt:
 
 - In a `pass` receipt, every case passed.
 - In a `fail` receipt, a case failed when one of its scored results has a failing metric or misses
-  a `policy.thresholds` rule. It passed when every result is `scored` or `not_applicable`, at least
-  one is scored, and none fails.
+  a `policy.thresholds` rule. It passed when every pinned evaluator has a result, every result is
+  `scored` or `not_applicable`, at least one is scored, and none fails.
 - Otherwise the trial did not score the case: a missing, pending, errored or inconclusive result,
   or a receipt of `incomplete`, `error` or `cancelled`. As in a single run, such a case fails the
   gate. It counts in neither the passes nor the scored trials.
@@ -1501,7 +1501,9 @@ trials, or null), `reasons`, and `cases`. Each case lists `caseId`, `passes`, `s
 server `receipt`. `junit.xml` adds a `pass rate` test per case, failed when the case misses the
 gate, and names each result test `<evaluator version> · trial <n>`. `summary.md` shows a table of
 passes out of trials per case, the overall pass rate, and every run URL. Without `--json`, the
-CLI prints that summary to stderr.
+CLI prints that summary to stderr. When a later trial is interrupted or errors, the top-level
+fields describe that trial's run, as they would for a single run, and `trials` lists it after the
+finished trials.
 
 Exit codes remain `0` for pass, `1` for failed, errored, or incomplete execution, `2` for
 configuration or authentication errors, and `130` for interruption. `--json` also prints the

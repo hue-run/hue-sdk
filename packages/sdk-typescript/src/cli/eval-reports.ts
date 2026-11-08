@@ -99,8 +99,13 @@ function caseOutcome(invocation: EvalInvocation, caseId: string): TrialCaseState
   if (receipt?.verdict === "pass") return "passed";
   if (receipt?.verdict !== "fail") return "undecided";
   const rows = receipt.results.filter((row) => row.caseId === caseId);
+  const pinned =
+    invocation.manifest.cases.find((item) => item.caseId === caseId)?.evaluatorVersionIds ?? [];
   let failed = false;
-  let undecided = !rows.some((row) => row.state === "scored");
+  // A pinned evaluator without a row leaves the case undecided, never passed.
+  let undecided =
+    !rows.some((row) => row.state === "scored") ||
+    pinned.some((id) => !rows.some((row) => row.evaluatorVersionId === id));
   for (const row of rows) {
     if (row.state === "not_applicable") continue;
     if (row.state !== "scored") {
@@ -118,6 +123,19 @@ function caseOutcome(invocation: EvalInvocation, caseId: string): TrialCaseState
   }
   return failed ? "failed" : undecided ? "undecided" : "passed";
 }
+
+/** One trial's run and server receipt, as `results.json` lists it. */
+export const trialRun = (
+  invocation: EvalInvocation,
+  index: number,
+): NonNullable<EvalReport["trials"]>[number] => ({
+  trial: index + 1,
+  invocationId: invocation.id,
+  runId: invocation.runId,
+  runUrl: invocation.runUrl,
+  verdict: invocation.receipt?.verdict ?? null,
+  receipt: invocation.receipt,
+});
 
 /** Gates several trials of one selection: each case must be decided in every trial and pass at
  * least `minPassRate` of them. A trial without a pass or fail receipt decides the verdict. */
@@ -175,14 +193,7 @@ export function trialReport(invocations: EvalInvocation[], minPassRate: number):
       cases,
       reasons,
     },
-    trials: invocations.map((invocation, index) => ({
-      trial: index + 1,
-      invocationId: invocation.id,
-      runId: invocation.runId,
-      runUrl: invocation.runUrl,
-      verdict: invocation.receipt?.verdict ?? null,
-      receipt: invocation.receipt,
-    })),
+    trials: invocations.map(trialRun),
     category: categoryOf(verdict),
     exitCode: verdict === "pass" ? 0 : 1,
   };
@@ -237,9 +248,12 @@ export async function writeEvalReports(
     `${item.passes}/${item.trials}${item.scored < item.trials ? ` (${item.trials - item.scored} undecided)` : ""}`;
   const junit = `<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="Hue / Evals" tests="${rows.length + cases.length + 1}" failures="${(failed ? 1 : 0) + cases.filter((item) => !item.passed).length}"><testcase name="Hue gate">${failed ? `<failure type="${xml(report.category)}" message="${xml(details || report.category)}"/>` : ""}</testcase>${cases.map((item) => `<testcase classname="${xml(item.caseId)}" name="pass rate"><system-out>${xml(JSON.stringify({ passes: item.passes, scored: item.scored, trials: item.trials, passRate: item.passRate, states: item.states }))}</system-out>${item.passed ? "" : `<failure type="quality_failure" message="${xml(`${passes(item)} trials passed`)}"/>`}</testcase>`).join("")}${rows.map((row) => `<testcase classname="${xml(row.caseId)}" name="${xml(row.name)}"><system-out>${xml(JSON.stringify({ state: row.state, metrics: row.metrics }))}</system-out></testcase>`).join("")}</testsuite>\n`;
   const trials = gate
-    ? `Trials: ${gate.trials}. Minimum pass rate: ${gate.minPassRate}. Overall pass rate: ${gate.passRate === null ? "none" : `${Math.round(gate.passRate * 100)}%`}.\n\n| Case | Passes | Gate |\n| --- | --- | --- |\n${cases.map((item) => `| ${markdown(item.caseId)} | ${passes(item)} | ${item.passed ? "pass" : "fail"} |`).join("\n")}\n\n${runs.map((run) => `- Trial ${run.trial}: ${markdown(run.verdict ?? "No gate receipt")}, ${markdown(run.runUrl)}`).join("\n")}\n\n`
+    ? `Trials: ${gate.trials}. Minimum pass rate: ${gate.minPassRate}. Overall pass rate: ${gate.passRate === null ? "none" : `${Math.round(gate.passRate * 100)}%`}.\n\n| Case | Passes | Gate |\n| --- | --- | --- |\n${cases.map((item) => `| ${markdown(item.caseId)} | ${passes(item)} | ${item.passed ? "pass" : "fail"} |`).join("\n")}\n\n`
     : "";
-  const summary = `# Hue / Evals\n\n${markdown(report.verdict ?? "No gate receipt")} (${report.category})\n\n${trials}${report.runUrl ? `Run: ${markdown(report.runUrl)}\n\n` : ""}${details ? `${markdown(details)}\n\n` : ""}Exit code: ${report.exitCode}\n`;
+  const runList = runs.length
+    ? `${runs.map((run) => `- Trial ${run.trial}: ${markdown(run.verdict ?? "No gate receipt")}, ${markdown(run.runUrl)}`).join("\n")}\n\n`
+    : "";
+  const summary = `# Hue / Evals\n\n${markdown(report.verdict ?? "No gate receipt")} (${report.category})\n\n${trials}${runList}${report.runUrl ? `Run: ${markdown(report.runUrl)}\n\n` : ""}${details ? `${markdown(details)}\n\n` : ""}Exit code: ${report.exitCode}\n`;
   await mkdir(directory, { recursive: true, mode: 0o700 });
   for (const [name, content] of [
     ["results.json", serialized],
