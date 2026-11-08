@@ -973,7 +973,7 @@ export class EvaluationClient {
       false,
     );
     try {
-      return parsePrepareAttemptResultV2(response, request);
+      return parsePrepareAttemptResultV2(response, request, this.baseUrl);
     } catch {
       // A malformed success response may follow a committed decision. Never expose
       // credential-bearing response details or imply that replay is automatically safe.
@@ -994,7 +994,7 @@ export class EvaluationClient {
     previous: AttemptConnectionBundleV2,
     input: { idempotencyKey: string },
   ) {
-    const source = validateAttemptConnectionBundleV2(previous);
+    const source = validateAttemptConnectionBundleV2(previous, { origin: this.baseUrl });
     const response = await this.request<unknown>(
       "POST",
       `/attempt-bindings/${source.bindingId}/refresh`,
@@ -1005,7 +1005,7 @@ export class EvaluationClient {
       { ...valueBounds, bytes: 128_000 },
     );
     try {
-      return parseRefreshedAttemptResultV2(response, source);
+      return parseRefreshedAttemptResultV2(response, source, this.baseUrl);
     } catch {
       throw new HueApiError();
     }
@@ -1335,8 +1335,8 @@ export class EvaluationClient {
     return this.request<CaseConversion>("GET", `/case-conversions/${uuid(id)}`);
   }
   /** Creates the legacy execution-scoped generic MCP capability for one world. */
-  createSimulationMcpCapability(input: { runId: string; executionId: string }) {
-    return this.request<SimulationMcpCapability>(
+  async createSimulationMcpCapability(input: { runId: string; executionId: string }) {
+    const capability = await this.request<SimulationMcpCapability>(
       "POST",
       "/local-agent-worker/mcp-capability",
       input,
@@ -1344,6 +1344,16 @@ export class EvaluationClient {
       undefined,
       true,
     );
+    // The token is presented at the URL, so the URL must be this client's Hue origin, spelled
+    // canonically so no other parser reads another host.
+    let url: URL | undefined;
+    try {
+      url = new URL(capability.url);
+    } catch {
+      throw new HueApiError();
+    }
+    if (url.href !== capability.url || url.origin !== this.baseUrl) throw new HueApiError();
+    return capability;
   }
 }
 /**

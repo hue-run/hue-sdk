@@ -157,7 +157,7 @@ function providerAttemptFixture() {
           surfaces: [
             {
               ...provider.surfaces[0]!,
-              endpoint: `https://simulation.invalid/api/v1/provider-facades/${bindingId}/${randomUUID()}`,
+              endpoint: `${baseUrl}/api/v1/provider-facades/${bindingId}/${randomUUID()}`,
               bearer,
             },
           ],
