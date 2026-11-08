@@ -143,14 +143,19 @@ def test_inherited_grpc_addresses_from_another_world_are_removed():
     production = "grpc.example.test:443"
 
     def world(env):
-        return {
-            "id": str(uuid4()),
-            "token": "synthetic-world-token",
-            "expiresAt": "2026-10-17T12:00:00.000Z",
-            "lifecycle": "live",
-            "env": {"HUE_WORLD_TOKEN": "synthetic-world-token", **env},
-            "mcpConfig": {"mcpServers": {}},
-        }
+        handoff = world_handoff(
+            {
+                "id": str(uuid4()),
+                "token": "synthetic-world-token",
+                "expiresAt": "2026-10-17T12:00:00.000Z",
+                "lifecycle": "live",
+                "env": {"HUE_WORLD_TOKEN": "synthetic-world-token", **env},
+                "mcpConfig": {"mcpServers": {}},
+                "surfaces": [],
+            }
+        )
+        assert handoff is not None
+        return handoff
 
     parent = {
         "PATH": "/usr/bin",
