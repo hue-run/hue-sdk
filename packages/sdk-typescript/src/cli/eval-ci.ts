@@ -17,7 +17,7 @@ import {
   type CreateEvalInvocationInput,
 } from "../evals/invocations.js";
 import { UncertainExecutionError, TargetOutcomeUncertainError } from "../evals/runner.js";
-import { evalReport, writeEvalReports } from "./eval-reports.js";
+import { evalReport, trialReport, writeEvalReports } from "./eval-reports.js";
 import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
 
 const seconds = z.number().int().positive().max(2_147_483);
@@ -41,6 +41,8 @@ export const evalConfig = z
     baselineCommand: z.string().trim().min(1).optional(),
     baselineDirectory: z.string().min(1).optional(),
     localScorers: z.array(z.string().min(1)).default([]),
+    trials: z.number().int().min(1).max(10).default(1),
+    minPassRate: z.number().min(0).max(1).default(1),
   })
   .refine(
     (value) => Number(!!value.evalSetId) + Number(!!value.evalSetVersionId) === 1,
@@ -125,6 +127,8 @@ const USAGE = `Usage: hue eval --ci --config hue.eval.json --report-dir .hue/rep
 --deadline <sec>   Overall deadline (default: config or 900)
 --timeout <sec>    Agent timeout per case (default: config or 600)
 --wait <sec>       Scoring wait (default: config or 300)
+--trials <n>       Runs of the same selection, 1 to 10 (default: config or 1)
+--min-pass-rate <r> Share of scored trials each case must pass, 0 to 1 (default: config or 1)
 --content          Capture trace content (default: config or enabled)
 --no-content       Export trace metadata only
 --no-output        Omit stored case outputs, error messages and scorer explanations
@@ -215,6 +219,8 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
           deadline: { type: "string" },
           timeout: { type: "string" },
           wait: { type: "string" },
+          trials: { type: "string" },
+          "min-pass-rate": { type: "string" },
           content: { type: "boolean" },
           "no-content": { type: "boolean" },
           "no-output": { type: "boolean" },
@@ -285,12 +291,15 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
         ["deadline", "deadlineSeconds"],
         ["timeout", "timeoutSeconds"],
         ["wait", "scoringTimeoutSeconds"],
+        ["trials", "trials"],
+        ["min-pass-rate", "minPassRate"],
       ] as const) {
         const override = values[flag];
-        if (override !== undefined) config[key] = Number(override);
+        // A blank value (an unset shell variable) must not read as a pass rate of 0.
+        if (override !== undefined) config[key] = override.trim() ? Number(override) : Number.NaN;
       }
       if (!evalConfig.safeParse(config).success)
-        throw new ConfigurationError("Invalid concurrency or timeout override");
+        throw new ConfigurationError("Invalid concurrency, timeout or trial override");
       timer = setTimeout(
         () => {
           deadline = true;
@@ -310,7 +319,9 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
       }
       if (config.policy.baselineComparisons?.length && !ci.baseSha)
         throw new ConfigurationError("Baseline comparisons require an intended base commit");
-      const { captureContent, persistResultContent, ...recoveryConfig } = config;
+      // The pass rate only gates saved receipts, so changing it re-gates without running agents.
+      const { captureContent, persistResultContent, trials, minPassRate, ...recoveryConfig } =
+        config;
       const identity = {
         origin: baseUrl,
         // Default policies retain identities written before explicit privacy controls existed.
@@ -318,6 +329,7 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
           ...recoveryConfig,
           ...(!captureContent ? { captureContent } : {}),
           ...(!persistResultContent ? { persistResultContent } : {}),
+          ...(trials > 1 ? { trials } : {}),
         },
         ci,
         ...(ci.provider === "github" ? { job: process.env.GITHUB_JOB ?? "" } : {}),
@@ -325,101 +337,120 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
       const directory = resolve(values["checkpoint-dir"] ?? `.hue/ci/${digest(identity)}`);
       // Project identity is obtained before touching checkpoints to prevent cross-project reuse.
       const project = await client.checkConnection();
-      const idempotencyKey =
-        ci.provider === "github"
-          ? `ci:${digest({ ...identity, projectId: project.id })}`
-          : randomUUID();
       store = await CheckpointStore.acquire(directory, { ...identity, projectId: project.id });
-      let request = await store.read<CreateEvalInvocationInput>("request");
-      if (!request && ci.provider === "github") {
-        try {
-          invocation = await client.getEvalInvocationByKey(idempotencyKey);
-        } catch (error) {
-          if (!(error instanceof HueApiError) || error.status !== 404) throw error;
-        }
-      }
-      if (!request && !invocation) {
-        request = createEvalInvocationInput.parse(
-          JSON.parse(
-            JSON.stringify({
-              idempotencyKey,
-              name: config.name,
-              evalSetId: config.evalSetId,
-              evalSetVersionId: config.evalSetVersionId,
-              evaluatorIds: config.evaluatorIds,
-              evaluatorVersionIds: config.evaluatorVersionIds,
-              config: config.config,
-              policy: config.policy,
-              ci,
-              deadlineAt: new Date(startedAt + config.deadlineSeconds * 1000).toISOString(),
-              baselineRunId: config.baselineRunId,
-            }),
-          ),
-        );
-        await store.write("request", request);
-      }
-      // Recover the invocation before starting the saved deadline, including terminal receipts.
-      if (!invocation) {
-        if (!request) throw new ConfigurationError("Missing invocation creation checkpoint");
-        invocation = await client.createEvalInvocation(request);
-      }
       const abortDeadline = () => {
         deadline = true;
         controller.abort(new Error("Deadline exceeded"));
       };
-      const remaining = Date.parse(invocation.deadlineAt) - Date.now();
-      clearTimeout(timer);
-      if (invocation.state === "active" && !invocation.receipt) {
-        if (remaining <= 0) abortDeadline();
-        else timer = setTimeout(abortDeadline, remaining);
-      }
-      await store.write("invocation", { id: invocation.id, runId: invocation.runId });
-      if (!invocation.receipt && invocation.state === "active") {
-        const localScorers = config.localScorers.map((entry) => resolve(dirname(path), entry));
-        if (config.baselineCommand && baselineDirectory && !invocation.manifest.baselineRunId) {
-          baseline = await client.createEvalBaseline(
-            invocation.id,
-            {
-              idempotencyKey: `${invocation.id}:baseline`,
-              ci: { ...ci, commitSha: baseRevision },
-            },
-            controller.signal,
-          );
-          if (baseline.state === "active" && !baseline.receipt) {
-            await execute({
-              client,
-              connection: { apiKey, baseUrl },
-              invocation: baseline,
-              config: { ...config, command: config.baselineCommand, localScorers },
-              projectDirectory: baselineDirectory,
-              checkpointDirectory: checkpointPath(directory, [baseline.runId, "baseline run id"]),
-              signal: controller.signal,
-            });
-            baseline = await settleInvocation(
-              client,
-              baseline,
-              config.scoringTimeoutSeconds,
-              controller.signal,
-            );
+      const localScorers = config.localScorers.map((entry) => resolve(dirname(path), entry));
+      const finished: EvalInvocation[] = [];
+      for (let trial = 1; trial <= trials; trial++) {
+        // A single trial keeps the checkpoint keys, idempotency key and name it always had.
+        const key = trials > 1 ? `-${trial}` : "";
+        const idempotencyKey =
+          ci.provider === "github"
+            ? `ci:${digest({ ...identity, projectId: project.id, ...(trials > 1 ? { trial } : {}) })}`
+            : randomUUID();
+        invocation = undefined;
+        baseline = undefined;
+        let request = await store.read<CreateEvalInvocationInput>(`request${key}`);
+        if (!request && ci.provider === "github") {
+          try {
+            invocation = await client.getEvalInvocationByKey(idempotencyKey);
+          } catch (error) {
+            if (!(error instanceof HueApiError) || error.status !== 404) throw error;
           }
         }
-        await execute({
-          client,
-          connection: { apiKey, baseUrl },
-          invocation,
-          config: { ...config, localScorers },
-          projectDirectory: dirname(path),
-          checkpointDirectory: checkpointPath(directory, [invocation.runId, "run id"]),
-          signal: controller.signal,
-        });
-        invocation = await settleInvocation(
-          client,
-          invocation,
-          config.scoringTimeoutSeconds,
-          controller.signal,
-        );
+        if (!request && !invocation) {
+          // Later trials pin the eval set and evaluator versions the first trial froze.
+          const first = finished[0]?.manifest;
+          const suffix = ` · trial ${trial}/${trials}`;
+          request = createEvalInvocationInput.parse(
+            JSON.parse(
+              JSON.stringify({
+                idempotencyKey,
+                name:
+                  trials === 1
+                    ? config.name
+                    : config.name
+                      ? config.name.slice(0, 100 - suffix.length) + suffix
+                      : `Trial ${trial}/${trials}`,
+                evalSetId: first ? undefined : config.evalSetId,
+                evalSetVersionId: first?.evalSetVersionId ?? config.evalSetVersionId,
+                evaluatorIds: first ? undefined : config.evaluatorIds,
+                evaluatorVersionIds:
+                  first && config.evaluatorIds
+                    ? first.evaluators.map((evaluator) => evaluator.id)
+                    : config.evaluatorVersionIds,
+                config: config.config,
+                policy: config.policy,
+                ci,
+                deadlineAt: new Date(startedAt + config.deadlineSeconds * 1000).toISOString(),
+                baselineRunId: config.baselineRunId,
+              }),
+            ),
+          );
+          await store.write(`request${key}`, request);
+        }
+        // Recover the invocation before starting the saved deadline, including terminal receipts.
+        if (!invocation) {
+          if (!request) throw new ConfigurationError("Missing invocation creation checkpoint");
+          invocation = await client.createEvalInvocation(request);
+        }
+        const remaining = Date.parse(invocation.deadlineAt) - Date.now();
+        clearTimeout(timer);
+        if (invocation.state === "active" && !invocation.receipt) {
+          if (remaining <= 0) abortDeadline();
+          else timer = setTimeout(abortDeadline, remaining);
+        }
+        await store.write(`invocation${key}`, { id: invocation.id, runId: invocation.runId });
+        if (!invocation.receipt && invocation.state === "active") {
+          if (config.baselineCommand && baselineDirectory && !invocation.manifest.baselineRunId) {
+            baseline = await client.createEvalBaseline(
+              invocation.id,
+              {
+                idempotencyKey: `${invocation.id}:baseline`,
+                ci: { ...ci, commitSha: baseRevision },
+              },
+              controller.signal,
+            );
+            if (baseline.state === "active" && !baseline.receipt) {
+              await execute({
+                client,
+                connection: { apiKey, baseUrl },
+                invocation: baseline,
+                config: { ...config, command: config.baselineCommand, localScorers },
+                projectDirectory: baselineDirectory,
+                checkpointDirectory: checkpointPath(directory, [baseline.runId, "baseline run id"]),
+                signal: controller.signal,
+              });
+              baseline = await settleInvocation(
+                client,
+                baseline,
+                config.scoringTimeoutSeconds,
+                controller.signal,
+              );
+            }
+          }
+          await execute({
+            client,
+            connection: { apiKey, baseUrl },
+            invocation,
+            config: { ...config, localScorers },
+            projectDirectory: dirname(path),
+            checkpointDirectory: checkpointPath(directory, [invocation.runId, "run id"]),
+            signal: controller.signal,
+          });
+          invocation = await settleInvocation(
+            client,
+            invocation,
+            config.scoringTimeoutSeconds,
+            controller.signal,
+          );
+        }
+        finished.push(invocation);
       }
-      report = evalReport(invocation);
+      report = trials > 1 ? trialReport(finished, minPassRate) : evalReport(invocation);
     }
   } catch (error) {
     if (invocation && client && controller.signal.aborted) {
@@ -493,8 +524,9 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
     process.removeListener("SIGTERM", interrupt);
     await store?.release();
   }
-  const serialized = await writeEvalReports(reportDirectory, report);
+  const { json: serialized, summary } = await writeEvalReports(reportDirectory, report);
   if (json) process.stdout.write(serialized);
+  else if (report.trials) process.stderr.write(summary);
   else
     process.stderr.write(
       `${report.verdict ?? report.category}${report.runUrl ? `: ${report.runUrl}` : ""}\n`,

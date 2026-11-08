@@ -1438,6 +1438,50 @@ The overall deadline defaults to 15 minutes, including setup, base execution, ag
 and scoring. Case and scoring timeouts are separate. SIGINT and SIGTERM request durable remote
 cancellation; the saved remote deadline still applies after runner loss.
 
+To gate an agent whose answers vary between runs, set `trials` (an integer from 1 to 10, default
+1) or pass `--trials <n>`. The CLI then runs the selection that many times, one trial after another,
+so at most `concurrency` agent processes run at once. Each trial is an ordinary Hue run with its own
+URL and receipt, named `<name> · trial 2/3` (or `Trial 2/3` without a `name`). Later trials pin the
+eval set version and evaluator versions the first trial froze. With `baselineCommand`, each trial
+executes its own base run. `deadlineSeconds` covers all trials together, so raise it with `trials`.
+
+```json
+{
+  "evalSetId": "00000000-0000-4000-8000-000000000001",
+  "command": "node \"$HUE_PROJECT_DIR/agent.mjs\"",
+  "trials": 3,
+  "minPassRate": 0.6,
+  "deadlineSeconds": 2700
+}
+```
+
+`minPassRate` (or `--min-pass-rate <r>`, from 0 to 1, default 1) sets the share of trials each
+case must pass. A case passes the gate when its passing trials divided by its scored trials meet
+the minimum, and every trial scored it. The default of 1 requires every trial of every case to
+pass. The CLI reads each case's outcome from the trial's receipt:
+
+- In a `pass` receipt, every case passed.
+- In a `fail` receipt, a case failed when one of its scored results has a failing metric or misses
+  a `policy.thresholds` rule. It passed when every result is `scored` or `not_applicable`, at least
+  one is scored, and none fails.
+- Otherwise the trial did not score the case: a missing, pending, errored or inconclusive result,
+  or a receipt of `incomplete`, `error` or `cancelled`. As in a single run, such a case fails the
+  gate. It counts in neither the passes nor the scored trials.
+
+The gate also fails when a trial's `fail` receipt names no failing case, or when a trial fails a
+`baselineComparisons` rule. A trial receipt of `cancelled`, `error` or `incomplete` becomes the
+overall verdict, in that order. With one trial, the server receipt decides, as before, and
+`minPassRate` does not apply.
+
+Trials share one checkpoint directory. Rerunning the same configuration recovers every saved
+trial and starts only the missing ones; a trial that was interrupted keeps its cancelled receipt,
+so the rerun fails until you remove the checkpoint directory. `minPassRate` is not part of that
+identity: rerunning with another `--min-pass-rate` gates the saved receipts again without
+running the agent. Changing `trials` starts a separate group of runs in another checkpoint
+directory; with an explicit `--checkpoint-dir`, the CLI refuses the changed configuration.
+`hue eval status <run-id>` reads one trial's run. The GitHub Action reads
+`trials` and `minPassRate` from `hue.eval.json` and needs no other input.
+
 The report directory contains `results.json`, `junit.xml`, and `summary.md`, including setup and
 authentication errors. JSON has `schemaVersion: 1`, `invocationId`, `runId`, `runUrl`, `verdict`,
 `receipt`, `category`, `errors: [{code, message}]`, and `exitCode`. IDs, URL, verdict, and receipt
@@ -1447,6 +1491,17 @@ are null when unavailable. Without a receipt, `verdict` is always null. Receipt 
 `cancelled`. Reports preserve the server's verdict. Comparison receipts may include
 `baselineRunId`, `baselineReceiptId`, and `comparisons` containing each rule plus
 `candidateMean`, `baselineMean`, `passed`, and `caseIds`.
+
+With more than one trial, `invocationId`, `runId`, and `runUrl` are null, and `verdict` and
+`receipt` hold the CLI's trial gate instead of a server receipt. That `receipt` has
+`kind: "trials"`, `verdict`, `trials`, `minPassRate`, the overall `passRate` (passes over scored
+trials, or null), `reasons`, and `cases`. Each case lists `caseId`, `passes`, `scored`, `trials`,
+`passRate`, `passed`, and one `states` entry per trial (`passed`, `failed`, or `undecided`). A
+`trials` array lists each run's `trial` number, `invocationId`, `runId`, `runUrl`, `verdict`, and
+server `receipt`. `junit.xml` adds a `pass rate` test per case, failed when the case misses the
+gate, and names each result test `<evaluator version> · trial <n>`. `summary.md` shows a table of
+passes out of trials per case, the overall pass rate, and every run URL. Without `--json`, the
+CLI prints that summary to stderr.
 
 Exit codes remain `0` for pass, `1` for failed, errored, or incomplete execution, `2` for
 configuration or authentication errors, and `130` for interruption. `--json` also prints the
