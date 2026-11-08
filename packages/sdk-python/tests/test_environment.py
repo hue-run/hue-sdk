@@ -701,19 +701,12 @@ def test_a_world_that_cannot_be_created_raises_a_world_creation_error(receiver, 
 
 
 def test_inherited_grpc_addresses_from_another_world_are_removed():
-    from hue_sdk.world import agent_environment
-
     production = "photon.production.example:443"
 
     def world(env):
-        return {
-            "id": str(uuid4()),
-            "token": "synthetic-world-token",
-            "expiresAt": "2026-10-17T12:00:00.000Z",
-            "lifecycle": "live",
-            "env": {"HUE_WORLD_TOKEN": "synthetic-world-token", **env},
-            "mcpConfig": {"mcpServers": {}},
-        }
+        handoff = world_handoff(gateway_run(env={"HUE_WORLD_TOKEN": TOKEN, **env}))
+        assert handoff is not None
+        return handoff
 
     parent = {
         "PATH": "/usr/bin",

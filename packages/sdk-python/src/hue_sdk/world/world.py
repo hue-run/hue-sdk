@@ -85,11 +85,11 @@ def _has_hue_control_plane_credential(value: str) -> bool:
 
 # The environment carriers a world may hand an agent (the handoff's documented ``env``): the
 # world's own ``HUE_WORLD_*`` values, the trace context, and each surface's ``HUE_SIM_*`` URL,
-# alias or token. Everything else in the server's map is dropped: a hostile origin must not reach
-# the spawned command through proxy, loader or Git variables that ``agent_environment`` would
-# otherwise copy onto the child beside the parent's credentials.
+# alias, address or token. Everything else in the server's map is dropped: a hostile origin must
+# not reach the spawned command through proxy, loader or Git variables that ``agent_environment``
+# would otherwise copy onto the child beside the parent's credentials.
 _HANDOFF_ENV = re.compile(
-    r"^(?:HUE_WORLD_[A-Z0-9_]+|BAGGAGE|TRACEPARENT|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS|TOKEN))$"
+    r"^(?:HUE_WORLD_[A-Z0-9_]+|BAGGAGE|TRACEPARENT|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS|ADDRESS|TOKEN))$"
 )
 
 

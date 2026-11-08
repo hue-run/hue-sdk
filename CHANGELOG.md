@@ -2072,9 +2072,9 @@ No registry release is claimed until publication and registry acceptance complet
 
 #### Fixed
 
-- Remove inherited `HUE_SIM_*_ADDRESS` variables before handing an agent a World. A World
-  keeps only its own gRPC addresses, including account-specific addresses, while unrelated
-  environment variables remain available.
+- Preserve the current World's `HUE_SIM_*_ADDRESS` variables through handoff and remove
+  inherited addresses before starting an agent. A World keeps only its own gRPC addresses,
+  including account-specific addresses, while unrelated environment variables remain available.
 
 ### [0.15.0] - 2026-11-04
 
