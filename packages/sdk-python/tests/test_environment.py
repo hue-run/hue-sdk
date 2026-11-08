@@ -698,3 +698,37 @@ def test_a_world_that_cannot_be_created_raises_a_world_creation_error(receiver, 
     with pytest.raises(HueEnvironmentError) as other:
         client.finish_run(RUN_ID, idempotency_key="f", status="completed")
     assert type(other.value) is HueEnvironmentError
+
+
+def test_inherited_grpc_addresses_from_another_world_are_removed():
+    production = "photon.production.example:443"
+
+    def world(env):
+        handoff = world_handoff(gateway_run(env={"HUE_WORLD_TOKEN": TOKEN, **env}))
+        assert handoff is not None
+        return handoff
+
+    parent = {
+        "PATH": "/usr/bin",
+        "BIND_ADDRESS": "127.0.0.1:8080",
+        "HUE_SIM_PHOTON_GRPC_ADDRESS": production,
+        "HUE_SIM_ACCOUNT_PERSONAL_PHOTON_GRPC_ADDRESS": production,
+    }
+    # A staging World hands out no address: the production one the runner inherited is gone.
+    staging = agent_environment(world({}), parent=parent)
+    assert "HUE_SIM_PHOTON_GRPC_ADDRESS" not in staging
+    assert "HUE_SIM_ACCOUNT_PERSONAL_PHOTON_GRPC_ADDRESS" not in staging
+    assert staging["BIND_ADDRESS"] == "127.0.0.1:8080"
+    # A World with several lines keeps only its own per-line addresses, not the unqualified one.
+    lines = agent_environment(
+        world({"HUE_SIM_ACCOUNT_SALES_PHOTON_GRPC_ADDRESS": production}), parent=parent
+    )
+    assert lines["HUE_SIM_ACCOUNT_SALES_PHOTON_GRPC_ADDRESS"] == production
+    assert "HUE_SIM_PHOTON_GRPC_ADDRESS" not in lines
+    assert "HUE_SIM_ACCOUNT_PERSONAL_PHOTON_GRPC_ADDRESS" not in lines
+    # A World with one line hands out its own unqualified address.
+    single = agent_environment(
+        world({"HUE_SIM_PHOTON_GRPC_ADDRESS": production}),
+        parent={"HUE_SIM_PHOTON_GRPC_ADDRESS": "stale.example:443"},
+    )
+    assert single["HUE_SIM_PHOTON_GRPC_ADDRESS"] == production

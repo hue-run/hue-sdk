@@ -86,6 +86,11 @@ sends, so a hostile origin cannot set proxy, loader or Git variables on the spaw
 `uv run --frozen --all-groups pytest tests/test_environment.py -q -k documented_env_carriers`
 from `packages/sdk-python`.
 
+Python also accepts `HUE_SIM_*_ADDRESS` carriers for gRPC connections. Run
+`uv run --frozen --all-groups pytest tests/test_environment.py -q -k inherited_grpc` from
+`packages/sdk-python`: the `world_handoff` to `agent_environment` path removes inherited
+addresses and retains only the current World's unqualified or account-specific addresses.
+
 Run `bun test tests/world-readiness.test.ts tests/world-models.test.ts` from
 `packages/sdk-typescript` and `uv run --frozen --all-groups pytest
 tests/test_world_readiness.py tests/test_world_preparation.py -q` from `packages/sdk-python`

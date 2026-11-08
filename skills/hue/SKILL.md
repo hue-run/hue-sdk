@@ -62,10 +62,10 @@ npm install --save-exact @hue-run/sdk@0.27.0
 
 ```sh
 # Python: use the application's existing Python environment.
-python -m pip install hue-run==0.15.0
+python -m pip install hue-run==0.15.1
 ```
 
-Adapt the command to the app's package manager, for example `uv add hue-run==0.15.0`. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If a package is unavailable or a credential is missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or release.
+Adapt the command to the app's package manager, for example `uv add hue-run==0.15.1`. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If a package is unavailable or a credential is missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or release.
 
 The development key is a **Read and write** project key in `HUE_API_KEY`, configured through the application's existing secret workflow. Before the application runs on a production server, tell the user to create a separate **Read and write** key for that server's `HUE_API_KEY`, which the code reads unchanged. Read the key from the environment; never put it in browser code, fixtures, committed files or logs.
 
