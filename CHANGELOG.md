@@ -2068,6 +2068,13 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
+### [0.15.1] - 2026-11-08
+
+#### Fixed
+
+- Clear inherited gRPC addresses before applying a World handoff, including account-specific
+  addresses. Addresses supplied by the new World and unrelated process variables are preserved.
+
 ### [0.15.0] - 2026-11-04
 
 #### Breaking

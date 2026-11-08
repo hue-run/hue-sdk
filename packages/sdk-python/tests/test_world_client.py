@@ -135,3 +135,44 @@ def test_model_cursors_are_opaque_and_cannot_add_query_parameters(receiver):
     client = WorldModelClient(api_key="synthetic-world-key", base_url=receiver.url)
     assert client.list_models(after=cursor, limit=20)["items"] == []
     assert parse_qs(urlsplit(receiver.requests[0][0]).query) == {"after": [cursor], "limit": ["20"]}
+
+
+def test_inherited_grpc_addresses_from_another_world_are_removed():
+    from hue_sdk.world import agent_environment
+
+    production = "grpc.example.test:443"
+
+    def world(env):
+        return {
+            "id": str(uuid4()),
+            "token": "synthetic-world-token",
+            "expiresAt": "2026-10-17T12:00:00.000Z",
+            "lifecycle": "live",
+            "env": {"HUE_WORLD_TOKEN": "synthetic-world-token", **env},
+            "mcpConfig": {"mcpServers": {}},
+        }
+
+    parent = {
+        "PATH": "/usr/bin",
+        "BIND_ADDRESS": "127.0.0.1:8080",
+        "HUE_SIM_PHOTON_GRPC_ADDRESS": production,
+        "HUE_SIM_ACCOUNT_PERSONAL_PHOTON_GRPC_ADDRESS": production,
+    }
+    # A staging World hands out no address: the production one the runner inherited is gone.
+    staging = agent_environment(world({}), parent=parent)
+    assert "HUE_SIM_PHOTON_GRPC_ADDRESS" not in staging
+    assert "HUE_SIM_ACCOUNT_PERSONAL_PHOTON_GRPC_ADDRESS" not in staging
+    assert staging["BIND_ADDRESS"] == "127.0.0.1:8080"
+    # A World with several lines keeps only its own per-line addresses, not the unqualified one.
+    lines = agent_environment(
+        world({"HUE_SIM_ACCOUNT_SALES_PHOTON_GRPC_ADDRESS": production}), parent=parent
+    )
+    assert lines["HUE_SIM_ACCOUNT_SALES_PHOTON_GRPC_ADDRESS"] == production
+    assert "HUE_SIM_PHOTON_GRPC_ADDRESS" not in lines
+    assert "HUE_SIM_ACCOUNT_PERSONAL_PHOTON_GRPC_ADDRESS" not in lines
+    # A World with one line hands out its own unqualified address.
+    single = agent_environment(
+        world({"HUE_SIM_PHOTON_GRPC_ADDRESS": production}),
+        parent={"HUE_SIM_PHOTON_GRPC_ADDRESS": "stale.example:443"},
+    )
+    assert single["HUE_SIM_PHOTON_GRPC_ADDRESS"] == production

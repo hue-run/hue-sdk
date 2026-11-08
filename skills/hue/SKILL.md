@@ -62,7 +62,7 @@ npm install --save-exact @hue-run/sdk@0.27.0
 
 ```sh
 # Python: use the application's existing Python environment.
-python -m pip install hue-run==0.15.0
+python -m pip install hue-run==0.15.1
 ```
 
 Adapt the command to the app's package manager, for example `uv add hue-run==0.15.0`. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If a package is unavailable or a credential is missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or release.

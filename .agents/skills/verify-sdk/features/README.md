@@ -39,3 +39,7 @@ World preparation uses an explicit server diagnostic and a two-minute deadline. 
 ordinary error limits, cancellation during sleep and active HTTP reads, and fresh materialization
 identities. The installed-package verifier and Python wheel test run these same loopback checks
 against the packed code. These checks do not establish hosted reconstruction or release status.
+
+`packages/sdk-python/tests/test_world_client.py::test_inherited_grpc_addresses_from_another_world_are_removed`
+checks that a child drops stale unqualified and account-specific gRPC addresses, preserves the new
+World's addresses, and keeps unrelated process variables. Run it against an installed wheel.
