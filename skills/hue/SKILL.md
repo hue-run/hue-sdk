@@ -57,7 +57,7 @@ Install the exact version below, which [Install the SDK](https://docs.hue.run/qu
 
 ```sh
 # TypeScript: run in the application directory.
-npm install --save-exact @hue-run/sdk@0.27.0
+npm install --save-exact @hue-run/sdk@0.27.1
 ```
 
 ```sh

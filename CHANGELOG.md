@@ -8,6 +8,19 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.27.1] - 2026-11-08
+
+#### Fixed
+
+- Preserve the current World's `HUE_SIM_*_ADDRESS` variables through `worldHandoff` and remove
+  inherited addresses in `agentEnvironment`, so an agent started by `hue world run` or `hue eval`
+  receives the World's own gRPC addresses, including account-specific addresses, and never a
+  stale one from the parent environment. Unrelated environment variables remain available.
+- `hue world create` prints an import's users as `Users: <total>` with one line per app account
+  and its states, and its readings as `Readings: <n>` with each reading, in place of
+  `slack ?: 6` and `readings: 0`. Readings left out of a bounded report are counted and shown
+  as `... and N more`.
+
 ### [0.27.0] - 2026-11-04
 
 #### Breaking
