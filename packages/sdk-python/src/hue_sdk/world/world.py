@@ -134,7 +134,7 @@ def world_handoff(run: EnvironmentRun) -> WorldHandoff | None:
 # would send this world's token to a mirror this world does not have, or date an agent by an
 # earlier world's clock. The whole ``HUE_WORLD_`` prefix is the world's.
 _WORLD_SCOPED = re.compile(
-    r"^(?:HUE_WORLD_[A-Z0-9_]+|HUE_MCP_(?:CONFIG|URL|TOKEN|EXPIRES_AT)|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS|TOKEN))$"
+    r"^(?:HUE_WORLD_[A-Z0-9_]+|HUE_MCP_(?:CONFIG|URL|TOKEN|EXPIRES_AT)|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS|ADDRESS|TOKEN))$"
 )
 
 

@@ -2068,6 +2068,14 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
+### [0.15.1] - 2026-11-08
+
+#### Fixed
+
+- Remove inherited `HUE_SIM_*_ADDRESS` variables before handing an agent a World. A World
+  keeps only its own gRPC addresses, including account-specific addresses, while unrelated
+  environment variables remain available.
+
 ### [0.15.0] - 2026-11-04
 
 #### Breaking

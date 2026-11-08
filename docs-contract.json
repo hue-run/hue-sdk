@@ -224,7 +224,7 @@
         }
       },
       "name": "hue-run",
-      "version": "0.15.0"
+      "version": "0.15.1"
     },
     "typescript": {
       "bins": {
@@ -784,7 +784,7 @@
       "version": "0.8.28"
     },
     "name": "hue",
-    "sha256": "sha256:64bc3e978c3a5798f54cc2c492f33e129adc3f4257f499e7d603587ad0e5e872",
+    "sha256": "sha256:f133436d501b0f9557a3aa8948c80f386e28929dd4a914f61659359907e8ebc9",
     "source": "skills/hue/SKILL.md"
   }
 }
