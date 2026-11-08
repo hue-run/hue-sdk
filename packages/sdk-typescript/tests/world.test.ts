@@ -282,6 +282,39 @@ describe("world handoff helpers", () => {
       expect(child).not.toHaveProperty(name);
   });
 
+  test("inherited gRPC addresses from another world are removed", () => {
+    const production = "photon.production.example:443";
+    const world = (env: Record<string, string>): WorldHandoff => {
+      const run = gatewayRun();
+      run.env = { ...run.env, ...env };
+      return worldHandoff(run)!;
+    };
+    const parent = {
+      PATH: "/usr/bin",
+      BIND_ADDRESS: "127.0.0.1:8080",
+      HUE_SIM_PHOTON_GRPC_ADDRESS: production,
+      HUE_SIM_ACCOUNT_PERSONAL_PHOTON_GRPC_ADDRESS: production,
+    };
+    // A staging world hands out no address: the production one the runner inherited is gone.
+    const staging = agentEnvironment(world({}), { parent });
+    expect(staging).not.toHaveProperty("HUE_SIM_PHOTON_GRPC_ADDRESS");
+    expect(staging).not.toHaveProperty("HUE_SIM_ACCOUNT_PERSONAL_PHOTON_GRPC_ADDRESS");
+    expect(staging.BIND_ADDRESS).toBe("127.0.0.1:8080");
+    // A world with several lines keeps only its own per-line addresses, not the unqualified one.
+    const lines = agentEnvironment(
+      world({ HUE_SIM_ACCOUNT_SALES_PHOTON_GRPC_ADDRESS: production }),
+      { parent },
+    );
+    expect(lines.HUE_SIM_ACCOUNT_SALES_PHOTON_GRPC_ADDRESS).toBe(production);
+    expect(lines).not.toHaveProperty("HUE_SIM_PHOTON_GRPC_ADDRESS");
+    expect(lines).not.toHaveProperty("HUE_SIM_ACCOUNT_PERSONAL_PHOTON_GRPC_ADDRESS");
+    // A world with one line hands out its own unqualified address.
+    const single = agentEnvironment(world({ HUE_SIM_PHOTON_GRPC_ADDRESS: production }), {
+      parent: { HUE_SIM_PHOTON_GRPC_ADDRESS: "stale.example:443" },
+    });
+    expect(single.HUE_SIM_PHOTON_GRPC_ADDRESS).toBe(production);
+  });
+
   test("a surface's connection reaches the handoff as the World API states it", () => {
     const connection = {
       replaces: "https://gmail.googleapis.com/gmail/v1",

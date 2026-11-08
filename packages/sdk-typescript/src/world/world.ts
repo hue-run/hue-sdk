@@ -4,12 +4,12 @@ import { join } from "node:path";
 import type { EnvironmentRun, LegacyMcpCapability, WorldHandoff, WorldMcpServer } from "./types.js";
 
 /** The environment carriers a world may hand an agent (the handoff's documented `env`): the
- * world's own `HUE_WORLD_*` values, the trace context, and each surface's `HUE_SIM_*` URL, alias
- * or token. Everything else in the server's map is dropped: a hostile origin must not reach the
- * spawned command through proxy, loader or Git variables that `agentEnvironment` would otherwise
- * copy onto the child beside the parent's credentials. */
+ * world's own `HUE_WORLD_*` values, the trace context, and each surface's `HUE_SIM_*` URL, alias,
+ * address or token. Everything else in the server's map is dropped: a hostile origin must not
+ * reach the spawned command through proxy, loader or Git variables that `agentEnvironment` would
+ * otherwise copy onto the child beside the parent's credentials. */
 const HANDOFF_ENV =
-  /^(?:HUE_WORLD_[A-Z0-9_]+|BAGGAGE|TRACEPARENT|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS|TOKEN))$/;
+  /^(?:HUE_WORLD_[A-Z0-9_]+|BAGGAGE|TRACEPARENT|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS|ADDRESS|TOKEN))$/;
 
 /**
  * The world an agent acts on through provider mirrors, read from a create or replay response.
@@ -159,7 +159,7 @@ export interface AgentEnvironmentOptions {
  * would send this world's token to a mirror this world does not have. The whole `HUE_WORLD_`
  * prefix is the world's. */
 const WORLD_SCOPED =
-  /^(?:HUE_WORLD_[A-Z0-9_]+|HUE_MCP_(?:CONFIG|URL|TOKEN|EXPIRES_AT)|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS|TOKEN))$/;
+  /^(?:HUE_WORLD_[A-Z0-9_]+|HUE_MCP_(?:CONFIG|URL|TOKEN|EXPIRES_AT)|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS|ADDRESS|TOKEN))$/;
 
 /** `environment` without any variable a world or its server owns. */
 export function withoutWorldVariables(environment: Record<string, string>): Record<string, string> {
