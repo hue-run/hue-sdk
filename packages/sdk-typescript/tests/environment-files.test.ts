@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { createHue } from "../src/index.js";
 import { createEnvironmentClient } from "../src/environment.js";
 import {
@@ -66,6 +66,8 @@ function platform(
     scorer?: LocalScorer;
     /** Refuse this many generated-artifact completions with 500 first. */
     failArtifactCompletions?: number;
+    /** Extra MCP headers on the world handoff, beside the bearer. */
+    mcpHeaders?: Record<string, string>;
   } = {},
 ) {
   const projectId = randomUUID();
@@ -427,7 +429,10 @@ function platform(
               "gmail-primary": {
                 type: "http",
                 url: mirror,
-                headers: { Authorization: `Bearer ${worldToken}` },
+                headers: {
+                  Authorization: `Bearer ${worldToken}`,
+                  ...options.mcpHeaders,
+                },
               },
             },
           },
@@ -621,6 +626,37 @@ async function tree(directory: string): Promise<{ path: string; text: string }[]
 }
 
 const mode = async (path: string) => (await stat(path)).mode & 0o777;
+/** Obvious stand-in for an MCP header value. Not a credential this repository ships. */
+const headerValue = "placeholder-mcp-header";
+
+/** Files under `directory` whose bytes contain one of `needles`. */
+async function pathsHolding(directory: string, needles: string[]): Promise<string[]> {
+  if (!existsSync(directory)) return [];
+  const found: string[] = [];
+  for (const entry of await readdir(directory, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const path = join(entry.parentPath, entry.name);
+    // The agent's own output directory is what it wrote. The copy staged for upload is `outputs/`.
+    if (!path.includes(`${sep}outputs${sep}`)) continue;
+    const bytes = await readFile(path);
+    if (needles.some((needle) => bytes.includes(needle))) found.push(path);
+  }
+  return found;
+}
+
+/** Uploaded artifact names whose bytes contain one of `needles`. */
+function artifactsHolding(
+  artifacts: Map<string, { filename: string; bytes?: Uint8Array }>,
+  needles: string[],
+): string[] {
+  const found: string[] = [];
+  for (const stored of artifacts.values()) {
+    if (!stored.bytes) continue;
+    const bytes = Buffer.from(stored.bytes);
+    if (needles.some((needle) => bytes.includes(needle))) found.push(stored.filename);
+  }
+  return found;
+}
 
 function worker(
   f: ReturnType<typeof platform>,
@@ -1414,4 +1450,129 @@ describe("hue eval with a world case that carries files", () => {
       f.stop();
     }
   }, 60_000);
+
+  test("a world command's stored files do not keep credentials from non-text or invalid UTF-8 outputs", async () => {
+    const f = platform({ mcpHeaders: { "X-Hue-Canary": headerValue } });
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-environment-files-redact-"));
+    const checkpoint = join(cwd, "checkpoints");
+    await writeFile(
+      join(cwd, "agent.mjs"),
+      `import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const out = process.env.HUE_CASE_OUTPUT_DIR;
+const token = process.env.HUE_WORLD_TOKEN;
+const config = JSON.parse(readFileSync(process.env.HUE_MCP_CONFIG, "utf8"));
+const header = config.mcpServers["gmail-primary"].headers.Authorization;
+const extra = config.mcpServers["gmail-primary"].headers["X-Hue-Canary"];
+const apiKey = process.env.HUE_API_KEY;
+if (!token || !header || !extra || !apiKey) throw new Error("case credentials were not handed to the command");
+const embed = (name, value) => writeFileSync(join(out, name), Buffer.concat([
+  Buffer.from("prefix:"),
+  Buffer.from(value),
+  Buffer.from(":suffix"),
+]));
+embed("leak.png", token);
+embed("leak.pdf", header);
+embed("leak.docx", extra);
+embed("leak.jpg", token);
+embed("clip.mp4", token);
+embed("key.png", apiKey);
+writeFileSync(join(out, "manifest.json"), JSON.stringify({
+  contentTypes: { "clip.mp4": "video/mp4" },
+}));
+writeFileSync(join(out, "notes.txt"), "seen " + token + "\\n");
+writeFileSync(join(out, "rows.csv"), Buffer.concat([Buffer.from([0xff]), Buffer.from(token)]));
+writeFileSync(join(out, "latin1.txt"), Buffer.concat([Buffer.from([0xff]), Buffer.from(header)]));
+writeFileSync(join(out, "broken.json"), Buffer.concat([Buffer.from([0xff]), Buffer.from(extra)]));
+writeFileSync(join(out, "ok.json"), JSON.stringify({ token }));
+process.stdout.write(JSON.stringify({ ok: true }));
+`,
+    );
+    const needles = [worldToken, `Bearer ${worldToken}`, headerValue, key];
+    try {
+      const run = await hue(
+        [
+          "--dataset-version",
+          f.version.id,
+          "--scorer-version",
+          f.worldOutcome.id,
+          "--command",
+          `${process.execPath} ${join(cwd, "agent.mjs")}`,
+          "--allow-hue-credentials",
+          "--checkpoint-dir",
+          checkpoint,
+          "--json",
+          "--wait",
+          "20",
+        ],
+        { cwd, env: { HUE_BASE_URL: f.baseUrl } },
+      );
+      const stored = [
+        ...artifactsHolding(f.artifacts, needles).map((name) => `artifact ${name}`),
+        ...(await pathsHolding(checkpoint, needles)),
+      ];
+      const reported = `${run.stdout}\n${run.stderr}\n${JSON.stringify(f.calls.completions)}`;
+      for (const needle of needles) if (reported.includes(needle)) stored.push("completion or log");
+      expect(stored).toEqual([]);
+    } finally {
+      f.stop();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  test("an adapter's path-based outputs do not keep the world token or MCP header", async () => {
+    const f = platform({ mcpHeaders: { "X-Hue-Canary": headerValue } });
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-environment-files-path-"));
+    const checkpoint = join(cwd, "checkpoints");
+    await writeFile(
+      join(cwd, "agent.mjs"),
+      `import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { withFiles } from ${JSON.stringify(evalsModule)};
+export default async function (_inputs, context) {
+  const token = context.world.token;
+  const header = context.world.mcpConfig.mcpServers["gmail-primary"].headers.Authorization;
+  const extra = context.world.mcpConfig.mcpServers["gmail-primary"].headers["X-Hue-Canary"];
+  const mcpToken = context.mcp.token;
+  if (!token || !header || !extra || !mcpToken) throw new Error("case credentials were not on the adapter context");
+  const png = join(context.outputDirectory, "held.png");
+  const txt = join(context.outputDirectory, "held.txt");
+  writeFileSync(png, Buffer.concat([Buffer.from("prefix:"), Buffer.from(token), Buffer.from(":suffix")]));
+  writeFileSync(txt, "mcp " + mcpToken + " header " + header + " extra " + extra);
+  return withFiles({ summary: "done" }, [
+    { path: png, filename: "held.png", contentType: "image/png" },
+    { path: txt, filename: "held.txt", contentType: "text/plain" },
+  ]);
+}
+`,
+    );
+    const needles = [worldToken, `Bearer ${worldToken}`, headerValue];
+    try {
+      const run = await hue(
+        [
+          "--dataset-version",
+          f.version.id,
+          "--scorer-version",
+          f.worldOutcome.id,
+          join(cwd, "agent.mjs"),
+          "--checkpoint-dir",
+          checkpoint,
+          "--json",
+          "--wait",
+          "20",
+        ],
+        { cwd, env: { HUE_BASE_URL: f.baseUrl } },
+      );
+      const stored = [
+        ...artifactsHolding(f.artifacts, needles).map((name) => `artifact ${name}`),
+        ...(await pathsHolding(checkpoint, needles)),
+      ];
+      const reported = `${run.stdout}\n${run.stderr}\n${JSON.stringify(f.calls.completions)}`;
+      for (const needle of needles) if (reported.includes(needle)) stored.push("completion or log");
+      expect(stored).toEqual([]);
+    } finally {
+      f.stop();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 120_000);
 });
