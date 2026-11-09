@@ -154,13 +154,23 @@ export interface EvalSetVersionRun {
   judgeVersionIdsLeftOut: string[];
   /** Cases whose checks no single outcome evaluator was chosen for, with the candidates. */
   outcomeGaps: {
+    /** `world` checks need a case-outcome evaluator; `answer` checks the shared answer one. */
     grading: "world" | "answer";
+    /** Cases whose checks it leaves ungraded. */
     cases: number;
+    /** `none`: no evaluator could grade them; `several`: more than one could; `stale`: only
+     * ones on an older entry could. */
     reason: "none" | "several" | "stale";
+    /** Evaluator versions to choose from with `--scorer-version`, newest first. */
     candidates: string[];
   }[];
   /** Judge slugs cases name that the project has no evaluator for. */
-  unresolvedJudges: { slug: string; cases: number }[];
+  unresolvedJudges: {
+    /** The judge slug a case's criteria name. */
+    slug: string;
+    /** Cases that name it. */
+    cases: number;
+  }[];
 }
 /** A case's frozen World model selection: Hue prepares its runtime World at execution. */
 export interface WorldModelReference {
