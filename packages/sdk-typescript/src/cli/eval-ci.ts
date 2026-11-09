@@ -349,6 +349,8 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
           ...(!captureContent ? { captureContent } : {}),
           ...(!persistResultContent ? { persistResultContent } : {}),
           ...(trials > 1 ? { trials } : {}),
+          // The default stays out of the identity, so rerunning a job after an upgrade
+          // recovers its invocation instead of starting another one.
           ...(turns !== "hue" ? { turns } : {}),
         },
         ci,

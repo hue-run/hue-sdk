@@ -1022,7 +1022,10 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
                 }
                 state = error instanceof TargetCancelledError ? "cancelled" : "error";
                 targetError = error;
-                if (thrown instanceof TargetErrorWithOutput) output = thrown.output;
+                // Kept only when outputs are stored: a resume could not restore one held in
+                // memory alone, and a failed case has no other use for it.
+                if (thrown instanceof TargetErrorWithOutput && options.persistResultContent)
+                  output = thrown.output;
                 options.hue.recordError(span.span, error);
               }
               // Output validation is outside the target catch: a successful target never becomes an agent error because upload serialization failed.

@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { access, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -51,7 +51,7 @@ import {
   resolveScenarioPins,
   type ScenarioPins,
 } from "../evals/scenarios.js";
-import { collectDirectOutputs, stageDirectCase } from "./eval-direct.js";
+import { collectDirectOutputs, stageDirectCase, type DirectCaseLayout } from "./eval-direct.js";
 import { caseTraceparent, runEnvironmentTarget } from "../evals/environment-target.js";
 import {
   runSimulation,
@@ -793,32 +793,46 @@ function parentEnvironment(allowHueCredentials: boolean): Record<string, string>
 
 /**
  * The command's answer for a case: one call with the case's inputs or, for a conversation case
- * whose turns `hue eval` drives, one call per scripted message and `{ replies }`. Each turn's
- * inputs are also written to `HUE_CASE_INPUTS`, so the file always matches stdin.
+ * whose turns `hue eval` drives, one call per scripted message. A conversation's answer is
+ * `{ replies }`, each reply the call's stdout, whatever helper files in `output/` say; its
+ * generated documents still upload. Each turn's inputs are also written to `HUE_CASE_INPUTS`,
+ * so the file always matches stdin.
  */
 async function answerCase(
   inputs: JsonValue,
   turns: TurnsMode,
-  inputsPath: string,
+  layout: DirectCaseLayout,
   /** Spawns the command once; `turn` holds a conversation turn's variables. */
   call: (inputs: JsonValue, turn?: Record<string, string>) => Promise<string>,
-): Promise<JsonValue | undefined> {
+): Promise<TargetResult> {
   const conversation = turns === "hue" ? scriptedConversation(inputs) : undefined;
-  if (!conversation) return parseAnswer(await call(inputs));
+  if (!conversation)
+    return collectDirectOutputs(layout.outputDirectory, parseAnswer(await call(inputs)));
   const replies = await driveTurns(conversation, async (turn) => {
-    await writeFile(inputsPath, JSON.stringify(turn.inputs, null, 2), { mode: 0o600 });
+    await replaceFile(layout.inputsPath, JSON.stringify(turn.inputs, null, 2));
     return parseAnswer(await call(turn.inputs, turn.env));
   });
-  return { replies };
+  const collected = await collectDirectOutputs(layout.outputDirectory, { replies });
+  return new TargetResult({ replies }, collected.files);
+}
+
+/** Writes `path` through a fresh private name moved over it, so whatever the agent left at
+ * `path` between turns (a link, a pipe) is replaced rather than written through. */
+async function replaceFile(path: string, text: string): Promise<void> {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temporary, text, { mode: 0o600, flag: "wx" });
+  await rename(temporary, path);
 }
 
 /** Seconds a conversation turn may run: the per-call timeout, cut to what is left of the world
- * so a turn the world's deadline would stop ends as its own timeout with the earlier replies. */
+ * after the stop grace, so a turn the world's deadline would stop ends as its own timeout and
+ * the case keeps the earlier replies. */
 function turnTimeout(timeoutSeconds: number, expiresAt: string | undefined): number {
-  const left = expiresAt === undefined ? Number.NaN : (Date.parse(expiresAt) - Date.now()) / 1000;
-  if (Number.isNaN(left)) return timeoutSeconds;
-  if (left < 1) throw new Error("The world expired before this turn started");
-  return Math.min(timeoutSeconds, Math.floor(left));
+  const expiry = expiresAt === undefined ? Number.NaN : Date.parse(expiresAt);
+  if (Number.isNaN(expiry)) return timeoutSeconds;
+  const left = Math.floor((expiry - Date.now() - COMMAND_KILL_GRACE_MS - COMMAND_REAP_MS) / 1000);
+  if (left < 1) throw new Error("Too little of the world's time is left to send this turn");
+  return Math.min(timeoutSeconds, left);
 }
 
 function commandAdapter(
@@ -882,7 +896,7 @@ function commandAdapter(
         layout.caseDirectory,
         options.projectDirectory,
       );
-      const answer = await answerCase(inputs, options.turns, layout.inputsPath, (input, turn) =>
+      return await answerCase(inputs, options.turns, layout, (input, turn) =>
         spawnAgentCommand(command, {
           ...(options.projectDirectory ? { cwd: layout.caseDirectory } : {}),
           env: { ...env, ...isolated, ...turn },
@@ -894,7 +908,6 @@ function commandAdapter(
           ...(context.signal ? { signal: context.signal } : {}),
         }),
       );
-      return collectDirectOutputs(layout.outputDirectory, answer);
     } finally {
       if (configDirectory) await rm(configDirectory, { recursive: true, force: true });
       untrack?.();
@@ -937,7 +950,7 @@ function directCommandAdapter(
         ? { TRACEPARENT: caseTraceparent(context.trace), TRACESTATE: undefined }
         : {}),
     };
-    const answer = await answerCase(inputs, options.turns, layout.inputsPath, (input, turn) =>
+    return answerCase(inputs, options.turns, layout, (input, turn) =>
       spawnAgentCommand(command, {
         cwd: options.workingDirectory ?? layout.caseDirectory,
         env: { ...env, ...turn },
@@ -946,7 +959,6 @@ function directCommandAdapter(
         ...(context.signal ? { signal: context.signal } : {}),
       }),
     );
-    return collectDirectOutputs(layout.outputDirectory, answer);
   };
 }
 

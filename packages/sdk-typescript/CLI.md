@@ -1381,11 +1381,14 @@ reply the command gave in this attempt. `HUE_CASE_INPUTS` is rewritten with the 
 each call. Each call also gets `HUE_SESSION_ID` (the same for every turn of one attempt),
 `HUE_TURN_INDEX` (0 for the first scripted message) and `HUE_TURN_COUNT`. A stateless agent
 rebuilds its context from `conversation.turns`; a stateful agent keys its own memory by
-`HUE_SESSION_ID` and reads only `task`. The case's answer is `{"replies": [...]}`, one reply per
-message in order. `--timeout` applies to each call, cut to what is left of the World. A call that
-fails or times out ends the case as an error named for its turn (`Turn 2 of 3: ...`), and the
-answer keeps the replies before it. Direct (answer-only) cases, one-shot runs, workers and
-`--ci` all drive turns this way.
+`HUE_SESSION_ID` and reads only `task`. Each reply is the call's stdout, and the case's answer is
+`{"replies": [...]}`, one reply per message in order; `result.json`, `summary.txt` and the other
+answer files in `output/` do not replace it, while generated documents there still upload.
+`--timeout` applies to each call, cut so the call ends before the World expires (one hour after
+it was created unless the run sets otherwise). A call that fails or times out ends the case as an
+error named for its turn (`Turn 2 of 3: ...`), and the answer keeps the replies before it (none
+when the first call fails, or with `--no-output`). Direct (answer-only) cases, one-shot runs,
+workers and `--ci` all drive turns this way.
 
 A case with one scripted message or none, or whose conversation holds another role or non-text
 content, runs as one call with its inputs unchanged. Pass `--turns runner` (or `"turns": "runner"`

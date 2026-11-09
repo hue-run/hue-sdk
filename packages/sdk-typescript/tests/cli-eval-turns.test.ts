@@ -139,6 +139,12 @@ describe("driveTurns", () => {
     const error = failure as TargetErrorWithOutput;
     expect(error.output).toEqual({ replies: ["ok"] });
     expect(error.cause.message).toBe("Turn 2 of 3: The agent command exited with code 3");
+    // A failure before any reply carries no answer.
+    const first = await driveTurns(conversation, async () => {
+      throw new Error("The agent command exited with code 3");
+    }).catch((error: unknown) => error);
+    expect(first).not.toBeInstanceOf(TargetErrorWithOutput);
+    expect((first as Error).message).toBe("Turn 1 of 3: The agent command exited with code 3");
   });
 
   test("an interruption is rethrown as it is", async () => {

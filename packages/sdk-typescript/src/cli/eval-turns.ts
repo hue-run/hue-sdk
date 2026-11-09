@@ -114,8 +114,8 @@ export const TURN_VARIABLES = ["HUE_SESSION_ID", "HUE_TURN_INDEX", "HUE_TURN_COU
 /**
  * Sends each scripted message through `send`, one at a time, and returns the replies in order.
  * Every turn shares one session id. A turn that fails ends the conversation: the error names the
- * turn and carries `{ replies }` for the turns answered before it. An interruption is rethrown
- * as it is, since the run stays open to be resumed.
+ * turn and, when earlier turns were answered, carries their `{ replies }`. An interruption is
+ * rethrown as it is, since the run stays open to be resumed.
  */
 export async function driveTurns(
   conversation: ScriptedConversation,
@@ -146,10 +146,9 @@ export async function driveTurns(
     } catch (error) {
       if (error instanceof TargetCancelledError) throw error;
       const message = error instanceof Error ? error.message : String(error);
-      throw new TargetErrorWithOutput(
-        { replies: structuredClone(replies) },
-        new Error(`Turn ${index + 1} of ${count}: ${message}`, { cause: error }),
-      );
+      const failure = new Error(`Turn ${index + 1} of ${count}: ${message}`, { cause: error });
+      // A conversation that failed on its first turn has no answer, as a one-call case has none.
+      throw replies.length ? new TargetErrorWithOutput({ replies }, failure) : failure;
     }
     // An empty answer is an empty reply: the list keeps one entry per message sent.
     replies.push(reply ?? "");
