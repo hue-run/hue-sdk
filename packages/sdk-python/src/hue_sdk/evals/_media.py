@@ -413,6 +413,7 @@ class MediaClient:
                 with requests.get(
                     f"{self._base_url}/api/v1{path}",
                     headers=self._headers,
+                    auth=_no_auth,
                     timeout=self._timeout,
                     allow_redirects=False,
                     stream=True,
