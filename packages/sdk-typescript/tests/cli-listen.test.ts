@@ -181,6 +181,9 @@ interface MockOptions {
   /** A world subscription's World instance expiry: named in each pull answer, and once it has
    * passed the world token no longer pulls (401, as for any ended world token). */
   instanceExpiresAt?: number;
+  /** How far Hue's clock runs ahead of the listener's (behind when negative). Hue's answers carry
+   * its clock in `Date`, and `instanceExpiresAt` is on it. */
+  clockOffsetMs?: number;
 }
 
 interface RecordedAck {
@@ -209,6 +212,7 @@ async function mockHue(options: MockOptions = {}) {
   let pullFailures = options.pullFailures ?? 0;
   const pullAttempts: number[] = [];
   let trickling = false;
+  const hueNow = () => Date.now() + (options.clockOffsetMs ?? 0);
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     void (async () => {
       const raw = (await readBody(request)).toString("utf8");
@@ -225,6 +229,7 @@ async function mockHue(options: MockOptions = {}) {
           ...(diagnostic ? { "x-hue-diagnostic": diagnostic } : {}),
           // A transient refusal asks for an immediate retry, which the client must not take.
           ...(status === 503 ? { "retry-after": options.retryAfter ?? "0" } : {}),
+          ...(options.clockOffsetMs ? { date: new Date(hueNow()).toUTCString() } : {}),
           ...headers,
         });
         response.end(JSON.stringify(diagnostic ? { error: "refused", diagnostic } : body));
@@ -251,7 +256,7 @@ async function mockHue(options: MockOptions = {}) {
         }
         if (
           bearer !== `Bearer ${credential}` ||
-          (options.instanceExpiresAt !== undefined && Date.now() >= options.instanceExpiresAt)
+          (options.instanceExpiresAt !== undefined && hueNow() >= options.instanceExpiresAt)
         )
           return send(401, {}, "credential_not_subscription");
         if (pull[1] !== SUBSCRIPTION) return send(404, {}, "subscription_not_found");
@@ -318,7 +323,7 @@ async function mockHue(options: MockOptions = {}) {
           ...queue.splice(0, options.overfill ? queue.length : (max as number)),
         ];
         // The answer's Date is whole seconds, as HTTP writes it; the lease is measured from it.
-        const second = Math.floor(Date.now() / 1000) * 1000;
+        const second = Math.floor(hueNow() / 1000) * 1000;
         const expiresAt = second + leaseMs;
         for (const delivery of leased) {
           if (!leases.has(delivery.deliveryId))
@@ -1071,13 +1076,18 @@ describe("hue listen acknowledgements and refusals", () => {
     const bot = await receiver();
     const minute = 60_000;
     const cases = [
-      { expiresAt: Date.now() + 120 * minute, warning: null },
-      { expiresAt: Date.now() + 10 * minute, warning: "expires in 10 min" },
+      { expiresIn: 120 * minute, warning: null },
+      { expiresIn: 10 * minute, warning: "expires in 10 min" },
+      // The time left is measured on Hue's clock, from its answer's `Date`, not the listener's.
+      { expiresIn: 10 * minute, clockOffsetMs: 120 * minute, warning: "expires in 10 min" },
+      { expiresIn: 120 * minute, clockOffsetMs: -120 * minute, warning: null },
       // A connection key's subscription, or a Hue that predates the field, names no expiry.
-      { expiresAt: undefined, warning: null },
+      { expiresIn: undefined, warning: null },
     ];
-    for (const { expiresAt, warning } of cases) {
-      const hue = await mockHue({ instanceExpiresAt: expiresAt, emptyAtOnce: true });
+    for (const { expiresIn, clockOffsetMs = 0, warning } of cases) {
+      const expiresAt =
+        expiresIn === undefined ? undefined : Date.now() + clockOffsetMs + expiresIn;
+      const hue = await mockHue({ instanceExpiresAt: expiresAt, clockOffsetMs, emptyAtOnce: true });
       const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
       await until(() => hue.pulls.length >= 3);
       listen.stop();
@@ -1104,7 +1114,7 @@ describe("hue listen acknowledgements and refusals", () => {
           `Warning: the World instance ${warning}, at ${at}; its events stop then. To keep testing, start a new instance and a listen subscription for it.`,
         ]);
     }
-  });
+  }, 20_000);
 
   test("says the World instance expired when Hue refuses the pull after its expiry", async () => {
     const expiresAt = Date.now() + 1_500;
