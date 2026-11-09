@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import type {
   Completion,
   Execution,
@@ -18,6 +18,36 @@ import type {
 import { collectDirectOutputs, stageDirectCase } from "../src/cli/eval-direct.js";
 
 const cli = join(import.meta.dir, "../src/setup/cli.ts");
+
+/** Artifact names and checkpoint paths whose bytes contain one of `needles`, plus a marker when
+ * `reported` does. */
+async function credentialStores(
+  artifacts: Map<string, { filename: string; bytes?: Uint8Array }>,
+  checkpoint: string,
+  needles: string[],
+  reported: string,
+): Promise<string[]> {
+  const stored: string[] = [];
+  for (const artifact of artifacts.values()) {
+    if (!artifact.bytes) continue;
+    const bytes = Buffer.from(artifact.bytes);
+    if (needles.some((needle) => bytes.includes(needle)))
+      stored.push(`artifact ${artifact.filename}`);
+  }
+  if (existsSync(checkpoint)) {
+    for (const entry of await readdir(checkpoint, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const path = join(entry.parentPath, entry.name);
+      // Direct runs keep the agent's own output directory for inspection. The copy the runner
+      // stages and uploads is `outputs/`.
+      if (!path.includes(`${sep}outputs${sep}`)) continue;
+      const bytes = await readFile(path);
+      if (needles.some((needle) => bytes.includes(needle))) stored.push(path);
+    }
+  }
+  if (needles.some((needle) => reported.includes(needle))) stored.push("completion or log");
+  return stored;
+}
 const key = "synthetic-eval-key-canary";
 const digest = "d".repeat(64);
 const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -2490,6 +2520,120 @@ process.stdout.write(key);
       expect(uploaded("report-[redacted]-2.csv").toString()).toBe("a,b\n");
     } finally {
       standIn.stop();
+    }
+  }, 120_000);
+
+  test("a direct command's stored files do not keep the project key from non-text or invalid UTF-8 outputs", async () => {
+    const standIn = documentStandIn();
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-redact-"));
+    const checkpoint = join(cwd, "checkpoints");
+    await writeFile(
+      join(cwd, "agent.mjs"),
+      `import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+const out = process.env.HUE_CASE_OUTPUT_DIR;
+const apiKey = process.env.HUE_API_KEY;
+if (!apiKey) throw new Error("the project key was not handed to the command");
+const embed = (name) => writeFileSync(join(out, name), Buffer.concat([
+  Buffer.from("prefix:"),
+  Buffer.from(apiKey),
+  Buffer.from(":suffix"),
+]));
+embed("leak.png");
+embed("leak.pdf");
+embed("leak.docx");
+embed("leak.jpg");
+embed("clip.mp4");
+writeFileSync(join(out, "manifest.json"), JSON.stringify({
+  contentTypes: { "clip.mp4": "video/mp4" },
+}));
+writeFileSync(join(out, "notes.txt"), "seen " + apiKey + "\\n");
+writeFileSync(join(out, "rows.csv"), Buffer.concat([Buffer.from([0xff]), Buffer.from(apiKey)]));
+writeFileSync(join(out, "latin1.txt"), Buffer.concat([Buffer.from([0xff]), Buffer.from(apiKey)]));
+writeFileSync(join(out, "broken.json"), Buffer.concat([Buffer.from([0xff]), Buffer.from(apiKey)]));
+writeFileSync(join(out, "ok.json"), JSON.stringify({ apiKey }));
+process.stdout.write(JSON.stringify({ ok: true }));
+`,
+    );
+    try {
+      const result = await hue(
+        [
+          "--set",
+          standIn.dataset.id,
+          "--scorer",
+          "gia-d1-citation",
+          "--command",
+          `${process.execPath} ${join(cwd, "agent.mjs")}`,
+          "--allow-hue-credentials",
+          "--checkpoint-dir",
+          checkpoint,
+          "--wait",
+          "5",
+        ],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+      );
+      const stored = await credentialStores(
+        standIn.artifacts,
+        checkpoint,
+        [key],
+        `${result.stdout}\n${result.stderr}\n${JSON.stringify(standIn.calls.completions)}`,
+      );
+      expect(stored).toEqual([]);
+    } finally {
+      standIn.stop();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  test("a direct adapter's path-based outputs do not keep the project key", async () => {
+    const standIn = documentStandIn();
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-path-"));
+    const checkpoint = join(cwd, "checkpoints");
+    const evalsModule = join(import.meta.dir, "../src/evals.ts");
+    await writeFile(
+      join(cwd, "agent.mjs"),
+      `import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { withFiles } from ${JSON.stringify(evalsModule)};
+export default async function (_inputs, context) {
+  const apiKey = process.env.HUE_API_KEY;
+  if (!apiKey) throw new Error("the project key was not in the adapter process");
+  const png = join(context.outputDirectory, "held.png");
+  const txt = join(context.outputDirectory, "held.txt");
+  writeFileSync(png, Buffer.concat([Buffer.from("prefix:"), Buffer.from(apiKey), Buffer.from(":suffix")]));
+  writeFileSync(txt, "called with " + apiKey);
+  return withFiles({ summary: "done" }, [
+    { path: png, filename: "held.png", contentType: "image/png" },
+    { path: txt, filename: "held.txt", contentType: "text/plain" },
+  ]);
+}
+`,
+    );
+    try {
+      const result = await hue(
+        [
+          "--set",
+          standIn.dataset.id,
+          "--scorer",
+          "gia-d1-citation",
+          join(cwd, "agent.mjs"),
+          "--checkpoint-dir",
+          checkpoint,
+          "--wait",
+          "5",
+        ],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+      );
+      const stored = await credentialStores(
+        standIn.artifacts,
+        checkpoint,
+        [key],
+        `${result.stdout}\n${result.stderr}\n${JSON.stringify(standIn.calls.completions)}`,
+      );
+      expect(stored).toEqual([]);
+    } finally {
+      standIn.stop();
+      await rm(cwd, { recursive: true, force: true });
     }
   }, 120_000);
 
