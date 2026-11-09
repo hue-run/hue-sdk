@@ -8,6 +8,23 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.29.0] - 2026-11-09
+
+#### Breaking
+
+- `hue eval --command` sends each scripted message of a conversation case as its own call. A
+  case whose inputs hold a `turns` or `messages` array of `{role, text|content}` entries, with two
+  or more user messages after the last assistant message, now runs the command once per message,
+  in order, waiting for each reply. Each call's stdin uses the single-turn shape
+  `{"inputs": {...other fields, "task", "conversation": {"turns": [{"input", "reply"}]}}}`, whose
+  history includes the earlier scripted messages with this attempt's replies, and sets
+  `HUE_SESSION_ID`, `HUE_TURN_INDEX` and `HUE_TURN_COUNT`. The case's answer is
+  `{"replies": [...]}`. A turn that fails or times out ends the case as an error named for the
+  turn and keeps the replies before it. One-shot runs, workers, direct cases and `--ci` behave
+  alike; adapter files and other cases are unchanged. Migration: a runner that already sends the
+  turns itself keeps one call per case with `--turns runner` or `"turns": "runner"` in
+  `hue.eval.json`.
+
 ### [0.28.0] - 2026-11-08
 
 #### Added

@@ -37,6 +37,7 @@ import {
   describeTelemetryIssues,
   runExperiment,
   TargetCancelledError,
+  TargetErrorWithOutput,
   TELEMETRY_NOT_ACCEPTED,
   telemetryIssueCounts,
   type RunnerReport,
@@ -70,6 +71,13 @@ import {
 import type { JsonValue } from "../types.js";
 import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
 import { runCiEvalCommand, type ExecuteCiRun } from "./eval-ci.js";
+import {
+  driveTurns,
+  scriptedConversation,
+  TURN_VARIABLES,
+  TURNS_MODES,
+  type TurnsMode,
+} from "./eval-turns.js";
 
 /** Adapter contract: the module's `default` or `runMyAgent` export. */
 export type EvalAdapter = (
@@ -134,6 +142,13 @@ Agent (exactly one):
                                   files and output/, uploaded after the case
   --allow-hue-credentials         Keep HUE_API_KEY and other Hue control-plane credentials in
                                   the --command child (off by default)
+  --turns <hue|runner>            Conversation cases: hue (default) runs the command once per
+                                  user message after the last assistant reply, in order, with
+                                  {"inputs":{...,"task","conversation":{"turns":[{"input",
+                                  "reply"}]}}} on stdin, HUE_SESSION_ID, HUE_TURN_INDEX and
+                                  HUE_TURN_COUNT set, and {"replies":[...]} as the answer;
+                                  runner runs it once with the case's inputs unchanged. A case
+                                  with fewer than two such messages always runs once
                                   Direct: spawned in a private case directory with HUE_CASE_DIR,
                                   HUE_CASE_INPUTS, HUE_CASE_OUTPUT_DIR, HUE_CASE_ID, HUE_CASE_KEY
                                   and HUE_EXECUTION_ID set; files/<role>/ hold the pinned inputs
@@ -177,7 +192,8 @@ Output and limits:
                                   (default) completes it as failed with the evidence omitted;
                                   pending completes it in its true state with the trace still to
                                   arrive, which Hue attaches once its export is complete
-  --timeout <seconds>             Per-case --command timeout (default: 600)
+  --timeout <seconds>             Per-call --command timeout, each conversation turn's
+                                  included (default: 600)
   --wait <seconds>                Verdict wait after the run finishes (default: 300)
   --no-judges                     Skip pinned hosted model judges (requested by default
                                   after outputs upload; uses the project's judge budget)
@@ -196,6 +212,12 @@ function traceNotAcceptedPolicy(value: string | undefined): "fail_case" | "pendi
   if (value === undefined || value === "fail_case") return "fail_case";
   if (value === "pending") return "pending";
   throw new UsageError("--trace-not-accepted must be fail_case or pending");
+}
+/** The `--turns` mode: who drives a conversation case's scripted messages. */
+function turnsMode(value: string | undefined): TurnsMode {
+  if (value === undefined) return "hue";
+  if ((TURNS_MODES as readonly string[]).includes(value)) return value as TurnsMode;
+  throw new UsageError("--turns must be hue or runner");
 }
 class UsageError extends Error {
   constructor(message: string) {
@@ -228,6 +250,7 @@ function parse(argv: string[]) {
         mode: { type: "string" },
         command: { type: "string" },
         "allow-hue-credentials": { type: "boolean", default: false },
+        turns: { type: "string" },
         worker: { type: "boolean", default: false },
         "max-runs": { type: "string" },
         "agent-key": { type: "string" },
@@ -717,23 +740,35 @@ function redacting<Context, Answer>(
     try {
       return redactAnswer(await adapter(inputs, context), secrets) as Answer;
     } catch (error) {
-      if (!(error instanceof Error)) throw error;
-      // The name is exported too, as the span's error type, so it is cleared like the message.
-      const message = redactSecrets(error.message, secrets);
-      const name = redactSecrets(String(error.name), secrets);
-      if (message === error.message && name === String(error.name)) throw error;
-      try {
-        if (message !== error.message) error.message = message;
-        if (name !== String(error.name)) error.name = name;
-      } catch {
-        // A frozen error, or one whose message or name is a getter, keeps its text; replace it.
-      }
-      if (error.message === message && String(error.name) === name) throw error;
-      const replacement = new Error(message);
-      replacement.name = name;
-      throw replacement;
+      // A conversation's earlier replies are an answer too.
+      if (error instanceof TargetErrorWithOutput)
+        throw new TargetErrorWithOutput(
+          redactAnswer(error.output, secrets) as JsonValue,
+          redactError(error.cause, secrets) as Error,
+        );
+      throw redactError(error, secrets);
     }
   };
+}
+
+/** The error with its message and name cleared of the secrets: itself when it is unchanged or
+ * could be changed in place, otherwise a plain replacement. */
+function redactError(error: unknown, secrets: string[]): unknown {
+  if (!(error instanceof Error)) return error;
+  // The name is exported too, as the span's error type, so it is cleared like the message.
+  const message = redactSecrets(error.message, secrets);
+  const name = redactSecrets(String(error.name), secrets);
+  if (message === error.message && name === String(error.name)) return error;
+  try {
+    if (message !== error.message) error.message = message;
+    if (name !== String(error.name)) error.name = name;
+  } catch {
+    // A frozen error, or one whose message or name is a getter, keeps its text; replace it.
+  }
+  if (error.message === message && String(error.name) === name) return error;
+  const replacement = new Error(message);
+  replacement.name = name;
+  return replacement;
 }
 
 /** The parent environment an agent child starts from: without Hue control-plane credentials
@@ -751,13 +786,45 @@ function parentEnvironment(allowHueCredentials: boolean): Record<string, string>
       : stripHueControlPlaneCredentials(process.env),
   );
   delete parent.HUE_ENVIRONMENT_RUN_ID;
+  // Only a conversation turn's call names a session and turn.
+  for (const name of TURN_VARIABLES) delete parent[name];
   return parent;
+}
+
+/**
+ * The command's answer for a case: one call with the case's inputs or, for a conversation case
+ * whose turns `hue eval` drives, one call per scripted message and `{ replies }`. Each turn's
+ * inputs are also written to `HUE_CASE_INPUTS`, so the file always matches stdin.
+ */
+async function answerCase(
+  inputs: JsonValue,
+  turns: TurnsMode,
+  inputsPath: string,
+  /** Spawns the command once; `turn` holds a conversation turn's variables. */
+  call: (inputs: JsonValue, turn?: Record<string, string>) => Promise<string>,
+): Promise<JsonValue | undefined> {
+  const conversation = turns === "hue" ? scriptedConversation(inputs) : undefined;
+  if (!conversation) return parseAnswer(await call(inputs));
+  const replies = await driveTurns(conversation, async (turn) => {
+    await writeFile(inputsPath, JSON.stringify(turn.inputs, null, 2), { mode: 0o600 });
+    return parseAnswer(await call(turn.inputs, turn.env));
+  });
+  return { replies };
+}
+
+/** Seconds a conversation turn may run: the per-call timeout, cut to what is left of the world
+ * so a turn the world's deadline would stop ends as its own timeout with the earlier replies. */
+function turnTimeout(timeoutSeconds: number, expiresAt: string | undefined): number {
+  const left = expiresAt === undefined ? Number.NaN : (Date.parse(expiresAt) - Date.now()) / 1000;
+  if (Number.isNaN(left)) return timeoutSeconds;
+  if (left < 1) throw new Error("The world expired before this turn started");
+  return Math.min(timeoutSeconds, Math.floor(left));
 }
 
 function commandAdapter(
   command: string,
   timeoutSeconds: number,
-  options: { allowHueCredentials: boolean; projectDirectory?: string },
+  options: { allowHueCredentials: boolean; projectDirectory?: string; turns: TurnsMode },
 ): EvalAdapter {
   return async (inputs, context) => {
     const parent = parentEnvironment(options.allowHueCredentials);
@@ -811,17 +878,23 @@ function commandAdapter(
               : {}),
             ...identity,
           };
-      const stdout = await spawnAgentCommand(command, {
-        ...(options.projectDirectory ? { cwd: layout.caseDirectory } : {}),
-        env: {
-          ...env,
-          ...(await isolatedCaseEnvironment(layout.caseDirectory, options.projectDirectory)),
-        },
-        stdin: JSON.stringify({ inputs, config: context.config }),
-        timeoutSeconds,
-        ...(context.signal ? { signal: context.signal } : {}),
-      });
-      return collectDirectOutputs(layout.outputDirectory, parseAnswer(stdout));
+      const isolated = await isolatedCaseEnvironment(
+        layout.caseDirectory,
+        options.projectDirectory,
+      );
+      const answer = await answerCase(inputs, options.turns, layout.inputsPath, (input, turn) =>
+        spawnAgentCommand(command, {
+          ...(options.projectDirectory ? { cwd: layout.caseDirectory } : {}),
+          env: { ...env, ...isolated, ...turn },
+          stdin: JSON.stringify({ inputs: input, config: context.config }),
+          // A conversation's turns share the world, so each is cut to what is left of it.
+          timeoutSeconds: turn
+            ? turnTimeout(timeoutSeconds, context.world?.expiresAt)
+            : timeoutSeconds,
+          ...(context.signal ? { signal: context.signal } : {}),
+        }),
+      );
+      return collectDirectOutputs(layout.outputDirectory, answer);
     } finally {
       if (configDirectory) await rm(configDirectory, { recursive: true, force: true });
       untrack?.();
@@ -836,7 +909,12 @@ function commandAdapter(
 function directCommandAdapter(
   command: string,
   timeoutSeconds: number,
-  options: { allowHueCredentials: boolean; workingDirectory?: string; projectDirectory?: string },
+  options: {
+    allowHueCredentials: boolean;
+    workingDirectory?: string;
+    projectDirectory?: string;
+    turns: TurnsMode;
+  },
 ): DirectEvalAdapter {
   return async (inputs, context) => {
     const layout = await stageDirectCase(context.outputDirectory, {
@@ -846,26 +924,29 @@ function directCommandAdapter(
       executionId: context.executionId,
       files: context.files,
     });
-    const stdout = await spawnAgentCommand(command, {
-      cwd: options.workingDirectory ?? layout.caseDirectory,
-      env: {
-        ...parentEnvironment(options.allowHueCredentials),
-        ...(await isolatedCaseEnvironment(layout.caseDirectory, options.projectDirectory)),
-        HUE_CASE_DIR: layout.caseDirectory,
-        HUE_CASE_INPUTS: layout.inputsPath,
-        HUE_CASE_OUTPUT_DIR: layout.outputDirectory,
-        HUE_CASE_ID: context.item.id,
-        HUE_CASE_KEY: context.item.externalKey,
-        HUE_EXECUTION_ID: context.executionId,
-        ...(context.trace
-          ? { TRACEPARENT: caseTraceparent(context.trace), TRACESTATE: undefined }
-          : {}),
-      },
-      stdin: JSON.stringify({ inputs, config: context.config }),
-      timeoutSeconds,
-      ...(context.signal ? { signal: context.signal } : {}),
-    });
-    return collectDirectOutputs(layout.outputDirectory, parseAnswer(stdout));
+    const env = {
+      ...parentEnvironment(options.allowHueCredentials),
+      ...(await isolatedCaseEnvironment(layout.caseDirectory, options.projectDirectory)),
+      HUE_CASE_DIR: layout.caseDirectory,
+      HUE_CASE_INPUTS: layout.inputsPath,
+      HUE_CASE_OUTPUT_DIR: layout.outputDirectory,
+      HUE_CASE_ID: context.item.id,
+      HUE_CASE_KEY: context.item.externalKey,
+      HUE_EXECUTION_ID: context.executionId,
+      ...(context.trace
+        ? { TRACEPARENT: caseTraceparent(context.trace), TRACESTATE: undefined }
+        : {}),
+    };
+    const answer = await answerCase(inputs, options.turns, layout.inputsPath, (input, turn) =>
+      spawnAgentCommand(command, {
+        cwd: options.workingDirectory ?? layout.caseDirectory,
+        env: { ...env, ...turn },
+        stdin: JSON.stringify({ inputs: input, config: context.config }),
+        timeoutSeconds,
+        ...(context.signal ? { signal: context.signal } : {}),
+      }),
+    );
+    return collectDirectOutputs(layout.outputDirectory, answer);
   };
 }
 
@@ -909,12 +990,14 @@ const executeCiRun: ExecuteCiRun = async ({
     commandAdapter(config.command, config.timeoutSeconds, {
       allowHueCredentials: false,
       projectDirectory,
+      turns: config.turns,
     }),
   );
   const direct = redacting(
     directCommandAdapter(config.command, config.timeoutSeconds, {
       allowHueCredentials: false,
       projectDirectory,
+      turns: config.turns,
     }),
   );
   try {
@@ -951,6 +1034,9 @@ const executeCiRun: ExecuteCiRun = async ({
       environmentEvidence: "when_pinned",
       async target(inputs, context) {
         signal.throwIfAborted();
+        // The world outlives every turn of a conversation the command answers one by one.
+        const calls =
+          (config.turns === "hue" ? scriptedConversation(inputs)?.messages.length : undefined) ?? 1;
         if (pinsWorld(context.item))
           return runEnvironmentTarget({
             client,
@@ -962,7 +1048,8 @@ const executeCiRun: ExecuteCiRun = async ({
             deprecationWarnings: false,
             agentRevision: config.name,
             ttlSeconds: Math.min(
-              config.timeoutSeconds,
+              config.timeoutSeconds * calls,
+              86_400,
               Math.max(1, Math.ceil((Date.parse(invocation.deadlineAt) - Date.now()) / 1000)),
             ),
             target: (value, worldContext) =>
@@ -2428,6 +2515,7 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     values.judges = !values["no-judges"] && !values["no-output"];
     // A usage error before anything is prepared or created: no run is left to recover from it.
     traceNotAcceptedPolicy(values["trace-not-accepted"]);
+    const turns = turnsMode(values.turns);
     json = values.json;
     const output: Output = {
       log: (line) => (json ? process.stderr : process.stdout).write(`${line}\n`),
@@ -2491,6 +2579,9 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     if (values.worker && values.check) throw new UsageError("--check applies to one-shot runs");
     if (!values.worker && values.capability?.length)
       throw new UsageError("--capability applies to --worker only");
+    // An adapter file receives each case's inputs unchanged and drives a conversation itself.
+    if (adapterFile && values.turns !== undefined)
+      throw new UsageError("--turns applies to --command; an adapter file drives its own turns");
     const loaded = adapterFile ? await loadAdapter(adapterFile) : undefined;
     // One adapter module serves both case kinds; the direct context announces itself with `mode`.
     // Outputs are stored by default, so every answer and error message is cleared of the
@@ -2500,12 +2591,14 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
         loaded ??
           commandAdapter(values.command!, timeout, {
             allowHueCredentials: values["allow-hue-credentials"],
+            turns,
           }),
       ),
       direct: redacting(
         loaded ??
           directCommandAdapter(values.command!, timeout, {
             allowHueCredentials: values["allow-hue-credentials"],
+            turns,
             // A worker's single command must resolve relative entry points the same way for
             // direct and world cases. One-shot direct runs keep their private-directory cwd.
             ...(values.worker ? { workingDirectory: process.cwd() } : {}),

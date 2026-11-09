@@ -44,7 +44,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.28.0`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.29.0`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -523,8 +523,8 @@ and Hue never receives or stores them. The command is part of the `hue` executab
 #   LANGFUSE_PUBLIC_KEY=pk-lf-...
 #   LANGFUSE_SECRET_KEY=sk-lf-...
 #   LANGFUSE_BASE_URL=https://cloud.langfuse.com
-npx -y @hue-run/sdk@0.28.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.28.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.29.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.29.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` come from the environment or `--env-path`
@@ -1072,7 +1072,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.28.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.29.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -1083,7 +1083,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.28.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.29.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -1115,9 +1115,9 @@ the sealed world. Hue never executes the agent. `HUE_API_KEY` must be a **Read a
 write** project key (a **Read** or **Tracing only** key cannot read cases or create runs);
 the CLI never prints it.
 
-Run the agent's own start command with `--command`. `hue eval` spawns it once per case with the
-world's environment (below) and `{"inputs", "config"}` on stdin, and stores its stdout as the
-answer. The agent reaches each app through Hue's mirror with its own production client: the one
+Run the agent's own start command with `--command`. `hue eval` spawns it once per case (once per
+scripted message of a [conversation case](#conversation-cases)) with the world's environment
+(below) and `{"inputs", "config"}` on stdin, and stores its stdout as the answer. The agent reaches each app through Hue's mirror with its own production client: the one
 committed helper described in [Make your agent eval-ready](https://docs.hue.run/evaluations/eval-ready-agent)
 reads `HUE_SIM_<SURFACE ID>_URL` and `HUE_WORLD_TOKEN` when `HUE_WORLD_TOKEN` is set, fails
 closed when a needed variable is missing, and returns the production URL and credential
@@ -1125,10 +1125,10 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.28.0 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.28.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.28.0 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.28.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.29.0 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.29.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.29.0 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.29.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 One invocation creates one run holding every selected case; it prints the run URL
@@ -1166,7 +1166,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.28.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.29.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
@@ -1235,7 +1235,7 @@ the next ordinary invocation starts a new run as usual.
 `--worker` discards cancelled or released judge handoffs. Once judge requests succeed, a
 verdict-read failure is logged and the worker keeps accepting runs.
 
-`--command "<shell command>"` spawns the command once per case with the world's environment
+`--command "<shell command>"` spawns the command once per case (or per scripted message, below) with the world's environment
 (`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW` (the world's clock at creation, RFC 3339; `worldNow()` reads it and returns
 `null` without it, so fall back explicitly with `worldNow() ?? new Date()`), one `HUE_SIM_<SURFACE ID>_URL` per provider
 mirror,
@@ -1356,6 +1356,42 @@ interrupted. On Node.js 22, load TypeScript adapters with `NODE_OPTIONS=--experi
 non-erasable syntax (enums, parameter properties, namespaces) needs a loader such as `--import tsx`
 on any Node.js version.
 
+### Conversation cases
+
+A case's inputs can hold a conversation: a `turns` (or `messages`) array
+of `{"role": "user" | "assistant", "text"}` entries (`content` works in place of `text`). Entries
+through the last assistant message are the recorded history; each user message after it is a
+scripted message. When there are two or more scripted messages, `hue eval` runs the command once
+per message, in order, waiting for each reply before sending the next. Every call shares the
+case's World instance and case directory, and each gets stdin in the single-turn shape:
+
+```json
+{
+  "inputs": {
+    "context": "the case's other fields, unchanged",
+    "task": "this turn's message",
+    "conversation": { "turns": [{ "input": "an earlier message", "reply": "its reply" }] }
+  },
+  "config": {}
+}
+```
+
+`conversation.turns` holds the recorded history and then each earlier scripted message with the
+reply the command gave in this attempt. `HUE_CASE_INPUTS` is rewritten with the same inputs before
+each call. Each call also gets `HUE_SESSION_ID` (the same for every turn of one attempt),
+`HUE_TURN_INDEX` (0 for the first scripted message) and `HUE_TURN_COUNT`. A stateless agent
+rebuilds its context from `conversation.turns`; a stateful agent keys its own memory by
+`HUE_SESSION_ID` and reads only `task`. The case's answer is `{"replies": [...]}`, one reply per
+message in order. `--timeout` applies to each call, cut to what is left of the World. A call that
+fails or times out ends the case as an error named for its turn (`Turn 2 of 3: ...`), and the
+answer keeps the replies before it. Direct (answer-only) cases, one-shot runs, workers and
+`--ci` all drive turns this way.
+
+A case with one scripted message or none, or whose conversation holds another role or non-text
+content, runs as one call with its inputs unchanged. Pass `--turns runner` (or `"turns": "runner"`
+in `hue.eval.json`) to keep one call with the case's inputs for every case, for a runner that
+sends the turns itself. Adapter files always receive the case's inputs unchanged.
+
 ## Run evaluations in CI
 
 CI evaluations use a server-owned frozen invocation and immutable gate receipt. They require
@@ -1382,7 +1418,11 @@ Each case starts a fresh command process in a private scratch directory, with it
 Use an absolute entry point or resolve it through that variable. Model credentials are inherited;
 Hue control credentials are removed. World cases receive their own scoped connection variables
 and world clock. The command reads `{"inputs": ..., "config": ...}` on stdin and writes its
-answer on stdout or through the existing case output files.
+answer on stdout or through the existing case output files. A conversation case with two or more
+scripted messages runs the command once per message, as described under
+[conversation cases](#conversation-cases); `timeoutSeconds` applies to each call, and the World lasts that
+long per message within the deadline. Set `"turns": "runner"` (or pass `--turns runner`) to keep
+one call per case with its inputs unchanged.
 
 The CLI's trace content and stored case outputs are enabled by default. Set `captureContent: false`
 in the configuration, or pass `--no-content`, to export trace metadata only. Independently,

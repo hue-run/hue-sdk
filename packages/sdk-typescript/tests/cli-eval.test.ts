@@ -14,6 +14,7 @@ import { CheckpointIdentityError, CheckpointStore } from "../src/evals/checkpoin
 import { EvaluationClient } from "../src/evals/client.js";
 import { digest as identityDigest } from "../src/evals/json.js";
 import type { CaseVerdict, ExperimentVerdicts } from "../src/evals/verdicts.js";
+import type { JsonValue } from "../src/types.js";
 import { TargetCancelledError } from "../src/evals.js";
 import { createEvalInvocationInput, type EvalInvocation } from "../src/evals/invocations.js";
 import { trialReport } from "../src/cli/eval-reports.js";
@@ -69,6 +70,8 @@ function hueStandIn(
     ciScoringTransitions?: boolean;
     /** Hold one acknowledgement after durable completion so the runner can be killed. */
     ciLoseCompletionAck?: string;
+    /** The case's inputs (default `{ task: "refund charge ch_2" }`). */
+    inputs?: JsonValue;
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
@@ -96,7 +99,7 @@ function hueStandIn(
   const frozenCase = {
     id: randomUUID(),
     externalKey: "refund",
-    inputs: { task: "refund charge ch_2" },
+    inputs: options.inputs ?? { task: "refund charge ch_2" },
     expected: "saved",
     metadata: { suite: "billing" },
     datasetVersionId: version.id,
@@ -3908,4 +3911,421 @@ describe("CI invocation CLI", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+});
+
+/** Answers one message: logs what it received, then replies to `inputs.task`. Fails the turn
+ * whose index is `HUE_TEST_FAIL_TURN`, and hangs on the one named by `HUE_TEST_HANG_TURN`. */
+const turnSource = `import { appendFileSync, readFileSync } from "node:fs";
+let data = "";
+process.stdin.setEncoding("utf8");
+for await (const chunk of process.stdin) data += chunk;
+const { inputs } = JSON.parse(data);
+const started = Date.now();
+await new Promise((done) => setTimeout(done, 50));
+const index = process.env.HUE_TURN_INDEX ?? null;
+const record = {
+  inputs,
+  started,
+  session: process.env.HUE_SESSION_ID ?? null,
+  index,
+  count: process.env.HUE_TURN_COUNT ?? null,
+  world: process.env.HUE_WORLD_ID ?? null,
+  execution: process.env.HUE_EXECUTION_ID ?? null,
+  traceparent: process.env.TRACEPARENT ?? null,
+  caseInputs: process.env.HUE_CASE_INPUTS
+    ? JSON.parse(readFileSync(process.env.HUE_CASE_INPUTS, "utf8"))
+    : null,
+};
+const log = (extra) =>
+  appendFileSync(process.env.HUE_TEST_TURN_LOG, JSON.stringify({ ...record, ...extra, ended: Date.now() }) + "\\n");
+if (index !== null && index === process.env.HUE_TEST_HANG_TURN) {
+  log({ hung: true });
+  setInterval(() => {}, 1000);
+} else if (index !== null && index === process.env.HUE_TEST_FAIL_TURN) {
+  log({ failed: true });
+  process.exit(3);
+} else {
+  log({});
+  process.stdout.write(
+    typeof inputs.task === "string"
+      ? "Reply to: " + inputs.task
+      : JSON.stringify({ whole: Object.keys(inputs).sort() }),
+  );
+}
+`;
+
+/** A recorded exchange, then two scripted user messages and a context field. */
+const conversationInputs = {
+  turns: [
+    { role: "user", text: "Revise my draft to the supplier so it asks for net 30 terms" },
+    { role: "assistant", text: "Done. The draft now asks for net 30 terms." },
+    { role: "user", text: "Send the drafted reply to the supplier now" },
+    { role: "user", text: "Send the revised one to the accountant too" },
+  ],
+  context: { actor: { name: "Sam Example", timezone: "America/New_York" } },
+};
+const recordedTurn = {
+  input: "Revise my draft to the supplier so it asks for net 30 terms",
+  reply: "Done. The draft now asks for net 30 terms.",
+};
+const firstMessage = "Send the drafted reply to the supplier now";
+const secondMessage = "Send the revised one to the accountant too";
+
+interface TurnRecord {
+  inputs: Record<string, unknown>;
+  started: number;
+  ended: number;
+  session: string | null;
+  index: string | null;
+  count: string | null;
+  world: string | null;
+  execution: string | null;
+  traceparent: string | null;
+  caseInputs: unknown;
+  failed?: boolean;
+  hung?: boolean;
+}
+
+async function turnWorkspace() {
+  const cwd = await workspace();
+  await writeFile(join(cwd, "agent-turns.mjs"), turnSource);
+  const log = join(cwd, "turns.jsonl");
+  return { cwd, log, env: { HUE_TEST_TURN_LOG: log } };
+}
+
+async function turnRecords(log: string): Promise<TurnRecord[]> {
+  if (!existsSync(log)) return [];
+  return (await readFile(log, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as TurnRecord);
+}
+
+/** Two calls, one after the other, in one session: the documented single-turn inputs, the
+ * second with the first's actual reply in its history, and each call's inputs file matching. */
+function expectDrivenTurns(records: TurnRecord[]) {
+  expect(records).toHaveLength(2);
+  const [first, second] = records as [TurnRecord, TurnRecord];
+  expect(first.inputs).toEqual({
+    context: conversationInputs.context,
+    task: firstMessage,
+    conversation: { turns: [recordedTurn] },
+  });
+  expect(second.inputs).toEqual({
+    context: conversationInputs.context,
+    task: secondMessage,
+    conversation: {
+      turns: [recordedTurn, { input: firstMessage, reply: `Reply to: ${firstMessage}` }],
+    },
+  });
+  expect(second.started).toBeGreaterThanOrEqual(first.ended);
+  expect(first.session).toMatch(/^[0-9a-f-]{36}$/);
+  expect(second.session).toBe(first.session);
+  expect([first.index, second.index]).toEqual(["0", "1"]);
+  expect([first.count, second.count]).toEqual(["2", "2"]);
+  expect(second.execution).toBe(first.execution);
+  expect(second.world).toBe(first.world);
+  expect(second.traceparent).toBe(first.traceparent);
+  expect(first.caseInputs).toEqual(first.inputs);
+  expect(second.caseInputs).toEqual(second.inputs);
+}
+
+const bothReplies = {
+  replies: [`Reply to: ${firstMessage}`, `Reply to: ${secondMessage}`],
+};
+
+describe("hue eval conversation turns", () => {
+  test(
+    "a simulation case's scripted messages are sent one at a time in one world, and the answer holds every reply",
+    async () => {
+      const f = hueStandIn({ gateway: true, inputs: conversationInputs });
+      const { cwd, log, env } = await turnWorkspace();
+      try {
+        const result = await hue(
+          [
+            "--case",
+            f.scenario.id,
+            "--command",
+            `${process.execPath} agent-turns.mjs`,
+            "--origin",
+            f.baseUrl,
+            "--wait",
+            "0",
+            "--json",
+            "--checkpoint-dir",
+            join(cwd, "checkpoints"),
+          ],
+          { cwd, env },
+        );
+        expect(result.status).toBe(0);
+        const records = await turnRecords(log);
+        expectDrivenTurns(records);
+        expect(f.calls.worldCreates).toHaveLength(1);
+        expect(records[0]!.world).toBe([...f.worlds.keys()][0]!);
+        expect(f.calls.completions).toEqual([
+          { executionId: expect.any(String), state: "succeeded", output: bothReplies },
+        ]);
+        expect([...f.worlds.values()][0]?.status).toBe("completed");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "a turn that fails or times out ends the case as an error that keeps the earlier replies",
+    async () => {
+      for (const failure of [
+        {
+          env: { HUE_TEST_FAIL_TURN: "1" } as Record<string, string>,
+          timeout: "30",
+          message: "The agent command exited with code 3",
+        },
+        {
+          env: { HUE_TEST_HANG_TURN: "1" },
+          timeout: "2",
+          message: "The agent command timed out after 2 seconds",
+        },
+      ]) {
+        const f = hueStandIn({ gateway: true, inputs: conversationInputs });
+        const { cwd, log, env } = await turnWorkspace();
+        try {
+          const result = await hue(
+            [
+              "--case",
+              f.scenario.id,
+              "--command",
+              `${process.execPath} agent-turns.mjs`,
+              "--origin",
+              f.baseUrl,
+              "--timeout",
+              failure.timeout,
+              "--wait",
+              "0",
+              "--json",
+              "--checkpoint-dir",
+              join(cwd, "checkpoints"),
+            ],
+            { cwd, env: { ...env, ...failure.env } },
+          );
+          expect(result.status).toBe(1);
+          const records = await turnRecords(log);
+          expect(records.map((record) => record.index)).toEqual(["0", "1"]);
+          expect(f.calls.completions).toEqual([
+            {
+              executionId: expect.any(String),
+              state: "error",
+              output: { replies: [`Reply to: ${firstMessage}`] },
+              error: { type: "TargetError", message: `Turn 2 of 2: ${failure.message}` },
+            },
+          ]);
+          expect([...f.worlds.values()][0]?.status).toBe("abandoned");
+        } finally {
+          f.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "--turns runner, a single scripted message and a plain task each run as one call with the case's inputs",
+    async () => {
+      const singleMessage = {
+        turns: conversationInputs.turns.slice(0, 3),
+        context: conversationInputs.context,
+      };
+      for (const run of [
+        { inputs: conversationInputs as Record<string, JsonValue>, args: ["--turns", "runner"] },
+        { inputs: singleMessage as Record<string, JsonValue>, args: [] },
+        { inputs: { task: "refund charge ch_2" } as Record<string, JsonValue>, args: [] },
+      ]) {
+        const f = hueStandIn({ gateway: true, inputs: run.inputs });
+        const { cwd, log, env } = await turnWorkspace();
+        try {
+          const result = await hue(
+            [
+              "--case",
+              f.scenario.id,
+              "--command",
+              `${process.execPath} agent-turns.mjs`,
+              ...run.args,
+              "--origin",
+              f.baseUrl,
+              "--wait",
+              "0",
+              "--json",
+              "--checkpoint-dir",
+              join(cwd, "checkpoints"),
+            ],
+            { cwd, env },
+          );
+          expect(result.status).toBe(0);
+          const records = await turnRecords(log);
+          expect(records).toHaveLength(1);
+          expect(records[0]).toMatchObject({
+            inputs: run.inputs,
+            caseInputs: run.inputs,
+            session: null,
+            index: null,
+            count: null,
+          });
+          const output =
+            typeof run.inputs.task === "string"
+              ? `Reply to: ${run.inputs.task}`
+              : { whole: Object.keys(run.inputs).sort() };
+          expect(f.calls.completions).toEqual([
+            { executionId: expect.any(String), state: "succeeded", output },
+          ]);
+        } finally {
+          f.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test("--turns is refused when it names no mode or the agent is an adapter file", async () => {
+    const cwd = await workspace();
+    try {
+      for (const [args, message] of [
+        [
+          ["--case", "Refund flow", "--command", "node agent.mjs", "--turns", "each"],
+          "--turns must be hue or runner",
+        ],
+        [
+          ["./hue-agent.ts", "--case", "Refund flow", "--turns", "runner"],
+          "--turns applies to --command",
+        ],
+      ] as const) {
+        const result = await hue([...args, "--origin", "http://127.0.0.1:9"], { cwd });
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain(message);
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test(
+    "an answer-only case drives its turns too, with the case's trace context on every call",
+    async () => {
+      const f = hueStandIn({ answerOnlyScenario: true, inputs: conversationInputs });
+      const { cwd, log, env } = await turnWorkspace();
+      try {
+        const result = await hue(
+          [
+            "--case",
+            f.scenario.id,
+            "--command",
+            `${process.execPath} ${join(cwd, "agent-turns.mjs")}`,
+            "--origin",
+            f.baseUrl,
+            "--wait",
+            "0",
+            "--json",
+            "--checkpoint-dir",
+            join(cwd, "checkpoints"),
+          ],
+          { cwd, env },
+        );
+        expect(result.status).toBe(0);
+        expect(JSON.parse(result.stdout).mode).toBe("direct");
+        const records = await turnRecords(log);
+        expectDrivenTurns(records);
+        expect(records[0]!.world).toBeNull();
+        expect(records[0]!.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]$/);
+        expect(f.calls.completions).toEqual([
+          { executionId: expect.any(String), state: "succeeded", output: bothReplies },
+        ]);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "a worker drives a conversation case's turns",
+    async () => {
+      const f = hueStandIn({ gateway: true, inputs: conversationInputs });
+      f.enqueueRun();
+      const { cwd, log, env } = await turnWorkspace();
+      try {
+        const result = await hue(
+          [
+            "--worker",
+            "--command",
+            `${process.execPath} agent-turns.mjs`,
+            "--origin",
+            f.baseUrl,
+            "--max-runs",
+            "1",
+            "--wait",
+            "0",
+            "--checkpoint-dir",
+            join(cwd, "worker-state"),
+          ],
+          { cwd, env },
+        );
+        expect(result.status).toBe(0);
+        expectDrivenTurns(await turnRecords(log));
+        expect(f.calls.completions).toEqual([
+          { executionId: expect.any(String), state: "succeeded", output: bothReplies },
+        ]);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "CI drives a conversation case's turns in a world that outlives them, and turns: runner keeps one call",
+    async () => {
+      for (const turns of [undefined, "runner"] as const) {
+        const f = hueStandIn({ gateway: true, inputs: conversationInputs });
+        const { cwd, log, env } = await turnWorkspace();
+        try {
+          await writeFile(
+            join(cwd, "hue.eval.json"),
+            JSON.stringify({
+              evalSetVersionId: f.version.id,
+              command: 'node "$HUE_PROJECT_DIR/agent-turns.mjs"',
+              scoringTimeoutSeconds: 2,
+              timeoutSeconds: 300,
+              deadlineSeconds: 3000,
+              ...(turns ? { turns } : {}),
+            }),
+          );
+          const result = await hue(
+            ["--ci", "--config", "hue.eval.json", "--report-dir", "reports", "--json"],
+            { cwd, env: { ...env, HUE_BASE_URL: f.baseUrl } },
+          );
+          expect(result.status).toBe(0);
+          const records = await turnRecords(log);
+          if (turns === "runner") {
+            expect(records).toHaveLength(1);
+            expect(records[0]!.inputs).toEqual(conversationInputs);
+            expect(f.calls.worldCreates[0]).toMatchObject({ ttlSeconds: 300 });
+            expect(f.calls.completions[0]?.output).toEqual({ whole: ["context", "turns"] });
+          } else {
+            expectDrivenTurns(records);
+            expect(f.calls.worldCreates[0]).toMatchObject({ ttlSeconds: 600 });
+            expect(f.calls.completions[0]?.output).toEqual(bothReplies);
+          }
+        } finally {
+          f.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
 });
