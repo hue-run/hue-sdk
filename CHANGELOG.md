@@ -13,8 +13,8 @@ refuses to publish a version without a matching entry below.
 #### Breaking
 
 - `hue eval --set` (and `--dataset-version`) refuses chosen evaluators that leave out one the
-  selected cases need, such as the case-outcome evaluator that grades their checks, and exits 1
-  naming each. Migration: drop `--scorer` and `--scorer-version` to run with every evaluator the
+  selected cases need, such as the case-outcome evaluator that grades their checks, or that leave
+  checks no evaluator grades, and exits 1 naming each. Migration: drop `--scorer` and `--scorer-version` to run with every evaluator the
   cases need, add the missing ones, or pass `--allow-missing-evaluators` to run without them
   with a warning. Against a Hue deployment that does not list a version's evaluators, chosen
   evaluators run as before.
@@ -30,7 +30,7 @@ refuses to publish a version without a matching entry below.
   run of just them, with the evaluators they need. `--case` inside `--set` selects one case of
   the set the same way.
 - `hue eval --json` gives each case `reply`, the answer Hue stored for it (`null` with
-  `--no-output`).
+  `--no-output`); a reply Hue could not return is marked `"replyUnavailable": true`.
 - `EvaluationClient.getEvalSetVersionRun(id, { caseIds })` reads the evaluators a run of an eval
   set version, or of some of its cases, needs. `createExperiment`, `createRun` and
   `runSimulation`'s `pins` definition accept `caseIds` to run some of a version's cases.

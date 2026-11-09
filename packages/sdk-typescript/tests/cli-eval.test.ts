@@ -9,9 +9,15 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
-import { derivedAgentKey, explain, renderTable, spawnAgentCommand } from "../src/cli/eval.js";
+import {
+  caseReplies,
+  derivedAgentKey,
+  explain,
+  renderTable,
+  spawnAgentCommand,
+} from "../src/cli/eval.js";
 import { CheckpointIdentityError, CheckpointStore } from "../src/evals/checkpoint.js";
-import { EvaluationClient } from "../src/evals/client.js";
+import { EvaluationClient, HueApiError } from "../src/evals/client.js";
 import { digest as identityDigest } from "../src/evals/json.js";
 import type { CaseVerdict, ExperimentVerdicts } from "../src/evals/verdicts.js";
 import { TargetCancelledError } from "../src/evals.js";
@@ -78,6 +84,8 @@ function hueStandIn(
     /** The world case names a judge, which the version run route lists beside the outcome
      * evaluator. */
     judge?: boolean;
+    /** Hue could not choose the outcome evaluator for the checks: it names candidates instead. */
+    outcomeGap?: boolean;
     /** `false`: the deployment predates the version run route and answers it 404. */
     runDefaults?: boolean;
   } = {},
@@ -122,6 +130,7 @@ function hueStandIn(
     environmentVersionId: null,
   }));
   const scorerId = randomUUID();
+  const otherOutcomeId = randomUUID();
   const judgeVersion = {
     id: randomUUID(),
     scorerId: randomUUID(),
@@ -451,16 +460,23 @@ function hueStandIn(
           (item) => !wanted.length || wanted.includes(item.id),
         );
         const judged = options.judge === true && selected.some((item) => item.id === frozenCase.id);
+        // With `outcomeGap`, Hue could not choose the outcome evaluator: it names it as a
+        // candidate instead of listing it.
+        const gap = options.outcomeGap === true;
         const evaluators = [
-          {
-            id: scorerVersion.id,
-            evaluatorId: scorerId,
-            slug: "case-outcome",
-            name: "Case outcome",
-            kind: "world_outcome",
-            version: 1,
-            cases: selected.length,
-          },
+          ...(gap
+            ? []
+            : [
+                {
+                  id: scorerVersion.id,
+                  evaluatorId: scorerId,
+                  slug: "case-outcome",
+                  name: "Case outcome",
+                  kind: "world_outcome",
+                  version: 1,
+                  cases: selected.length,
+                },
+              ]),
           ...(judged
             ? [
                 {
@@ -483,12 +499,25 @@ function hueStandIn(
           cases: selected.length,
           worldCases: judged ? 1 : 0,
           ungradedCases: 0,
-          ready: true,
-          blockers: [],
+          ready: !gap,
+          blockers: gap
+            ? [
+                `${selected.length} hand-authored cases carry world checks and 2 of the project's outcome evaluators could grade them (${scorerVersion.id}, ${otherOutcomeId}): add --scorer-version with the one to use.`,
+              ]
+            : [],
           evaluatorVersionIds: evaluators.map((item) => item.id),
           evaluators,
           judgeVersionIdsLeftOut: [],
-          outcomeGaps: [],
+          outcomeGaps: gap
+            ? [
+                {
+                  grading: "world",
+                  cases: selected.length,
+                  reason: "several",
+                  candidates: [scorerVersion.id, otherOutcomeId],
+                },
+              ]
+            : [],
           unresolvedJudges: [],
         });
       }
@@ -2916,13 +2945,13 @@ describe("hue eval", () => {
         const refused = await hue(args, { cwd });
         expect(refused.status).toBe(1);
         expect(refused.stderr).toContain(
-          "The chosen evaluators leave out one that the case needs: Case outcome (checks, 1 case)",
+          "The chosen evaluators leave out one evaluator that the case needs: Case outcome (checks, 1 case).",
         );
         expect(refused.stderr).toContain("--allow-missing-evaluators");
         const allowed = await hue([...args, "--allow-missing-evaluators"], { cwd });
         expect(allowed.status).toBe(0);
         expect(allowed.stderr).toContain(
-          "Warning: running without evaluators the case needs, so their checks or judges are not graded: Case outcome (checks, 1 case)",
+          "Warning: running without one evaluator that the case needs: Case outcome (checks, 1 case), so they are not graded.",
         );
         // Every evaluator the cases need, chosen explicitly, passes without a warning.
         const complete = await hue([...args, "--scorer-version", f.scorerVersion.id], { cwd });
@@ -2942,6 +2971,44 @@ describe("hue eval", () => {
           );
         } finally {
           older.stop();
+        }
+        // Checks Hue could choose no evaluator for: with no evaluator chosen the run is refused
+        // with Hue's reason, and the judge alone leaves those checks ungraded, so it is refused
+        // too; a candidate outcome evaluator closes the gap.
+        const gap = hueStandIn({ judge: true, outcomeGap: true });
+        try {
+          const set = [
+            "--set",
+            "Refund flow",
+            "./hue-agent.ts",
+            "--origin",
+            gap.baseUrl,
+            "--check",
+          ];
+          const unchosen = await hue(set, { cwd });
+          expect(unchosen.status).toBe(1);
+          expect(unchosen.stderr).toContain(
+            "Hue cannot choose every evaluator the case needs: 1 hand-authored cases carry world checks",
+          );
+          const judgeOnly = await hue([...set, "--scorer-version", gap.judgeVersion.id], { cwd });
+          expect(judgeOnly.status).toBe(1);
+          expect(judgeOnly.stderr).toContain(
+            `The chosen evaluators leave out the checks of 1 case, which no chosen evaluator grades (${gap.scorerVersion.id}, `,
+          );
+          const closed = await hue(
+            [
+              ...set,
+              "--scorer-version",
+              gap.judgeVersion.id,
+              "--scorer-version",
+              gap.scorerVersion.id,
+            ],
+            { cwd },
+          );
+          expect(closed.status).toBe(0);
+          expect(closed.stderr).toBe("");
+        } finally {
+          gap.stop();
         }
       } finally {
         f.stop();
@@ -3025,6 +3092,7 @@ describe("hue eval", () => {
             reply: expect.objectContaining({ answer: "saved", caseKey: "refund" }),
           }),
         ]);
+        expect(document.cases[0]).not.toHaveProperty("replyUnavailable");
       } finally {
         f.stop();
         await rm(cwd, { recursive: true, force: true });
@@ -3032,6 +3100,33 @@ describe("hue eval", () => {
     },
     SPAWN_TIMEOUT * 2,
   );
+
+  test("a reply Hue fails to return is unavailable, never an empty answer", async () => {
+    const outputs: Record<string, () => unknown> = {
+      stored: () => ({ hasOutput: true, output: "two drafts sent" }),
+      withheld: () => ({ hasOutput: false }),
+      gone: () => {
+        throw new HueApiError(404);
+      },
+      failing: () => {
+        throw new HueApiError(503);
+      },
+    };
+    const client = {
+      getSubject: async (id: string) => outputs[id]!(),
+    } as unknown as Pick<EvaluationClient, "getSubject">;
+    const { replies, unavailable } = await caseReplies(
+      client,
+      Object.keys(outputs).map((id) => ({ caseId: `case-${id}`, subjectId: id })),
+    );
+    expect(Object.fromEntries(replies)).toEqual({
+      "case-stored": "two drafts sent",
+      "case-withheld": null,
+      "case-gone": null,
+      "case-failing": null,
+    });
+    expect([...unavailable]).toEqual(["case-failing"]);
+  });
 
   test(
     "compares verdicts with a --baseline experiment",

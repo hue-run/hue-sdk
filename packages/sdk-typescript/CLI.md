@@ -1224,7 +1224,8 @@ regression and unchanged counts with per-case deltas. `--json` prints one JSON d
 the scoring run that produced the verdicts, and
 and sends progress to stderr; each case carries `reply`, the answer Hue stored for it (the
 command's parsed stdout, or `{"replies": [...]}` for a conversation case; `null` with
-`--no-output` or before the case completes), lists its not-applicable evaluator versions in
+`--no-output` or before the case completes; a reply Hue could not return also carries
+`"replyUnavailable": true`), lists its not-applicable evaluator versions in
 `notApplicable` and its advisory ones in `advisory`, and `totals.notApplicable` counts the
 former; a case failed for its telemetry has `state: "error"`,
 `passed: false` and

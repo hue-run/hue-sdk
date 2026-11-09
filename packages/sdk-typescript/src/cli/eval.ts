@@ -1584,25 +1584,59 @@ async function resolveSelection(
   pins.scorerVersionIds = [...new Set(extra)];
   if (!defaults) return pins;
   pins.needed = defaults.evaluators;
+  // Outcome entries of the chosen versions Hue did not list: one may grade checks no listed
+  // evaluator could (an outcome gap).
+  const chosenEntries: string[] = [];
   for (const item of chosen)
-    if (!item.evaluatorId && !defaults.evaluatorVersionIds.includes(item.versionId)) {
+    if (!defaults.evaluatorVersionIds.includes(item.versionId)) {
       const version = await client.getScorerVersion(item.versionId).catch((error: unknown) => {
         if (error instanceof HueApiError && error.status === 404) return undefined;
         throw error;
       });
       const owner = version as { scorerId?: string; evaluatorId?: string } | undefined;
-      item.evaluatorId = owner?.evaluatorId ?? owner?.scorerId;
+      item.evaluatorId ??= owner?.evaluatorId ?? owner?.scorerId;
+      const definition = version?.definition as { kind?: string; entry?: string } | undefined;
+      if (definition?.kind === "world_outcome" && definition.entry)
+        chosenEntries.push(definition.entry);
     }
   const missing = missingEvaluators(defaults.evaluators, chosen);
-  if (!missing.length) return pins;
+  const gaps = uncoveredOutcomeGaps(defaults.outcomeGaps, chosen, chosenEntries);
+  if (!missing.length && !gaps.length) return pins;
+  const gapCases = gaps.reduce((total, gap) => total + gap.cases, 0);
+  const left = [
+    ...(missing.length
+      ? [
+          `${missing.length === 1 ? "one evaluator" : `${missing.length} evaluators`} that ${selection}: ${describeEvaluators(missing)}`,
+        ]
+      : []),
+    ...(gaps.length
+      ? [
+          `the checks of ${gapCases} ${gapCases === 1 ? "case" : "cases"}, which no chosen evaluator grades (${gaps.flatMap((gap) => gap.candidates).join(", ") || "publish an outcome evaluator for them"})`,
+        ]
+      : []),
+  ].join("; and ");
   if (!values["allow-missing-evaluators"])
     throw new Error(
-      `The chosen evaluators leave out ${missing.length === 1 ? "one" : missing.length} that ${selection}: ${describeEvaluators(missing)}. Drop --scorer and --scorer-version to run with every evaluator the cases need, add the missing ones, or pass --allow-missing-evaluators to run without them.`,
+      `The chosen evaluators leave out ${left}. Drop --scorer and --scorer-version to run with every evaluator the cases need, add the missing ones, or pass --allow-missing-evaluators to run without them.`,
     );
-  output.error(
-    `Warning: running without evaluators ${selection}, so their checks or judges are not graded: ${describeEvaluators(missing)}`,
-  );
+  output.error(`Warning: running without ${left}, so they are not graded.`);
   return pins;
+}
+
+/** Outcome gaps (checks Hue chose no evaluator for) the chosen evaluators leave open: a gap is
+ * closed by one of its candidates or by a chosen outcome evaluator of its grading. */
+export function uncoveredOutcomeGaps(
+  gaps: EvalSetVersionRun["outcomeGaps"],
+  chosen: ChosenEvaluator[],
+  chosenEntries: string[],
+): EvalSetVersionRun["outcomeGaps"] {
+  const versions = new Set(chosen.map((item) => item.versionId));
+  const answer = (entry: string) => entry.startsWith("hue.answer_outcome.");
+  return gaps.filter(
+    (gap) =>
+      !gap.candidates.some((id) => versions.has(id)) &&
+      !chosenEntries.some((entry) => answer(entry) === (gap.grading === "answer")),
+  );
 }
 
 type RunMode = "auto" | "direct" | "simulation";
@@ -1687,21 +1721,32 @@ async function inspectSelection(
 export async function caseReplies(
   client: Pick<EvaluationClient, "getSubject">,
   cases: Pick<CaseVerdict, "caseId" | "subjectId">[],
-): Promise<Map<string, JsonValue | null>> {
+): Promise<CaseReplies> {
   const replies = new Map<string, JsonValue | null>();
+  const unavailable = new Set<string>();
   const queue = cases.filter((item) => item.subjectId);
   await Promise.all(
     Array.from({ length: Math.min(8, queue.length) }, async () => {
       for (let item = queue.shift(); item; item = queue.shift()) {
-        const subject = await client.getSubject(item.subjectId!).catch((error: unknown) => {
-          if (error instanceof HueApiError) return undefined;
-          throw error;
-        });
-        replies.set(item.caseId, subject?.hasOutput ? (subject.output ?? null) : null);
+        try {
+          const subject = await client.getSubject(item.subjectId!);
+          replies.set(item.caseId, subject.hasOutput ? (subject.output ?? null) : null);
+        } catch (error) {
+          // A reply Hue could not return is reported as unavailable, never as an empty answer.
+          if (!(error instanceof HueApiError)) throw error;
+          if (error.status !== 404) unavailable.add(item.caseId);
+          replies.set(item.caseId, null);
+        }
       }
     }),
   );
-  return replies;
+  return { replies, unavailable };
+}
+
+/** Each case's stored answer, and the cases whose answer could not be read. */
+interface CaseReplies {
+  replies: Map<string, JsonValue | null>;
+  unavailable: Set<string>;
 }
 
 function toJson(
@@ -1710,7 +1755,7 @@ function toJson(
   baseline?: { experimentId: string; comparison: VerdictComparison },
   extra: Record<string, JsonValue> = {},
   telemetry: TelemetryNotAccepted[] = [],
-  replies?: Map<string, JsonValue | null>,
+  replies?: CaseReplies,
 ) {
   const notAccepted = new Map(telemetry.map((entry) => [entry.caseId, entry.issues]));
   return {
@@ -1720,7 +1765,12 @@ function toJson(
     complete: verdicts.results.complete,
     cases: verdicts.summary.cases.map((item) => ({
       ...item,
-      ...(replies ? { reply: replies.get(item.caseId) ?? null } : {}),
+      ...(replies
+        ? {
+            reply: replies.replies.get(item.caseId) ?? null,
+            ...(replies.unavailable.has(item.caseId) ? { replyUnavailable: true } : {}),
+          }
+        : {}),
       ...(notAccepted.has(item.caseId)
         ? { telemetry: { code: TELEMETRY_NOT_ACCEPTED, issues: notAccepted.get(item.caseId)! } }
         : {}),
@@ -2015,8 +2065,13 @@ async function readAndReportVerdicts(
     };
   }
   if (values.json) {
+    const replies = await caseReplies(client, verdicts.summary.cases);
+    if (replies.unavailable.size)
+      output.error(
+        `Warning: Hue did not return the stored reply of ${replies.unavailable.size} ${replies.unavailable.size === 1 ? "case" : "cases"}; they carry "replyUnavailable": true.`,
+      );
     process.stdout.write(
-      `${JSON.stringify(toJson(verdicts, run.runUrl, baseline, run.extra, run.telemetryNotAccepted, await caseReplies(client, verdicts.summary.cases)))}\n`,
+      `${JSON.stringify(toJson(verdicts, run.runUrl, baseline, run.extra, run.telemetryNotAccepted, replies))}\n`,
     );
   } else {
     renderTable(verdicts, output);
