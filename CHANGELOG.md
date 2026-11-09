@@ -8,6 +8,41 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.30.0] - 2026-11-09
+
+#### Breaking
+
+- `hue eval --set` (and `--dataset-version`) refuses chosen evaluators that leave out one the
+  selected cases need, such as the case-outcome evaluator that grades their checks, and exits 1
+  naming each. Migration: drop `--scorer` and `--scorer-version` to run with every evaluator the
+  cases need, add the missing ones, or pass `--allow-missing-evaluators` to run without them
+  with a warning. Against a Hue deployment that does not list a version's evaluators, chosen
+  evaluators run as before.
+
+#### Added
+
+- `hue eval --set` with no `--scorer` or `--scorer-version` runs with every evaluator the set's
+  cases need, as Hue lists them for the version: the outcome evaluator for cases with checks and
+  each judge a case's criteria name, whether or not the cases were published from traces. It
+  prints them before the run. `--check --json` lists them as `selection.evaluatorVersionIds` and
+  `needed`.
+- `hue eval --set ... --only <case key, title or id>` (repeatable) runs those cases alone, as one
+  run of just them, with the evaluators they need. `--case` inside `--set` selects one case of
+  the set the same way.
+- `hue eval --json` gives each case `reply`, the answer Hue stored for it (`null` with
+  `--no-output`).
+- `EvaluationClient.getEvalSetVersionRun(id, { caseIds })` reads the evaluators a run of an eval
+  set version, or of some of its cases, needs. `createExperiment`, `createRun` and
+  `runSimulation`'s `pins` definition accept `caseIds` to run some of a version's cases.
+
+#### Changed
+
+- `hue login` suggests `hue eval --set "<eval set>" --command "<agent start command>"`, or the
+  repository's `hue-agent.ts` adapter when it has one, in place of `--case "<name>" ./hue-agent.ts`.
+- Case selection errors say "case" instead of "Scenario", and `hue eval --case` with a name no
+  published case has points to `--set "<eval set>" --only "<name>"`.
+- `hue eval --help` lists `HUE_WORLD_NOW` among the World variables a `--command` receives.
+
 ### [0.29.0] - 2026-11-09
 
 #### Breaking

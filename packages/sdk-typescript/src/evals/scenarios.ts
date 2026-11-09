@@ -76,7 +76,7 @@ export function parseScenarioSelector(
   segments: string[] = ["scenarios"],
 ): ScenarioSelector {
   const value = selector.trim();
-  if (!value) throw new TypeError("A Scenario selector is required");
+  if (!value) throw new TypeError("A case selector is required");
   if (UUID.test(value)) return { kind: "id", id: value.toLowerCase() };
   if (/^https?:\/\//i.test(value)) {
     let url: URL;
@@ -185,7 +185,7 @@ async function pinsFromScenario(
 ) {
   if (!scenario.publication)
     throw new Error(
-      `Scenario ${scenario.id} is a draft without published pins; publish it in Hue first`,
+      `Case ${scenario.id} is a draft without published pins; publish it in Hue first`,
     );
   const version = await client.getDatasetVersion(scenario.publication.datasetVersionId);
   return {
@@ -229,7 +229,7 @@ export async function resolveScenarioPins(
     }
     if (!scenario.publication)
       throw new Error(
-        `Scenario ${scenario.id} is a draft without published pins; publish it in Hue first`,
+        `Case ${scenario.id} is a draft without published pins; publish it in Hue first`,
       );
     return pinsFromScenario(
       client,
@@ -255,12 +255,12 @@ export async function resolveScenarioPins(
     return pinsFromScenario(client, matches[0]!.scenario, matches[0]!.dataset);
   if (matches.length > 1)
     throw new Error(
-      `Several published Scenarios match "${parsed.name}"; pass an ID or URL instead: ${describe(matches)}`,
+      `Several published cases match "${parsed.name}"; pass an ID or URL instead: ${describe(matches)}`,
     );
   throw new Error(
     candidates.length
-      ? `No published Scenario matches "${parsed.name}". Published Scenarios: ${describe(candidates)}`
-      : `No published Scenario matches "${parsed.name}"; publish one in Hue first`,
+      ? `No published case matches "${parsed.name}". Published cases: ${describe(candidates)}`
+      : `No published case matches "${parsed.name}"`,
   );
 }
 

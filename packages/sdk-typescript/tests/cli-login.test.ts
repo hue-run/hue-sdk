@@ -212,11 +212,13 @@ describe("hue login", () => {
       `Stored the key (${KEY.length} chars) as HUE_API_KEY and HUE_MCP_KEY, with HUE_BASE_URL and HUE_MCP_URL, in .env.hue.`,
     );
     // A non-default origin stores its own MCP endpoint, so the printed next step carries it. An
-    // empty repository names no client and gets no eval hint for an unknown language.
+    // empty repository names no client, and runs an eval set with its agent's command.
     expect(result.stdout).toContain(
       `hue mcp install --client <claude-code|codex|conductor|cursor|vscode|windsurf|gemini> --auth key --url ${ORIGIN}/api/mcp`,
     );
-    expect(result.stdout).not.toContain("hue eval");
+    expect(result.stdout).toContain(
+      'hue eval --set "<eval set>" --command "<agent start command>"',
+    );
     expect(result.stdout).not.toContain(KEY);
     expect(result.stdout).not.toContain("Opened");
     const envPath = join(root, ".env.hue");
@@ -241,23 +243,25 @@ describe("hue login", () => {
     });
   });
 
-  test("next steps name the detected MCP client and the repository's language", async () => {
+  test("next steps name the detected MCP client and run an eval set with the agent's command", async () => {
     const root = await temporaryRoot();
     await mkdir(join(root, ".cursor"));
-    await writeFile(join(root, "pyproject.toml"), '[project]\nname = "agent"\n');
-    await writeFile(join(root, "package.json"), '{ "devDependencies": { "prettier": "3" } }\n');
-    const python = await login(["--origin", ORIGIN], { cwd: root, lines: [KEY] });
-    expect(python.code).toBe(0);
-    expect(python.stdout).toContain(
-      `Next steps:\n  hue mcp install --client cursor --auth key --url ${ORIGIN}/api/mcp\n  hue eval --case "<name>" --command "<agent start command>"\n`,
-    );
-    // Several clients' files leave the client to the user; a tsconfig selects the adapter form.
-    await mkdir(join(root, ".vscode"));
+    // A TypeScript repository without an adapter file runs its agent by command too.
     await writeFile(join(root, "tsconfig.json"), "{}\n");
-    const typescript = await login(["--origin", ORIGIN], { cwd: root, lines: [KEY] });
-    expect(typescript.code).toBe(0);
-    expect(typescript.stdout).toContain(
-      `  hue mcp install --client <claude-code|codex|conductor|cursor|vscode|windsurf|gemini> --auth key --url ${ORIGIN}/api/mcp\n  hue eval --case "<name>" ./hue-agent.ts\n`,
+    await writeFile(join(root, "package.json"), '{ "devDependencies": { "prettier": "3" } }\n');
+    const command = await login(["--origin", ORIGIN], { cwd: root, lines: [KEY] });
+    expect(command.code).toBe(0);
+    expect(command.stdout).toContain(
+      `Next steps:\n  hue mcp install --client cursor --auth key --url ${ORIGIN}/api/mcp\n  hue eval --set "<eval set>" --command "<agent start command>"\n`,
+    );
+    expect(command.stdout).not.toContain("--case");
+    // Several clients' files leave the client to the user; a hue-agent.ts adapter is named.
+    await mkdir(join(root, ".vscode"));
+    await writeFile(join(root, "hue-agent.ts"), "export default () => null;\n");
+    const adapter = await login(["--origin", ORIGIN], { cwd: root, lines: [KEY] });
+    expect(adapter.code).toBe(0);
+    expect(adapter.stdout).toContain(
+      `  hue mcp install --client <claude-code|codex|conductor|cursor|vscode|windsurf|gemini> --auth key --url ${ORIGIN}/api/mcp\n  hue eval --set "<eval set>" ./hue-agent.ts\n`,
     );
   });
 

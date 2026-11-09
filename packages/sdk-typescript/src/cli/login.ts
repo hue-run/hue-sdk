@@ -818,13 +818,10 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
     steps.push(
       `hue mcp install --client ${(await detectMcpClient(cwd)) ?? "<claude-code|codex|conductor|cursor|vscode|windsurf|gemini>"} --auth key${mcpUrl === mcpUrlForOrigin(DEFAULT_ORIGIN) ? "" : ` --url ${mcpUrl}`}`,
     );
-  if (stored.includes("evaluations")) {
-    const agent = await detectEvalAgent(cwd);
-    if (agent)
-      steps.push(
-        `hue eval --case "<name>" ${agent}${envDisplay === DEFAULT_ENV_FILE ? "" : ` --env-file ${envDisplay}`}`,
-      );
-  }
+  if (stored.includes("evaluations"))
+    steps.push(
+      `hue eval --set "<eval set>" ${await detectEvalAgent(cwd)}${envDisplay === DEFAULT_ENV_FILE ? "" : ` --env-file ${envDisplay}`}`,
+    );
   if (steps.length > 0) {
     out("Next steps:");
     for (const step of steps) out(`  ${step}`);
@@ -857,26 +854,12 @@ async function detectMcpClient(cwd: string): Promise<string | undefined> {
   return found.size === 1 ? [...found][0] : undefined;
 }
 
-/** Manifests in the repository root that name its language; the CLI stays outside `hue setup`. */
-const LANGUAGE_MARKERS: ReadonlyArray<readonly [agent: string, marker: string]> = [
-  ["./hue-agent.ts", "tsconfig.json"],
-  ['--command "<agent start command>"', "pyproject.toml"],
-  ['--command "<agent start command>"', "requirements.txt"],
-  ['--command "<agent start command>"', "uv.lock"],
-  ['--command "<agent start command>"', "poetry.lock"],
-  // Last: a Python repository often carries a package.json for its tooling.
-  ["./hue-agent.ts", "package.json"],
-];
-
-/** The `hue eval` agent argument for the repository's language; undefined when it is unknown. */
-async function detectEvalAgent(cwd: string): Promise<string | undefined> {
-  for (const [agent, marker] of LANGUAGE_MARKERS)
-    if (
-      await access(join(cwd, marker)).then(
-        () => true,
-        () => false,
-      )
-    )
-      return agent;
-  return undefined;
+/** The `hue eval` agent argument: the repository's `hue-agent.ts` adapter when it has one,
+ * otherwise the command that starts the agent, which works in any language. */
+async function detectEvalAgent(cwd: string): Promise<string> {
+  const adapter = await access(join(cwd, "hue-agent.ts")).then(
+    () => true,
+    () => false,
+  );
+  return adapter ? "./hue-agent.ts" : '--command "<agent start command>"';
 }

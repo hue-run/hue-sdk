@@ -18,6 +18,9 @@ import {
 } from "../world/world.js";
 import { EvaluationClient, HueApiError } from "../evals/client.js";
 import type {
+  DatasetCase,
+  EvalSetRunEvaluator,
+  EvalSetVersionRun,
   ExperimentCase,
   LocalAgentClaim,
   LocalAgentRegistration,
@@ -117,13 +120,18 @@ const USAGE = `Usage: hue eval [adapter-file] [options]
 Run a local agent against a published case or eval set, then print Hue's verdicts.
 
 Selection (exactly one, not used with --worker):
-  --case <name|id|url>            Published case to run
+  --case <name|id|url>            Published case to run; with --set, one case of the set
   --scenario <name|id|url>        Legacy alias for --case
-  --set <name|id|url>             Saved eval set; requires --scorer or --scorer-version
+  --set <name|id|url>             Saved eval set, run with every evaluator its cases need
+                                  unless --scorer or --scorer-version chooses them
   --set-version <n>               Saved version number of the eval set (default: latest saved)
-  --dataset-version <id>          Frozen dataset version; requires --scorer or --scorer-version
+  --dataset-version <id>          Frozen dataset version, run like --set
+  --only <key|title|id>           With --set or --dataset-version: run this case alone
+                                  (repeatable); its evaluators default to the ones it needs
   --scorer <slug|name|id>         Evaluator to pin at its latest published version (repeatable)
   --scorer-version <id>           Scorer version to pin (repeatable)
+  --allow-missing-evaluators      Run a set with chosen evaluators that leave out ones its
+                                  cases need (refused by default); those go ungraded
   --mode <auto|direct|simulation> Case kind; auto picks direct for sets whose cases pin no
                                   world and runs a set mixing both kinds as one run, each
                                   case through its own kind's path
@@ -131,7 +139,8 @@ Selection (exactly one, not used with --worker):
 Agent (exactly one):
   <adapter-file>                  Module exporting default or runMyAgent(inputs, context)
   --command "<shell command>"     Simulation: spawned per case with the world's environment
-                                  (HUE_WORLD_ID, HUE_WORLD_TOKEN, one HUE_SIM_<SURFACE>_URL per
+                                  (HUE_WORLD_ID, HUE_WORLD_TOKEN, HUE_WORLD_NOW, one
+                                  HUE_SIM_<SURFACE>_URL per
                                   provider mirror, HUE_MCP_CONFIG, plus HUE_MCP_URL, HUE_MCP_TOKEN
                                   and HUE_MCP_EXPIRES_AT for the first MCP mirror), HUE_EXECUTION_ID,
                                   HUE_ENVIRONMENT_RUN_ID, HUE_CASE_ID and HUE_CASE_KEY set;
@@ -139,7 +148,9 @@ Agent (exactly one):
                                   control-plane credentials are removed from the child.
                                   HUE_CASE_DIR, HUE_CASE_INPUTS and HUE_CASE_OUTPUT_DIR name the
                                   case directory as for direct cases: the case's agent-visible
-                                  files and output/, uploaded after the case
+                                  files and output/, uploaded after the case. HUE_WORLD_NOW is
+                                  the World's current time (RFC 3339): an agent that reads the
+                                  date should use it, so a wrapper script must pass it on
   --allow-hue-credentials         Keep HUE_API_KEY and other Hue control-plane credentials in
                                   the --command child (off by default)
   --turns <hue|runner>            Conversation cases: hue (default) runs the command once per
@@ -177,7 +188,8 @@ Connection:
 Output and limits:
   --name <run name>               Run name (default: <agent key> @ <revision>, hashes shortened)
   --baseline <run id|url>         Compare verdicts with a previous run
-  --json                          Print one JSON document on stdout; progress goes to stderr
+  --json                          Print one JSON document on stdout, each case with its stored
+                                  answer as "reply"; progress goes to stderr
   --content                       Capture telemetry content (the default)
   --no-content                    Omit telemetry inputs, outputs and messages
   --no-output                     One-shot: do not store case outputs, error messages and
@@ -247,6 +259,8 @@ function parse(argv: string[]) {
         "dataset-version": { type: "string" },
         scorer: { type: "string", multiple: true },
         "scorer-version": { type: "string", multiple: true },
+        only: { type: "string", multiple: true },
+        "allow-missing-evaluators": { type: "boolean", default: false },
         mode: { type: "string" },
         command: { type: "string" },
         "allow-hue-credentials": { type: "boolean", default: false },
@@ -1298,8 +1312,11 @@ interface Connection {
 
 const MAX_LISTED_SCORERS = 1000;
 
-/** Newest published version of an evaluator named by ID, slug or display name. */
-async function resolveScorerVersion(client: EvaluationClient, selector: string): Promise<string> {
+/** Newest published version of an evaluator named by ID, slug or display name, with the evaluator. */
+async function resolveScorerVersion(
+  client: EvaluationClient,
+  selector: string,
+): Promise<ChosenEvaluator> {
   const parsed = parseScenarioSelector(selector, ["scorers", "evaluators"]);
   let scorer: Scorer;
   if (parsed.kind === "id") scorer = await client.getScorer(parsed.id);
@@ -1342,29 +1359,121 @@ async function resolveScorerVersion(client: EvaluationClient, selector: string):
     },
     versions[0] as ScorerVersion & { version?: number },
   );
-  return latest.id;
+  return { versionId: latest.id, evaluatorId: scorer.id };
 }
 
-async function resolveSelection(
+/** What a one-shot run selects: the pins, and for an eval set the cases `--only` names and the
+ * evaluators its cases need. */
+type Selection = ScenarioPins & {
+  /** The cases `--only` (or `--case` inside a set) names; every case when absent. */
+  caseIds?: string[];
+  /** Their keys, in the same order. */
+  caseKeys?: string[];
+  /** The evaluators the selected cases need, when Hue lists them. */
+  needed?: EvalSetRunEvaluator[];
+};
+
+/** A chosen evaluator version and, when known, its evaluator. */
+interface ChosenEvaluator {
+  versionId: string;
+  evaluatorId?: string;
+}
+
+/** Labels a case answers to: its id, its key, and the title, name and case key in its metadata. */
+function caseLabels(item: Pick<DatasetCase, "id" | "externalKey" | "metadata">): string[] {
+  const metadata = item.metadata ?? {};
+  return [item.id, item.externalKey, metadata.title, metadata.name, metadata.case_key].filter(
+    (value): value is string => typeof value === "string" && value.trim() !== "",
+  );
+}
+
+/**
+ * The cases `--only` names among a version's cases, in the order named. Each selector matches a
+ * case's id, key, or metadata title, name or case key case-insensitively: exact matches first,
+ * then a unique prefix, then a unique substring.
+ */
+export function selectCases(
+  cases: Pick<DatasetCase, "id" | "externalKey" | "metadata">[],
+  selectors: string[],
+): { id: string; key: string }[] {
+  const chosen = new Map<string, string>();
+  for (const selector of selectors) {
+    const wanted = selector.trim().toLowerCase();
+    if (!wanted) throw new UsageError("--only needs a case key, title or id");
+    const labelled = cases.map((item) => ({
+      item,
+      labels: caseLabels(item).map((label) => label.trim().toLowerCase()),
+    }));
+    const tiers = [
+      (label: string) => label === wanted,
+      (label: string) => label.startsWith(wanted),
+      (label: string) => label.includes(wanted),
+    ];
+    let matches: typeof cases = [];
+    for (const tier of tiers) {
+      matches = labelled.filter(({ labels }) => labels.some(tier)).map(({ item }) => item);
+      if (matches.length) break;
+    }
+    if (matches.length > 1)
+      throw new UsageError(
+        `Several cases match "${selector}"; pass a key or id: ${matches.map((item) => item.externalKey).join(", ")}`,
+      );
+    const match = matches[0];
+    if (!match)
+      throw new UsageError(
+        `No case of this eval set version matches "${selector}". Cases: ${cases
+          .slice(0, 50)
+          .map((item) => item.externalKey)
+          .join(", ")}${cases.length > 50 ? ", …" : ""}`,
+      );
+    chosen.set(match.id, match.externalKey);
+  }
+  return [...chosen].map(([id, key]) => ({ id, key }));
+}
+
+/** The evaluators the selected cases need that the chosen versions leave out: one is covered by
+ * its own version or by any version of the same evaluator. */
+export function missingEvaluators(
+  needed: EvalSetRunEvaluator[],
+  chosen: ChosenEvaluator[],
+): EvalSetRunEvaluator[] {
+  const versions = new Set(chosen.map((item) => item.versionId));
+  const evaluators = new Set(
+    chosen.flatMap((item) => (item.evaluatorId ? [item.evaluatorId] : [])),
+  );
+  return needed.filter((item) => !versions.has(item.id) && !evaluators.has(item.evaluatorId));
+}
+
+const describeEvaluators = (items: EvalSetRunEvaluator[]) =>
+  items
+    .map(
+      (item) =>
+        `${item.name} (${item.kind === "world_outcome" ? "checks" : item.kind === "world_judge" ? "judge" : item.kind}, ${item.cases} ${item.cases === 1 ? "case" : "cases"})`,
+    )
+    .join(", ");
+
+/** The evaluators Hue says a version's cases need, or undefined from a deployment that does not
+ * list them yet. */
+async function runDefaults(
+  client: EvaluationClient,
+  versionId: string,
+  caseIds: string[] | undefined,
+): Promise<EvalSetVersionRun | undefined> {
+  try {
+    return await client.getEvalSetVersionRun(versionId, caseIds ? { caseIds } : {});
+  } catch (error) {
+    if (error instanceof HueApiError && error.status === 404) return undefined;
+    throw error;
+  }
+}
+
+/** The pins of `--set` or `--dataset-version`, before evaluators are chosen. */
+async function resolveSetPins(
   client: EvaluationClient,
   values: ReturnType<typeof parse>["values"],
 ): Promise<ScenarioPins> {
-  const extra = [...(values["scorer-version"] ?? [])];
-  for (const selector of values.scorer ?? [])
-    extra.push(await resolveScorerVersion(client, selector));
-  const caseSelector = values.case ?? values.scenario;
-  if (caseSelector) {
-    if (values["set-version"]) throw new UsageError("--set-version applies to --set only");
-    const pins = await resolveScenarioPins(client, caseSelector);
-    pins.scorerVersionIds = [...new Set([...pins.scorerVersionIds, ...extra])];
-    return pins;
-  }
-  if (!extra.length)
-    throw new UsageError(
-      `${values.set ? "--set" : "--dataset-version"} needs at least one --scorer or --scorer-version; use --case for published pins`,
-    );
   if (values.set) {
-    const pins = await resolveEvalSetPins(client, values.set, { scorerVersionIds: extra });
+    const pins = await resolveEvalSetPins(client, values.set);
     if (values["set-version"] === undefined) return pins;
     const wanted = integer("set-version", values["set-version"], 1, 1, 1_000_000);
     const dataset = await client.getDataset(pins.datasetId);
@@ -1388,11 +1497,108 @@ async function resolveSelection(
     name: dataset.name,
     datasetId: dataset.id,
     datasetVersionId: version.id,
-    scorerVersionIds: [...new Set(extra)],
+    scorerVersionIds: [],
     environmentVersionId: null,
     saved: version.frozenAt !== null,
     revision: version.revision,
   };
+}
+
+/**
+ * Resolves the selection and its evaluators. A published case keeps its publication's pins.
+ * An eval set (or dataset version) with no `--scorer` or `--scorer-version` runs with every
+ * evaluator its selected cases need, as Hue lists them: the outcome evaluator for cases with
+ * checks and each case's judges, so no required grading is skipped. Chosen evaluators that leave
+ * one of those out are refused unless `--allow-missing-evaluators` is passed, which warns.
+ */
+async function resolveSelection(
+  client: EvaluationClient,
+  values: ReturnType<typeof parse>["values"],
+  output: Output,
+): Promise<Selection> {
+  const chosen: ChosenEvaluator[] = (values["scorer-version"] ?? []).map((versionId) => ({
+    versionId,
+  }));
+  for (const selector of values.scorer ?? [])
+    chosen.push(await resolveScorerVersion(client, selector));
+  const extra = chosen.map((item) => item.versionId);
+  const caseSelector = values.case ?? values.scenario;
+  if (caseSelector && !values.set && !values["dataset-version"]) {
+    if (values["set-version"]) throw new UsageError("--set-version applies to --set only");
+    const pins = await resolveScenarioPins(client, caseSelector).catch((error: unknown) => {
+      // A case added straight to an eval set has no publication of its own: name the set.
+      if (error instanceof Error && error.message.startsWith("No published case matches"))
+        throw new Error(
+          `${error.message}. To run a case of an eval set, pass --set "<eval set>" --only ${JSON.stringify(caseSelector)}`,
+        );
+      throw error;
+    });
+    pins.scorerVersionIds = [...new Set([...pins.scorerVersionIds, ...extra])];
+    return pins;
+  }
+  const pins: Selection = await resolveSetPins(client, values);
+  const only = [...(caseSelector ? [caseSelector] : []), ...(values.only ?? [])];
+  if (only.length) {
+    const cases: DatasetCase[] = [];
+    let after: string | undefined;
+    do {
+      const page = await client.listCases(pins.datasetVersionId, { after });
+      cases.push(...page.items);
+      after = page.nextCursor ?? undefined;
+    } while (after);
+    const selected = selectCases(cases, only);
+    pins.caseIds = selected.map((item) => item.id);
+    pins.caseKeys = selected.map((item) => item.key);
+  }
+  const defaults = await runDefaults(client, pins.datasetVersionId, pins.caseIds);
+  const flag = values.set ? "--set" : "--dataset-version";
+  // "the case needs", "the 6 cases need", "the 2 selected cases need".
+  const count = pins.caseIds?.length ?? defaults?.cases;
+  const selected = pins.caseIds ? "selected " : "";
+  const selection =
+    count === 1
+      ? `the ${selected}case needs`
+      : `the ${count === undefined ? "" : `${count} `}${selected}cases need`;
+  if (defaults?.unresolvedJudges.length)
+    output.error(
+      `Warning: cases name judges this project has no evaluator for, so they are not judged: ${defaults.unresolvedJudges.map((item) => `${item.slug} (${item.cases} ${item.cases === 1 ? "case" : "cases"})`).join(", ")}`,
+    );
+  if (!extra.length) {
+    if (!defaults)
+      throw new UsageError(
+        `${flag} needs at least one --scorer or --scorer-version here: this Hue deployment does not list the evaluators an eval set needs`,
+      );
+    if (defaults.outcomeGaps.length || !defaults.evaluatorVersionIds.length)
+      throw new Error(
+        `Hue cannot choose every evaluator ${selection}: ${defaults.blockers.filter((item) => !item.includes("is a draft")).join(" ")}`,
+      );
+    pins.scorerVersionIds = [...defaults.evaluatorVersionIds];
+    pins.needed = defaults.evaluators;
+    output.log(`Evaluators (every one ${selection}): ${describeEvaluators(defaults.evaluators)}`);
+    return pins;
+  }
+  pins.scorerVersionIds = [...new Set(extra)];
+  if (!defaults) return pins;
+  pins.needed = defaults.evaluators;
+  for (const item of chosen)
+    if (!item.evaluatorId && !defaults.evaluatorVersionIds.includes(item.versionId)) {
+      const version = await client.getScorerVersion(item.versionId).catch((error: unknown) => {
+        if (error instanceof HueApiError && error.status === 404) return undefined;
+        throw error;
+      });
+      const owner = version as { scorerId?: string; evaluatorId?: string } | undefined;
+      item.evaluatorId = owner?.evaluatorId ?? owner?.scorerId;
+    }
+  const missing = missingEvaluators(defaults.evaluators, chosen);
+  if (!missing.length) return pins;
+  if (!values["allow-missing-evaluators"])
+    throw new Error(
+      `The chosen evaluators leave out ${missing.length === 1 ? "one" : missing.length} that ${selection}: ${describeEvaluators(missing)}. Drop --scorer and --scorer-version to run with every evaluator the cases need, add the missing ones, or pass --allow-missing-evaluators to run without them.`,
+    );
+  output.error(
+    `Warning: running without evaluators ${selection}, so their checks or judges are not graded: ${describeEvaluators(missing)}`,
+  );
+  return pins;
 }
 
 type RunMode = "auto" | "direct" | "simulation";
@@ -1455,19 +1661,43 @@ export function runKindOf(selection: { mode: RunMode; cases: number; worldCases:
 
 async function inspectSelection(
   client: EvaluationClient,
-  pins: ScenarioPins,
+  pins: Selection,
   mode: RunMode,
 ): Promise<{ kind: RunKind; cases: number; worldCases: number; refusal?: string }> {
   let cases = 0;
   let worldCases = 0;
   let after: string | undefined;
+  const only = pins.caseIds ? new Set(pins.caseIds) : undefined;
   do {
     const page = await client.listCases(pins.datasetVersionId, { after });
-    cases += page.items.length;
-    worldCases += page.items.filter(pinsWorld).length;
+    const items = only ? page.items.filter((item) => only.has(item.id)) : page.items;
+    cases += items.length;
+    worldCases += items.filter(pinsWorld).length;
     after = page.nextCursor ?? undefined;
   } while (after);
   return { cases, worldCases, ...runKindOf({ mode, cases, worldCases }) };
+}
+
+/** Each case's answer as Hue stored it, read from its subject: `null` when the case has no
+ * subject yet or no stored output (`--no-output`). */
+export async function caseReplies(
+  client: Pick<EvaluationClient, "getSubject">,
+  cases: Pick<CaseVerdict, "caseId" | "subjectId">[],
+): Promise<Map<string, JsonValue | null>> {
+  const replies = new Map<string, JsonValue | null>();
+  const queue = cases.filter((item) => item.subjectId);
+  await Promise.all(
+    Array.from({ length: Math.min(8, queue.length) }, async () => {
+      for (let item = queue.shift(); item; item = queue.shift()) {
+        const subject = await client.getSubject(item.subjectId!).catch((error: unknown) => {
+          if (error instanceof HueApiError) return undefined;
+          throw error;
+        });
+        replies.set(item.caseId, subject?.hasOutput ? (subject.output ?? null) : null);
+      }
+    }),
+  );
+  return replies;
 }
 
 function toJson(
@@ -1476,6 +1706,7 @@ function toJson(
   baseline?: { experimentId: string; comparison: VerdictComparison },
   extra: Record<string, JsonValue> = {},
   telemetry: TelemetryNotAccepted[] = [],
+  replies?: Map<string, JsonValue | null>,
 ) {
   const notAccepted = new Map(telemetry.map((entry) => [entry.caseId, entry.issues]));
   return {
@@ -1483,14 +1714,13 @@ function toJson(
     runId: verdicts.runId,
     runUrl,
     complete: verdicts.results.complete,
-    cases: verdicts.summary.cases.map((item) =>
-      notAccepted.has(item.caseId)
-        ? {
-            ...item,
-            telemetry: { code: TELEMETRY_NOT_ACCEPTED, issues: notAccepted.get(item.caseId)! },
-          }
-        : item,
-    ),
+    cases: verdicts.summary.cases.map((item) => ({
+      ...item,
+      ...(replies ? { reply: replies.get(item.caseId) ?? null } : {}),
+      ...(notAccepted.has(item.caseId)
+        ? { telemetry: { code: TELEMETRY_NOT_ACCEPTED, issues: notAccepted.get(item.caseId)! } }
+        : {}),
+    })),
     totals: verdicts.summary.totals,
     ...extra,
     ...(baseline
@@ -1782,7 +2012,7 @@ async function readAndReportVerdicts(
   }
   if (values.json) {
     process.stdout.write(
-      `${JSON.stringify(toJson(verdicts, run.runUrl, baseline, run.extra, run.telemetryNotAccepted))}\n`,
+      `${JSON.stringify(toJson(verdicts, run.runUrl, baseline, run.extra, run.telemetryNotAccepted, await caseReplies(client, verdicts.summary.cases)))}\n`,
     );
   } else {
     renderTable(verdicts, output);
@@ -1823,7 +2053,7 @@ async function runOnce(
   const baselineId = parseBaseline(values.baseline);
   const mode = parseMode(values.mode);
   integer("wait", values.wait, 300, 0, 86_400);
-  const pins = await resolveSelection(client, values);
+  const pins = await resolveSelection(client, values, output);
   const selection = await inspectSelection(client, pins, mode);
   if (values.check) return checkRun(client, values, pins, selection, agent, output);
   if (selection.refusal) {
@@ -1833,7 +2063,7 @@ async function runOnce(
   if (!pins.saved) {
     if (!values["save-version"]) {
       output.error(
-        `The ${pins.scenarioId ? "Scenario" : "eval set"} "${pins.name}" points at an unsaved version. Choose "Save eval-set version" in Hue, or pass --save-version to freeze it now, then rerun.`,
+        `The ${pins.scenarioId ? "case" : "eval set"} "${pins.name}" points at an unsaved version. Choose "Save eval-set version" in Hue, or pass --save-version to freeze it now, then rerun.`,
       );
       return 1;
     }
@@ -1863,6 +2093,7 @@ async function runOnce(
           datasetVersionId: pins.datasetVersionId,
           scorerVersionIds: [...pins.scorerVersionIds].sort(),
           agent,
+          ...(pins.caseIds ? { caseIds: [...pins.caseIds].sort() } : {}),
         }),
         source: {
           directory: checkpointDirectory,
@@ -1919,6 +2150,7 @@ async function runOnce(
         kind: "pins",
         datasetVersionId: pins.datasetVersionId,
         scorerVersionIds: pins.scorerVersionIds,
+        ...(pins.caseIds ? { caseIds: pins.caseIds } : {}),
       },
       runName,
       // Outputs, error messages and explanations are stored unless opted out; --content governs
@@ -1998,7 +2230,7 @@ async function runOnce(
 async function checkRun(
   client: EvaluationClient,
   values: ReturnType<typeof parse>["values"],
-  pins: ScenarioPins,
+  pins: Selection,
   selection: Awaited<ReturnType<typeof inspectSelection>>,
   agent: { key: string; revision: string },
   output: Output,
@@ -2033,7 +2265,11 @@ async function checkRun(
       saved: pins.saved,
       cases,
       evaluators: pins.scorerVersionIds.length,
+      evaluatorVersionIds: pins.scorerVersionIds,
+      ...(pins.caseKeys ? { only: pins.caseKeys } : {}),
     },
+    // What each evaluator the selected cases need is, when Hue lists them.
+    ...(pins.needed ? { needed: pins.needed } : {}),
     mode: kind,
     worldCases: kind === "direct" ? 0 : worldCases,
     directCases: kind === "direct" ? cases : cases - worldCases,
@@ -2045,6 +2281,7 @@ async function checkRun(
     output.log(
       `Selection: ${check.selection.kind === "case" ? "case" : "eval set"} "${pins.name}", ${cases} ${cases === 1 ? "case" : "cases"}, ${pins.scorerVersionIds.length} ${pins.scorerVersionIds.length === 1 ? "evaluator" : "evaluators"}`,
     );
+    if (pins.caseKeys) output.log(`Only: ${pins.caseKeys.join(", ")}`);
     const worlds = `${worldCases} ${worldCases === 1 ? "case gets" : "cases get"} a fresh world, reached through the HUE_SIM_*_URL mirrors and HUE_WORLD_TOKEN`;
     output.log(
       kind === "direct"
@@ -2061,7 +2298,7 @@ async function checkRun(
   }
   if (unsaved) {
     output.error(
-      `The ${pins.scenarioId ? "Scenario" : "eval set"} "${pins.name}" points at an unsaved version; add --save-version to freeze it when the run starts.`,
+      `The ${pins.scenarioId ? "case" : "eval set"} "${pins.name}" points at an unsaved version; add --save-version to freeze it when the run starts.`,
     );
     return 1;
   }
@@ -2097,7 +2334,7 @@ async function runExperimentAttempt(
     kind: "direct" | "mixed";
     client: EvaluationClient;
     values: ReturnType<typeof parse>["values"];
-    pins: ScenarioPins;
+    pins: Selection;
     runName: string;
     projectId: string;
     agent: { key: string; revision: string };
@@ -2130,6 +2367,7 @@ async function runExperimentAttempt(
       datasetVersionId: pins.datasetVersionId,
       scorerVersionIds: [...pins.scorerVersionIds].sort(),
       config,
+      ...(pins.caseIds ? { caseIds: [...pins.caseIds].sort() } : {}),
     });
     let attempt = await store.read<ExperimentAttempt>("active-attempt");
     if (attempt && attempt.stage !== "completed" && attempt.selectionDigest !== selectionDigest)
@@ -2147,6 +2385,7 @@ async function runExperimentAttempt(
         datasetVersionId: pins.datasetVersionId,
         scorerVersionIds: pins.scorerVersionIds,
         config,
+        ...(pins.caseIds ? { caseIds: pins.caseIds } : {}),
       });
       attempt.experimentId = experiment.id;
       attempt.stage = "running";
@@ -2550,13 +2789,24 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     const adapterFile = positionals[0];
     if ((adapterFile ? 1 : 0) + (values.command ? 1 : 0) !== 1)
       throw new UsageError("Pass exactly one agent: an adapter file or --command");
-    const selections = [values.case, values.scenario, values.set, values["dataset-version"]].filter(
-      (value) => value !== undefined,
-    ).length;
-    if (values.worker && selections)
+    const count = (...items: (string | undefined)[]) =>
+      items.filter((value) => value !== undefined).length;
+    const caseSelections = count(values.case, values.scenario);
+    const setSelections = count(values.set, values["dataset-version"]);
+    if (values.worker && (caseSelections || setSelections || values.only?.length))
       throw new UsageError("--worker takes no selection; Hue chooses the run to execute");
-    if (!values.worker && selections !== 1)
-      throw new UsageError("Pass exactly one of --case, --set or --dataset-version");
+    // `--case` inside `--set` runs that case of the set, as `--only` does.
+    if (
+      !values.worker &&
+      (caseSelections > 1 || setSelections > 1 || caseSelections + setSelections === 0)
+    )
+      throw new UsageError(
+        "Pass exactly one of --case, --set or --dataset-version; to run some cases of a set, add --only <case key or title>",
+      );
+    if (values.only?.length && !setSelections)
+      throw new UsageError("--only applies to --set or --dataset-version");
+    if (values["allow-missing-evaluators"] && !setSelections)
+      throw new UsageError("--allow-missing-evaluators applies to --set or --dataset-version");
     let envFile: string | undefined;
     try {
       envFile = envFileArgument(values, process.cwd());

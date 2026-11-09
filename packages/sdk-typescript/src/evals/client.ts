@@ -38,6 +38,7 @@ import type {
   DatasetVersion,
   EvalSet,
   EvalSetCase,
+  EvalSetVersionRun,
   EvalSetVersion,
   EvaluationItem,
   EvaluationRun,
@@ -614,6 +615,16 @@ export class EvaluationClient {
   getDatasetVersion(id: string) {
     return this.request<DatasetVersion>("GET", `/dataset-versions/${uuid(id)}`);
   }
+  /** Reads the evaluators a run of an eval set version, or of the given cases alone, needs. */
+  getEvalSetVersionRun(id: string, options: { caseIds?: string[] } = {}) {
+    const query = new URLSearchParams(
+      (options.caseIds ?? []).map((caseId) => ["caseId", uuid(caseId)]),
+    ).toString();
+    return this.request<EvalSetVersionRun>(
+      "GET",
+      `/dataset-versions/${uuid(id)}/run${query ? `?${query}` : ""}`,
+    );
+  }
   /** Lists the full cases of a dataset version; use small page limits for large values. */
   listCases(id: string, page?: PageOptions) {
     return this.request<Page<DatasetCase>>(
@@ -884,6 +895,8 @@ export class EvaluationClient {
     config: JsonValue;
     /** The experiment's own tag names; it also shows its dataset's tags. */
     tags?: string[];
+    /** Some of the version's cases: the experiment lists, starts and finishes only these. */
+    caseIds?: string[];
   }) {
     return this.request<{
       /** Experiment ID. */
@@ -1142,6 +1155,8 @@ export class EvaluationClient {
     config: JsonValue;
     /** The run's own tag names; it also shows its eval set's tags. */
     tags?: string[];
+    /** Some of the version's cases: the run lists, starts and finishes only these. */
+    caseIds?: string[];
   }): Promise<{
     /** Run ID. */
     id: string;

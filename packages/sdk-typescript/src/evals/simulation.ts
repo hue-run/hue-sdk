@@ -73,6 +73,8 @@ export type SimulationDefinition =
       config?: JsonValue;
       /** Experiment display name; defaults to the dataset name, then `Simulation`. */
       name?: string;
+      /** Some of the version's cases to run alone; every case when omitted. */
+      caseIds?: string[];
     }
   | {
       /** Publish and resolve the repository-authored definition. */
@@ -348,6 +350,7 @@ function definitionIdentity(definition: SimulationDefinition): JsonValue {
       datasetVersionId: definition.datasetVersionId,
       scorerVersionIds: [...definition.scorerVersionIds].sort(),
       config: definition.config ?? {},
+      ...(definition.caseIds ? { caseIds: [...definition.caseIds].sort() } : {}),
     });
   return json(
     {
@@ -700,6 +703,7 @@ async function resolveExperiment(
       datasetVersionId,
       scorerVersionIds: [...scorerVersionIds],
       config: definition.config ?? {},
+      ...(definition.caseIds ? { caseIds: [...definition.caseIds] } : {}),
     });
     return { experimentId: created.id, bindings: options.localScorers ?? [] };
   }
