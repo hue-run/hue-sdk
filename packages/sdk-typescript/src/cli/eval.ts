@@ -30,7 +30,7 @@ import type {
 import { pinsWorld, TargetResult } from "../evals/types.js";
 import { CheckpointIdentityError, CheckpointStore, checkpointPath } from "../evals/checkpoint.js";
 import { onForcedExit, runForcedExitCleanups } from "../evals/exit-cleanup.js";
-import { safeFilename } from "../evals/files.js";
+import { OutputFileError, outputFileLimits, readAgentFile, safeFilename } from "../evals/files.js";
 import { digest } from "../evals/json.js";
 import { runLocalAgent, type LocalAgentDirectContext } from "../evals/local-worker.js";
 import {
@@ -642,30 +642,48 @@ function redactSecrets(text: string, secrets: string[]): string {
 
 const TEXT_CONTENT_TYPES = new Set(["text/plain", "text/csv", "application/json"]);
 
-/** A generated file with its name, and a text document held in memory with its text, cleared of
- * the case's credentials. Other documents, a file declared by path and text that is not UTF-8
- * are uploaded as written. */
-function redactFile(file: OutputFile, secrets: string[]): OutputFile {
-  // A name that is not a string is left for staging to refuse.
-  const filename =
-    typeof file.filename === "string" ? redactSecrets(file.filename, secrets) : file.filename;
-  if (filename !== file.filename) file = { ...file, filename };
-  if (!file.bytes || !TEXT_CONTENT_TYPES.has(file.contentType)) return file;
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(file.bytes);
-  } catch {
-    return file;
+/**
+ * A generated file with its name cleared of the case's credentials, and with the bytes it will be
+ * staged and uploaded from: a file declared by path is read here, once. A credential's bytes are
+ * replaced in a text document, whatever its encoding; any other document holding them is refused,
+ * since replacing bytes inside it would corrupt it.
+ */
+async function redactFile(file: OutputFile, secrets: string[]): Promise<OutputFile> {
+  // A name that is not a string is left for staging to refuse before it reads anything.
+  if (typeof file.filename !== "string") return file;
+  const filename = redactSecrets(file.filename, secrets);
+  const label = `Generated file ${safeFilename(filename)}`;
+  let bytes: unknown = file.bytes;
+  if (bytes === undefined && typeof file.path === "string") {
+    bytes = await readAgentFile(file.path, label, outputFileLimits.bytes);
+    if (!bytes) throw new OutputFileError(`${label} could not be read`);
   }
-  const redacted = redactSecrets(text, secrets);
-  return redacted === text ? file : { ...file, bytes: new TextEncoder().encode(redacted) };
+  if (!ArrayBuffer.isView(bytes)) return filename === file.filename ? file : { ...file, filename };
+  const view = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // One latin1 character per byte, so a credential is found in bytes that are not UTF-8 too.
+  const original = view.toString("latin1");
+  const redacted = redactSecrets(
+    original,
+    secrets.map((secret) => Buffer.from(secret).toString("latin1")),
+  );
+  if (redacted !== original && !TEXT_CONTENT_TYPES.has(file.contentType))
+    throw new OutputFileError(
+      `${label} contains a credential the case was given; only text documents are redacted`,
+    );
+  return {
+    ...file,
+    filename,
+    bytes: redacted === original ? view : Buffer.from(redacted, "latin1"),
+    path: undefined,
+  };
 }
 
 /** Generated files cleared of the case's credentials. A name redaction made equal to another
  * file's, as staging compares them, gains `-2`, `-3`, … before its extension, so every file is
  * still taken. */
-function redactFiles(files: OutputFile[], secrets: string[]): OutputFile[] {
-  const redacted = files.map((file) => redactFile(file, secrets));
+async function redactFiles(files: OutputFile[], secrets: string[]): Promise<OutputFile[]> {
+  const redacted: OutputFile[] = [];
+  for (const file of files) redacted.push(await redactFile(file, secrets));
   const renamed = redacted.map((file, index) => file.filename !== files[index]!.filename);
   const taken = new Set(
     redacted.flatMap((file, index) =>
@@ -690,11 +708,6 @@ function redactFiles(files: OutputFile[], secrets: string[]): OutputFile[] {
 function redactAnswer(value: unknown, secrets: string[], depth = 0): unknown {
   if (typeof value === "string") return redactSecrets(value, secrets);
   if (depth > 64 || !value || typeof value !== "object") return value;
-  if (value instanceof TargetResult)
-    return new TargetResult(
-      redactAnswer(value.output, secrets, depth + 1) as JsonValue | undefined,
-      redactFiles(value.files, secrets),
-    );
   if (Array.isArray(value)) return value.map((item) => redactAnswer(item, secrets, depth + 1));
   if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
     return value;
@@ -715,7 +728,14 @@ function redacting<Context, Answer>(
     // A direct case's context carries no world; its answer is still cleared of the CLI's own.
     const secrets = caseSecrets(context as CaseCredentials);
     try {
-      return redactAnswer(await adapter(inputs, context), secrets) as Answer;
+      const answer = await adapter(inputs, context);
+      // Only a returned TargetResult has its files staged; one nested in the output is refused.
+      if (answer instanceof TargetResult)
+        return new TargetResult(
+          redactAnswer(answer.output, secrets) as JsonValue | undefined,
+          await redactFiles(answer.files, secrets),
+        ) as Answer;
+      return redactAnswer(answer, secrets) as Answer;
     } catch (error) {
       if (!(error instanceof Error)) throw error;
       // The name is exported too, as the span's error type, so it is cleared like the message.
