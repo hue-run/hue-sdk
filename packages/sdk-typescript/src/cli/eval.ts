@@ -1547,6 +1547,10 @@ async function resolveSelection(
       after = page.nextCursor ?? undefined;
     } while (after);
     const selected = selectCases(cases, only);
+    // shortcut: the selection travels as `caseId` query parameters; past 100 a URL can grow
+    // beyond what proxies accept, so a larger subset is better run as its own eval set version.
+    if (selected.length > 100)
+      throw new UsageError("--only selects at most 100 cases; run the whole set instead");
     pins.caseIds = selected.map((item) => item.id);
     pins.caseKeys = selected.map((item) => item.key);
   }
