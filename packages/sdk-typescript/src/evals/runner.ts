@@ -98,6 +98,18 @@ export class TargetCancelledError extends Error {
     this.name = "TargetCancelledError";
   }
 }
+/** A target failure that still produced an output, such as a conversation's replies before the
+ * turn that failed: the case completes as an error of `cause`, with `output` stored as its
+ * answer. Internal to the CLI's command adapters. */
+export class TargetErrorWithOutput extends Error {
+  constructor(
+    readonly output: JsonValue,
+    override readonly cause: Error,
+  ) {
+    super(cause.message, { cause });
+    this.name = "TargetErrorWithOutput";
+  }
+}
 /** Thrown by the environment target when the target did not return before its world's deadline.
  * The world is sealed abandoned and the attempt saved as an `error` of type `TargetTimeout`, so a
  * hung agent ends its case instead of holding the run open. */
@@ -992,7 +1004,10 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
                   output = result.output;
                   generated = result.files;
                 } else output = result;
-              } catch (error) {
+              } catch (thrown) {
+                // A failure that kept an output (a conversation's earlier replies) completes as
+                // its cause with that output.
+                const error = thrown instanceof TargetErrorWithOutput ? thrown.cause : thrown;
                 if (error instanceof TargetOutcomeUncertainError) throw error;
                 // A stop the caller asked for is no outcome: the execution stays open for the
                 // resumed run to replace instead of being scored as cancelled.
@@ -1007,6 +1022,10 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
                 }
                 state = error instanceof TargetCancelledError ? "cancelled" : "error";
                 targetError = error;
+                // Kept only when outputs are stored: a resume could not restore one held in
+                // memory alone, and a failed case has no other use for it.
+                if (thrown instanceof TargetErrorWithOutput && options.persistResultContent)
+                  output = thrown.output;
                 options.hue.recordError(span.span, error);
               }
               // Output validation is outside the target catch: a successful target never becomes an agent error because upload serialization failed.

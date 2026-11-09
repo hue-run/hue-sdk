@@ -43,6 +43,9 @@ export const evalConfig = z
     localScorers: z.array(z.string().min(1)).default([]),
     trials: z.number().int().min(1).max(10).default(1),
     minPassRate: z.number().min(0).max(1).default(1),
+    /** Who drives a conversation case's scripted messages: Hue, one call per message, or the
+     * command, one call with the case's inputs unchanged. */
+    turns: z.enum(["hue", "runner"]).default("hue"),
   })
   .refine(
     (value) => Number(!!value.evalSetId) + Number(!!value.evalSetVersionId) === 1,
@@ -129,6 +132,8 @@ const USAGE = `Usage: hue eval --ci --config hue.eval.json --report-dir .hue/rep
 --wait <sec>       Scoring wait (default: config or 300)
 --trials <n>       Runs of the same selection, 1 to 10 (default: config or 1)
 --min-pass-rate <r> Share of scored trials each case must pass, 0 to 1 (default: config or 1)
+--turns <mode>     Conversation cases: hue sends each scripted message as its own call,
+                   runner makes one call with the whole case (default: config or hue)
 --content          Capture trace content (default: config or enabled)
 --no-content       Export trace metadata only
 --no-output        Omit stored case outputs, error messages and scorer explanations
@@ -223,6 +228,7 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
           wait: { type: "string" },
           trials: { type: "string" },
           "min-pass-rate": { type: "string" },
+          turns: { type: "string" },
           content: { type: "boolean" },
           "no-content": { type: "boolean" },
           "no-output": { type: "boolean" },
@@ -288,6 +294,11 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
       if (values.content) config.captureContent = true;
       if (values["no-content"]) config.captureContent = false;
       if (values["no-output"]) config.persistResultContent = false;
+      if (values.turns !== undefined) {
+        if (values.turns !== "hue" && values.turns !== "runner")
+          throw new ConfigurationError("--turns must be hue or runner");
+        config.turns = values.turns;
+      }
       for (const [flag, key] of [
         ["concurrency", "concurrency"],
         ["deadline", "deadlineSeconds"],
@@ -322,8 +333,14 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
       if (config.policy.baselineComparisons?.length && !ci.baseSha)
         throw new ConfigurationError("Baseline comparisons require an intended base commit");
       // The pass rate only gates saved receipts, so changing it re-gates without running agents.
-      const { captureContent, persistResultContent, trials, minPassRate, ...recoveryConfig } =
-        config;
+      const {
+        captureContent,
+        persistResultContent,
+        trials,
+        minPassRate,
+        turns,
+        ...recoveryConfig
+      } = config;
       const identity = {
         origin: baseUrl,
         // Default policies retain identities written before explicit privacy controls existed.
@@ -332,6 +349,9 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
           ...(!captureContent ? { captureContent } : {}),
           ...(!persistResultContent ? { persistResultContent } : {}),
           ...(trials > 1 ? { trials } : {}),
+          // The default stays out of the identity, so rerunning a job after an upgrade
+          // recovers its invocation instead of starting another one.
+          ...(turns !== "hue" ? { turns } : {}),
         },
         ci,
         ...(ci.provider === "github" ? { job: process.env.GITHUB_JOB ?? "" } : {}),
