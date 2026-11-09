@@ -4435,7 +4435,8 @@ describe("hue eval conversation turns", () => {
               evalSetVersionId: f.version.id,
               command: 'node "$HUE_PROJECT_DIR/agent-turns.mjs"',
               scoringTimeoutSeconds: 2,
-              timeoutSeconds: 300,
+              // Short enough that a world sized at two calls of it alone ends before either.
+              timeoutSeconds: 2,
               deadlineSeconds: 3000,
               ...(turns ? { turns } : {}),
             }),
@@ -4449,11 +4450,12 @@ describe("hue eval conversation turns", () => {
           if (turns === "runner") {
             expect(records).toHaveLength(1);
             expect(records[0]!.inputs).toEqual(conversationInputs);
-            expect(f.calls.worldCreates[0]).toMatchObject({ ttlSeconds: 300 });
+            expect(f.calls.worldCreates[0]).toMatchObject({ ttlSeconds: 2 });
             expect(f.calls.completions[0]?.output).toEqual({ whole: ["context", "turns"] });
           } else {
             expectDrivenTurns(records);
-            expect(f.calls.worldCreates[0]).toMatchObject({ ttlSeconds: 600 });
+            // Two calls, each with its timeout and the 8 s it may take to stop.
+            expect(f.calls.worldCreates[0]).toMatchObject({ ttlSeconds: 20 });
             expect(f.calls.completions[0]?.output).toEqual(bothReplies);
           }
         } finally {

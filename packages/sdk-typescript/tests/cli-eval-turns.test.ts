@@ -88,10 +88,10 @@ describe("driveTurns", () => {
     const replies = await driveTurns(conversation, async ({ inputs, env }) => {
       calls.push({ inputs, env });
       const task = (inputs as { task: string }).task;
-      // An empty answer is recorded as an empty reply.
-      return task === "d" ? undefined : { said: task };
+      // An empty answer is recorded as an empty reply, a JSON null as null.
+      return task === "d" ? undefined : task === "e" ? null : { said: task };
     });
-    expect(replies).toEqual([{ said: "c" }, "", { said: "e" }]);
+    expect(replies).toEqual([{ said: "c" }, "", null]);
     expect(calls.map((call) => call.inputs)).toEqual([
       { context: "x", task: "c", conversation: { turns: [{ input: "a", reply: "b" }] } },
       {

@@ -1423,8 +1423,8 @@ Hue control credentials are removed. World cases receive their own scoped connec
 and world clock. The command reads `{"inputs": ..., "config": ...}` on stdin and writes its
 answer on stdout or through the existing case output files. A conversation case with two or more
 scripted messages runs the command once per message, as described under
-[conversation cases](#conversation-cases); `timeoutSeconds` applies to each call, and the World lasts that
-long per message within the deadline. Set `"turns": "runner"` (or pass `--turns runner`) to keep
+[conversation cases](#conversation-cases); `timeoutSeconds` applies to each call, and the World
+lasts that long plus 8 seconds per message, within the deadline. Set `"turns": "runner"` (or pass `--turns runner`) to keep
 one call per case with its inputs unchanged.
 
 The CLI's trace content and stored case outputs are enabled by default. Set `captureContent: false`

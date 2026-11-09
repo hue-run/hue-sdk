@@ -824,6 +824,10 @@ async function replaceFile(path: string, text: string): Promise<void> {
   await rename(temporary, path);
 }
 
+/** Seconds of a world's life a conversation turn needs beyond its timeout: the stop grace and
+ * reap that `turnTimeout` holds back, and one more for the call itself. */
+const TURN_RESERVE_SECONDS = Math.ceil((COMMAND_KILL_GRACE_MS + COMMAND_REAP_MS) / 1000) + 1;
+
 /** Seconds a conversation turn may run: the per-call timeout, cut to what is left of the world
  * after the stop grace, so a turn the world's deadline would stop ends as its own timeout and
  * the case keeps the earlier replies. */
@@ -1046,9 +1050,14 @@ const executeCiRun: ExecuteCiRun = async ({
       environmentEvidence: "when_pinned",
       async target(inputs, context) {
         signal.throwIfAborted();
-        // The world outlives every turn of a conversation the command answers one by one.
+        // The world outlives every turn of a conversation the command answers one by one,
+        // each with room to stop before the next.
         const calls =
           (config.turns === "hue" ? scriptedConversation(inputs)?.messages.length : undefined) ?? 1;
+        const lifetime =
+          calls > 1
+            ? calls * (config.timeoutSeconds + TURN_RESERVE_SECONDS)
+            : config.timeoutSeconds;
         if (pinsWorld(context.item))
           return runEnvironmentTarget({
             client,
@@ -1060,7 +1069,7 @@ const executeCiRun: ExecuteCiRun = async ({
             deprecationWarnings: false,
             agentRevision: config.name,
             ttlSeconds: Math.min(
-              config.timeoutSeconds * calls,
+              lifetime,
               86_400,
               Math.max(1, Math.ceil((Date.parse(invocation.deadlineAt) - Date.now()) / 1000)),
             ),

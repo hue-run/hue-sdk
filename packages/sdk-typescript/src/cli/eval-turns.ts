@@ -150,9 +150,11 @@ export async function driveTurns(
       // A conversation that failed on its first turn has no answer, as a one-call case has none.
       throw replies.length ? new TargetErrorWithOutput({ replies }, failure) : failure;
     }
-    // An empty answer is an empty reply: the list keeps one entry per message sent.
-    replies.push(reply ?? "");
-    turns.push({ input: message, reply: reply ?? "" });
+    // An empty answer is an empty reply: the list keeps one entry per message sent. A JSON
+    // `null` the command printed stays `null`.
+    const recorded = reply === undefined ? "" : reply;
+    replies.push(recorded);
+    turns.push({ input: message, reply: recorded });
   }
   return replies;
 }
