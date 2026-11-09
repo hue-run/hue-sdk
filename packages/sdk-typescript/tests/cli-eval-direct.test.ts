@@ -2449,7 +2449,6 @@ writeFileSync(out + "/result.json", JSON.stringify({ key }));
 writeFileSync(out + "/notes.txt", "\\ufeffcalled with " + key + "\\n");
 writeFileSync(out + "/rows.json", JSON.stringify([{ key }]));
 writeFileSync(out + "/latin1.txt", Buffer.concat([Buffer.from([0xff]), Buffer.from(key)]));
-writeFileSync(out + "/chart.png", Buffer.concat([Buffer.from([0x89, 0x50]), Buffer.from(key)]));
 writeFileSync(out + "/report-" + key + ".csv", "a,b\\n");
 writeFileSync(out + "/report-[redacted].csv", "c,d\\n");
 process.stdout.write(key);
@@ -2473,15 +2472,16 @@ process.stdout.write(key);
       expect(result.stdout).not.toContain(key);
       expect(standIn.calls.completions[0]).toMatchObject({ output: { key: "[redacted]" } });
       expect(JSON.stringify(standIn.calls.completions)).not.toContain(key);
-      // UTF-8 text documents are cleared of it, byte order mark kept; other files are not read.
+      // Text documents are cleared of it, byte order mark and bytes that are not UTF-8 kept.
       const uploaded = (name: string) =>
         Buffer.from(
           [...standIn.artifacts.values()].find((stored) => stored.filename === name)!.bytes!,
         );
       expect(uploaded("notes.txt").toString()).toBe("\ufeffcalled with [redacted]\n");
       expect(JSON.parse(uploaded("rows.json").toString())).toEqual([{ key: "[redacted]" }]);
-      expect(uploaded("latin1.txt").subarray(1).toString()).toBe(key);
-      expect(uploaded("chart.png").subarray(2).toString()).toBe(key);
+      expect(uploaded("latin1.txt")).toEqual(
+        Buffer.concat([Buffer.from([0xff]), Buffer.from("[redacted]")]),
+      );
       // A generated file's name is cleared of it too, and stays distinct from the agent's own
       // file of the redacted name, so both are uploaded.
       const names = [...standIn.artifacts.values()].map((stored) => stored.filename);

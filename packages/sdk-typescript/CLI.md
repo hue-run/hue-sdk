@@ -1322,9 +1322,11 @@ rerunning it with another output or telemetry capture policy is refused with the
 To resume a metadata-only trace from an earlier release, add `--no-content` and keep its original `--no-output` choice.
 
 Files the agent writes to `output/` are uploaded as generated documents with or without
-`--no-output`, and they are not redacted the way the answer is: `hue eval` replaces the same
-credentials only in the UTF-8 `.txt`, `.csv` and `.json` documents it collects, while PDF, Office
-and image documents, and files an adapter returns by `path`, are uploaded as written. A direct
+`--no-output`. `hue eval` checks the bytes of every generated file, including files an adapter
+returns by `path`, which it reads once and uploads from those bytes, for the same credentials:
+it replaces them in `.txt`, `.csv` and `.json` documents, in any encoding, and fails the case
+without uploading its files when a PDF, Office, image, audio or video document contains one. Only
+a credential's exact value, as written or JSON-escaped, is found. A direct
 case also keeps the agent's raw `output/` files on disk under its checkpoint directory
 (`.hue/eval/<agent-key>/<project>/direct/<experiment>/files/`). Never write credentials to
 `output/`.

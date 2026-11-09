@@ -8,6 +8,16 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Fixed
+
+- `hue eval` checks every generated file for the credentials it handed the case, whatever the
+  file's type, before the file is checkpointed or uploaded. A text document (`.txt`, `.csv`,
+  `.json`) has them replaced with `[redacted]` even when it is not UTF-8. Any other document that
+  contains one fails the case, and none of its files are uploaded. A file an adapter returns by
+  `path` is read once, checked, and uploaded from those bytes.
+
 ### [0.28.0] - 2026-11-08
 
 #### Added
