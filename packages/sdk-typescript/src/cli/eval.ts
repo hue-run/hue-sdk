@@ -1721,13 +1721,15 @@ async function inspectSelection(
 export async function caseReplies(
   client: Pick<EvaluationClient, "getSubject">,
   cases: Pick<CaseVerdict, "caseId" | "subjectId">[],
+  signal?: AbortSignal,
 ): Promise<CaseReplies> {
   const replies = new Map<string, JsonValue | null>();
   const unavailable = new Set<string>();
   const queue = cases.filter((item) => item.subjectId);
   await Promise.all(
     Array.from({ length: Math.min(8, queue.length) }, async () => {
-      for (let item = queue.shift(); item; item = queue.shift()) {
+      // A stop takes no further case; one not read is marked unavailable below.
+      for (let item = queue.shift(); item && !signal?.aborted; item = queue.shift()) {
         try {
           const subject = await client.getSubject(item.subjectId!);
           replies.set(item.caseId, subject.hasOutput ? (subject.output ?? null) : null);
@@ -1740,6 +1742,11 @@ export async function caseReplies(
       }
     }),
   );
+  for (const item of cases)
+    if (item.subjectId && !replies.has(item.caseId)) {
+      replies.set(item.caseId, null);
+      unavailable.add(item.caseId);
+    }
   return { replies, unavailable };
 }
 
@@ -2065,7 +2072,7 @@ async function readAndReportVerdicts(
     };
   }
   if (values.json) {
-    const replies = await caseReplies(client, verdicts.summary.cases);
+    const replies = await caseReplies(client, verdicts.summary.cases, signal);
     if (replies.unavailable.size)
       output.error(
         `Warning: Hue did not return the stored reply of ${replies.unavailable.size} ${replies.unavailable.size === 1 ? "case" : "cases"}; they carry "replyUnavailable": true.`,
@@ -2767,7 +2774,7 @@ async function runWorker(
           );
           if (signal.aborted) return;
           if (values.json) {
-            const replies = await caseReplies(client, verdicts.summary.cases);
+            const replies = await caseReplies(client, verdicts.summary.cases, signal);
             process.stdout.write(
               `${JSON.stringify(toJson(verdicts, new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(), undefined, {}, report.telemetryNotAccepted, replies))}\n`,
             );

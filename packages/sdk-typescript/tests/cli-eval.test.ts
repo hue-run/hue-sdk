@@ -3126,6 +3126,15 @@ describe("hue eval", () => {
       "case-failing": null,
     });
     expect([...unavailable]).toEqual(["case-failing"]);
+    // A stop reads nothing more: the unread cases are unavailable, not empty answers.
+    const stopped = new AbortController();
+    stopped.abort();
+    const afterStop = await caseReplies(
+      client,
+      [{ caseId: "case-stored", subjectId: "stored" }],
+      stopped.signal,
+    );
+    expect([...afterStop.unavailable]).toEqual(["case-stored"]);
   });
 
   test(
