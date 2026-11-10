@@ -3170,6 +3170,44 @@ describe("hue eval", () => {
   );
 
   test(
+    "--worker --json gives each case its stored reply too",
+    async () => {
+      const f = hueStandIn();
+      f.enqueueRun();
+      const cwd = await workspace();
+      try {
+        const result = await hue(
+          [
+            "--worker",
+            "./hue-agent.ts",
+            "--origin",
+            f.baseUrl,
+            "--max-runs",
+            "1",
+            "--no-judges",
+            "--json",
+            "--checkpoint-dir",
+            join(cwd, "worker-state"),
+          ],
+          { cwd },
+        );
+        expect(result.status).toBe(0);
+        const documents = result.stdout
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { cases?: { reply?: unknown }[] })
+          .filter((document) => document.cases);
+        expect(documents).toHaveLength(1);
+        expect(documents[0]!.cases![0]!.reply).toMatchObject({ answer: "saved" });
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
     "--worker registers the agent, claims a queued run and reports it",
     async () => {
       const f = hueStandIn();

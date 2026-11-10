@@ -2766,11 +2766,12 @@ async function runWorker(
             report.telemetryNotAccepted,
           );
           if (signal.aborted) return;
-          if (values.json)
+          if (values.json) {
+            const replies = await caseReplies(client, verdicts.summary.cases);
             process.stdout.write(
-              `${JSON.stringify(toJson(verdicts, new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(), undefined, {}, report.telemetryNotAccepted))}\n`,
+              `${JSON.stringify(toJson(verdicts, new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(), undefined, {}, report.telemetryNotAccepted, replies))}\n`,
             );
-          else renderTable(verdicts, output);
+          } else renderTable(verdicts, output);
         } catch (error) {
           output.error(`Unable to read verdicts: ${explain(error)}`);
         }
