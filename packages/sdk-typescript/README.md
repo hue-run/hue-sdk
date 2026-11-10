@@ -483,9 +483,10 @@ const { value: messages, failures } = await client.media.resolve(recorded, { tra
 ```
 
 `fetch` asks Hue for a five-minute download link (`GET /api/v1/traces/{traceId}/blobs/{sha256}`),
-downloads it without the project key and refuses bytes whose SHA-256 is not the digest. It throws
-`MediaFetchError`, whose `reason` is `not_found` (Hue holds no such file for the trace),
-`missing` (the trace lists it, but it was never uploaded or has been erased), `unavailable` (still
+downloads it without the project key and refuses bytes whose SHA-256 is not the digest. A link
+outside the Hue origin (another scheme, host or port than `baseUrl`'s) is refused before any
+request. It throws `MediaFetchError`, whose `reason` is `not_found` (Hue holds no such file for
+the trace), `missing` (the trace lists it, but it was never uploaded or has been erased), `unavailable` (still
 unavailable after one retry that waits out a `Retry-After` of up to 10 seconds), `forbidden` (the
 key cannot read recorded content, or reads a snapshot without **Read and write**), `too_large`
 (over `maxBytes`, 64 MiB by default, checked before downloading), `digest_mismatch` or `failed` (a

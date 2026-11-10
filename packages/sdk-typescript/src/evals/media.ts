@@ -284,21 +284,23 @@ function routeOf(target: MediaFetchTarget): { path: string; sha256: string } {
 const WRITTEN_HTTP_HOST = /^http:\/\/(?:[^/?#]*@)?(\[[^\]/?#]*\]|[^/?#:@]*)/i;
 
 /**
- * A download link Hue issued: HTTPS, or HTTP to a loopback host written `localhost`, `127.0.0.1`
- * or `[::1]`, without credentials or a fragment. A host the URL parser rewrites to one of those
- * (`127.1`, `0x7f.0.0.1`, `[0::1]`) is refused, as the Python SDK refuses it.
+ * A download link Hue issued on its own origin (the scheme, host and port of `origin`): HTTPS, or
+ * HTTP to a loopback host written `localhost`, `127.0.0.1` or `[::1]`, without credentials or a
+ * fragment. A host the URL parser rewrites to one of those (`127.1`, `0x7f.0.0.1`, `[0::1]`) is
+ * refused, as the Python SDK refuses it.
  */
-function linkOf(value: unknown): string | undefined {
+function linkOf(value: unknown, origin: string): string | undefined {
   // eslint-disable-next-line no-control-regex -- control characters are refused
   if (typeof value !== "string" || value.length > 8192 || /[\x00-\x20\x7f]/u.test(value))
     return undefined;
   try {
     const url = new URL(value);
     const allowed =
-      url.protocol === "https:" ||
-      (url.protocol === "http:" &&
-        isLoopbackHost(url.hostname) &&
-        WRITTEN_HTTP_HOST.exec(value)?.[1]?.toLowerCase() === url.hostname);
+      url.origin === new URL(origin).origin &&
+      (url.protocol === "https:" ||
+        (url.protocol === "http:" &&
+          isLoopbackHost(url.hostname) &&
+          WRITTEN_HTTP_HOST.exec(value)?.[1]?.toLowerCase() === url.hostname));
     return allowed && !url.username && !url.password && !url.hash ? value : undefined;
   } catch {
     return undefined;
@@ -365,12 +367,12 @@ interface Grant {
   fileName?: string;
 }
 
-function grantOf(answer: unknown, sha256: string): Grant {
+function grantOf(answer: unknown, sha256: string, origin: string): Grant {
   const fields =
     answer !== null && typeof answer === "object" && !Array.isArray(answer)
       ? (answer as Record<string, unknown>)
       : undefined;
-  const url = linkOf(fields?.url);
+  const url = linkOf(fields?.url, origin);
   const size = fields?.size;
   if (
     !fields ||
@@ -572,7 +574,7 @@ export class MediaClient {
         await response.body?.cancel().catch(() => undefined);
         throw new MediaFetchError("failed", status);
       }
-      return grantOf(answer, sha256);
+      return grantOf(answer, sha256, this.#baseUrl);
     }
   }
 
