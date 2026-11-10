@@ -1001,6 +1001,8 @@ function documentStandIn(
         const subject = subjects.get(subjectMatch[1]!);
         return subject ? Response.json(subject) : new Response(null, { status: 404 });
       }
+      // A deployment that does not list a version's evaluators: the chosen ones are run as given.
+      if (/^\/dataset-versions\/[^/]+\/run$/.test(path)) return new Response(null, { status: 404 });
       throw new Error(`Unexpected request ${request.method} ${path}`);
     },
   });

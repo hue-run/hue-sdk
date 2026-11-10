@@ -283,7 +283,7 @@ describe("resolveScenarioPins", () => {
         listing((after) => (after === "A" ? "B" : "A"), 1),
         "Billing",
       ),
-    ).rejects.toThrow('No published Scenario matches "Billing"');
+    ).rejects.toThrow('No published case matches "Billing"');
     expect(reads.list).toBe(3);
   });
 
@@ -320,16 +320,16 @@ describe("resolveScenarioPins", () => {
     const second = fixture.scenario("Refund flow v2");
     const draft = fixture.scenario("Draft only", { published: false });
     await expect(resolveScenarioPins(fixture.client, "Refund")).rejects.toThrow(
-      `Several published Scenarios match "Refund"; pass an ID or URL instead: Refund flow (${first.id}), Refund flow v2 (${second.id})`,
+      `Several published cases match "Refund"; pass an ID or URL instead: Refund flow (${first.id}), Refund flow v2 (${second.id})`,
     );
     await expect(resolveScenarioPins(fixture.client, "Missing")).rejects.toThrow(
-      'No published Scenario matches "Missing". Published Scenarios: Refund flow',
+      'No published case matches "Missing". Published cases: Refund flow',
     );
     await expect(resolveScenarioPins(fixture.client, "Draft only")).rejects.toThrow(
-      'No published Scenario matches "Draft only"',
+      'No published case matches "Draft only"',
     );
     await expect(resolveScenarioPins(fixture.client, draft.id)).rejects.toThrow(
-      `Scenario ${draft.id} is a draft without published pins`,
+      `Case ${draft.id} is a draft without published pins`,
     );
     await expect(resolveScenarioPins(fixture.client, randomUUID())).rejects.toBeInstanceOf(
       HueApiError,

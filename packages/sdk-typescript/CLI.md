@@ -11,6 +11,12 @@ npx @hue-run/sdk@latest setup
 
 Always use the scoped package name: `npx -y hue` installs an unrelated npm package.
 
+Inside a repository whose `package.json` uses Bun-style `overrides` keys such as
+`"nextra > zod"`, npm refuses before it runs the CLI (`npm error code EINVALIDTAGNAME`), so no
+CLI release can avoid it. Run `bunx @hue-run/sdk@latest …` instead, or keep npm out of that
+`package.json` with `npx --prefix "$(mktemp -d)" -y @hue-run/sdk@latest …`; both keep your
+working directory, so `./.env.hue` still loads.
+
 These public commands are not working onboarding promises until candidate publication, Fern
 activation, production acceptance and `latest` promotion all pass. The automatic matrix is limited
 to Express with npm, Express with Bun, and Flask with uv in a single application package with one recognizable
@@ -44,7 +50,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.29.1`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.30.0`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -528,8 +534,8 @@ and Hue never receives or stores them. The command is part of the `hue` executab
 #   LANGFUSE_PUBLIC_KEY=pk-lf-...
 #   LANGFUSE_SECRET_KEY=sk-lf-...
 #   LANGFUSE_BASE_URL=https://cloud.langfuse.com
-npx -y @hue-run/sdk@0.29.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.29.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.30.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.30.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` come from the environment or `--env-path`
@@ -1077,7 +1083,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.29.1.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.30.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -1088,7 +1094,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.29.1.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.30.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -1130,11 +1136,24 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.29.1 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.29.1 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.29.1 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.29.1 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.30.0 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.30.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.30.0 eval --set "Billing regressions" --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.30.0 eval --set "Billing regressions" --only "refund-eligible" --command "node agent.js"
+npx -y @hue-run/sdk@0.30.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
+
+`--set` (or `--dataset-version`) without `--scorer` or `--scorer-version` runs with every
+evaluator the set's cases need, as Hue lists them for the version
+(`GET /api/v1/dataset-versions/<id>/run`): the outcome evaluator for cases with checks and each
+judge a case's criteria name, at its latest version, whether or not the cases were published
+from traces. It prints them first, as `Evaluators (every one the 6 cases need): ...`. A judge
+named by one case grades that case alone and reads not applicable on the others. Chosen
+evaluators that leave out one the cases need are refused (exit 1) and named; pass
+`--allow-missing-evaluators` to run without them, which prints a warning. `--only <case key,
+title or id>` (repeatable) runs those cases of the set alone, as one run of just them, with the
+evaluators they need; `--case` inside `--set` is one `--only`. A case added to an eval set is
+not a published case, so `--case` alone does not find it.
 
 One invocation creates one run holding every selected case; it prints the run URL
 (`https://app.hue.run/runs/<id>`) once the run exists. Add `--check` to confirm the key, the
@@ -1171,14 +1190,14 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.29.1 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.30.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
 
 The one-shot mode resolves the selection (`--case` by name, or by the ID or URL of the published
 case or of the case conversion that published it, among the project's first 1,000 Scenarios;
-`--set` by name, ID or URL with explicit `--scorer-version` pins; or `--dataset-version` with `--scorer-version`),
+`--set` by name, ID or URL, or `--dataset-version`, with the evaluators its cases need or the ones chosen),
 creates a fresh run from those immutable pins named `<agent key> @ <revision>` (a commit hash is
 shortened to 7 characters)
 (`--name` overrides), prints `Run: <url>` and `Run id: <id> (MCP get_run, list_run_items)` as
@@ -1208,7 +1227,10 @@ regression and unchanged counts with per-case deltas. `--json` prints one JSON d
 (`experimentId`, `runId`, `runUrl`, `complete`, `cases`, `totals`, optional `baseline`) on stdout;
 `experimentId` is the run id that the MCP `get_run` and `list_run_items` tools take, `runId`
 the scoring run that produced the verdicts, and
-and sends progress to stderr; each case lists its not-applicable evaluator versions in
+and sends progress to stderr; each case carries `reply`, the answer Hue stored for it (the
+command's parsed stdout, or `{"replies": [...]}` for a conversation case; `null` with
+`--no-output` or before the case completes; a reply Hue could not return also carries
+`"replyUnavailable": true`), lists its not-applicable evaluator versions in
 `notApplicable` and its advisory ones in `advisory`, and `totals.notApplicable` counts the
 former; a case failed for its telemetry has `state: "error"`,
 `passed: false` and
@@ -1573,8 +1595,8 @@ saved version other than the latest; `--scorer <slug|name|id>` pins an evaluator
 published version, beside or instead of explicit `--scorer-version` IDs.
 
 ```sh
-hue eval --set gia-d1-citation --scorer gia-d1-citation \
-  --command "pnpm --filter @august/frontend run hue:gia-agent" \
+hue eval --set gia-d1-citation \
+  --command "pnpm --filter ./frontend run hue:agent" \
   --revision prompt-v10 --wait 1800 --content --json
 hue eval --set gia-d1-citation --set-version 1 --scorer gia-d1-citation ./hue-agent.ts --content --baseline <run id>
 ```

@@ -47,7 +47,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:e48c9b50f4e923faf2b4e3b9c6deddfa9fa776a97188141852acb39a627ee923",
+    "sha256": "sha256:cca380ac0f972405aab862d7d1cfe60d9cf1364c5971c00cca5a3ce6de850e3d",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -404,7 +404,9 @@
             "EvalInvocation",
             "EvalSet",
             "EvalSetCase",
+            "EvalSetRunEvaluator",
             "EvalSetVersion",
+            "EvalSetVersionRun",
             "EvaluationClient",
             "EvaluationClientOptions",
             "EvaluationItem",
@@ -772,7 +774,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.29.1"
+      "version": "0.30.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -784,7 +786,7 @@
       "version": "0.8.28"
     },
     "name": "hue",
-    "sha256": "sha256:4bbda5bac2c3ea85f14a12bcf48f654a30385696731ea6daa4bb5e36e4dbe2db",
+    "sha256": "sha256:c52b9df4882377fee8c8913c652ea41b200e42a495622544c0e97e9251fa29cb",
     "source": "skills/hue/SKILL.md"
   }
 }

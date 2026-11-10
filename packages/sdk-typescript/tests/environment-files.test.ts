@@ -580,6 +580,8 @@ function platform(
       // trace, so the case stays refused.
       if (/^\/traces\/[0-9a-f]{32}\/receipt$/.test(path))
         return Response.json({ code: "TRACE_NOT_FOUND" }, { status: 404 });
+      // A deployment that does not list a version's evaluators: the chosen ones run as given.
+      if (/^\/dataset-versions\/[^/]+\/run$/.test(path)) return new Response(null, { status: 404 });
       throw new Error(`Unexpected request ${request.method} ${path}`);
     },
   });

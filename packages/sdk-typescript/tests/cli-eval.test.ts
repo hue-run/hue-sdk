@@ -9,9 +9,15 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
-import { derivedAgentKey, explain, renderTable, spawnAgentCommand } from "../src/cli/eval.js";
+import {
+  caseReplies,
+  derivedAgentKey,
+  explain,
+  renderTable,
+  spawnAgentCommand,
+} from "../src/cli/eval.js";
 import { CheckpointIdentityError, CheckpointStore } from "../src/evals/checkpoint.js";
-import { EvaluationClient } from "../src/evals/client.js";
+import { EvaluationClient, HueApiError } from "../src/evals/client.js";
 import { digest as identityDigest } from "../src/evals/json.js";
 import type { CaseVerdict, ExperimentVerdicts } from "../src/evals/verdicts.js";
 import { TargetCancelledError } from "../src/evals.js";
@@ -75,6 +81,13 @@ function hueStandIn(
     inputs?: JsonValue;
     /** How long a created world lasts (default 600 s). */
     worldLifetimeMs?: number;
+    /** The world case names a judge, which the version run route lists beside the outcome
+     * evaluator. */
+    judge?: boolean;
+    /** Hue could not choose the outcome evaluator for the checks: it names candidates instead. */
+    outcomeGap?: boolean;
+    /** `false`: the deployment predates the version run route and answers it 404. */
+    runDefaults?: boolean;
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
@@ -109,7 +122,21 @@ function hueStandIn(
     environmentVersionId,
     hasExpected: true,
   };
+  const answerOnly = Array.from({ length: options.answerOnlyCases ?? 0 }, (_, index) => ({
+    ...frozenCase,
+    id: randomUUID(),
+    externalKey: `answer-${index + 1}`,
+    metadata: { title: `Answer case ${index + 1}` },
+    environmentVersionId: null,
+  }));
   const scorerId = randomUUID();
+  const otherOutcomeId = randomUUID();
+  const judgeVersion = {
+    id: randomUUID(),
+    scorerId: randomUUID(),
+    contentDigest: digest,
+    definition: { kind: "world_judge", entry: "hue.world_judge.v1", metrics: [] },
+  };
   const scorerVersion = {
     id: randomUUID(),
     contentDigest: digest,
@@ -180,6 +207,8 @@ function hueStandIn(
     claims: 0,
     localRuns: [] as Record<string, unknown>[],
     judgeJobs: [] as { runId: string; body: Record<string, unknown> }[],
+    /** The `caseId` selection of each version run read. */
+    runReads: [] as string[][],
   };
   const queue: { runId: string; experimentId: string; state: string; workerId?: string }[] = [];
   const agentId = randomUUID();
@@ -416,20 +445,82 @@ function hueStandIn(
       if (path === `/datasets/${dataset.id}`) return Response.json(dataset);
       if (path === `/dataset-versions/${version.id}`) return Response.json(version);
       if (path === `/scorer-versions/${scorerVersion.id}`) return Response.json(scorerVersion);
+      if (path === `/scorer-versions/${judgeVersion.id}`) return Response.json(judgeVersion);
       if (path.startsWith("/scorer-versions/")) return new Response(null, { status: 404 });
       // The case pins a world, so `hue eval --set` on this stand-in stays a simulation run.
       if (path === `/dataset-versions/${version.id}/cases`)
+        return Response.json({ items: [frozenCase, ...answerOnly], nextCursor: null });
+      // What the version's cases need: the outcome evaluator grades every case's checks, and
+      // the world case names a judge.
+      if (path === `/dataset-versions/${version.id}/run`) {
+        calls.runReads.push(url.searchParams.getAll("caseId"));
+        if (options.runDefaults === false) return new Response(null, { status: 404 });
+        const wanted = url.searchParams.getAll("caseId");
+        const selected = [frozenCase, ...answerOnly].filter(
+          (item) => !wanted.length || wanted.includes(item.id),
+        );
+        const judged = options.judge === true && selected.some((item) => item.id === frozenCase.id);
+        // With `outcomeGap`, Hue could not choose the outcome evaluator: it names it as a
+        // candidate instead of listing it.
+        const gap = options.outcomeGap === true;
+        const evaluators = [
+          ...(gap
+            ? []
+            : [
+                {
+                  id: scorerVersion.id,
+                  evaluatorId: scorerId,
+                  slug: "case-outcome",
+                  name: "Case outcome",
+                  kind: "world_outcome",
+                  version: 1,
+                  cases: selected.length,
+                },
+              ]),
+          ...(judged
+            ? [
+                {
+                  id: judgeVersion.id,
+                  evaluatorId: judgeVersion.scorerId,
+                  slug: "refund-judge",
+                  name: "Refund judge",
+                  kind: "world_judge",
+                  version: 2,
+                  cases: 1,
+                },
+              ]
+            : []),
+        ];
         return Response.json({
-          items: [
-            frozenCase,
-            ...Array.from({ length: options.answerOnlyCases ?? 0 }, () => ({
-              ...frozenCase,
-              id: randomUUID(),
-              environmentVersionId: null,
-            })),
-          ],
-          nextCursor: null,
+          datasetVersionId: version.id,
+          evalSetVersionId: version.id,
+          version: 1,
+          saved: version.frozenAt !== null,
+          cases: selected.length,
+          worldCases: judged ? 1 : 0,
+          ungradedCases: 0,
+          ready: !gap,
+          blockers: gap
+            ? [
+                `${selected.length} hand-authored cases carry world checks and 2 of the project's outcome evaluators could grade them (${scorerVersion.id}, ${otherOutcomeId}): add --scorer-version with the one to use.`,
+              ]
+            : [],
+          evaluatorVersionIds: evaluators.map((item) => item.id),
+          evaluators,
+          judgeVersionIdsLeftOut: [],
+          outcomeGaps: gap
+            ? [
+                {
+                  grading: "world",
+                  cases: selected.length,
+                  reason: "several",
+                  candidates: [scorerVersion.id, otherOutcomeId],
+                },
+              ]
+            : [],
+          unresolvedJudges: [],
         });
+      }
       if (path === `/dataset-versions/${version.id}/freeze`) {
         calls.frozen.push(Number(body.expectedRevision));
         if (body.expectedRevision !== version.revision) return new Response(null, { status: 409 });
@@ -813,6 +904,8 @@ function hueStandIn(
     scenario,
     version,
     scorerVersion,
+    judgeVersion,
+    answerOnly,
     frozenCase,
     experiments,
     worlds,
@@ -2537,11 +2630,13 @@ describe("hue eval", () => {
         for (const args of [
           ["./hue-agent.ts"],
           ["--scenario", "Refund flow"],
-          ["--scenario", "Refund flow", "--set", "Refund flow", "./hue-agent.ts"],
           ["--case", "Refund flow", "--scenario", "Refund flow", "./hue-agent.ts"],
+          ["--set", "Refund flow", "--dataset-version", randomUUID(), "./hue-agent.ts"],
+          ["--case", "Refund flow", "--only", "refund", "./hue-agent.ts"],
+          ["--case", "Refund flow", "--allow-missing-evaluators", "./hue-agent.ts"],
+          ["--worker", "--only", "refund", "./hue-agent.ts"],
           ["--scenario", "Refund flow", "./hue-agent.ts", "--command", "true"],
           ["--worker", "--scenario", "Refund flow", "./hue-agent.ts"],
-          ["--set", "Refund flow", "./hue-agent.ts"],
           ["--scenario", "Refund flow", "./hue-agent.ts", "--wait", "-1"],
           ["--scenario", "Refund flow", "./missing-adapter.ts"],
           ["--scenario", "Refund flow", "./hue-agent.ts", "--unknown"],
@@ -2792,6 +2887,257 @@ describe("hue eval", () => {
   );
 
   test(
+    "--set with no evaluator chosen runs with every evaluator its cases need and names them",
+    async () => {
+      const f = hueStandIn({ judge: true });
+      const cwd = await workspace();
+      const args = ["--set", "Refund flow", "./hue-agent.ts", "--origin", f.baseUrl];
+      try {
+        const checked = await hue([...args, "--check", "--json"], { cwd });
+        expect(checked.status).toBe(0);
+        expect(checked.stderr).toContain(
+          "Evaluators (every one the case needs): Case outcome (checks, 1 case), Refund judge (judge, 1 case)",
+        );
+        expect(JSON.parse(checked.stdout).check).toMatchObject({
+          ok: true,
+          selection: {
+            kind: "eval_set",
+            evaluators: 2,
+            evaluatorVersionIds: [f.scorerVersion.id, f.judgeVersion.id],
+          },
+          needed: [{ slug: "case-outcome" }, { slug: "refund-judge" }],
+        });
+        expect(f.experiments.size).toBe(0);
+        // The run pins the same list, the outcome evaluator first. This stand-in never scores
+        // the judge, so the case stays pending on it.
+        const run = await hue([...args, "--wait", "0"], { cwd });
+        expect(run.stdout).toContain("Evaluators (every one the case needs): Case outcome");
+        expect(run.stdout).toContain("1 pending");
+        expect(f.calls.experiments[0]).toMatchObject({
+          scorerVersionIds: [f.scorerVersion.id, f.judgeVersion.id],
+        });
+        expect(f.calls.experiments[0]).not.toHaveProperty("caseIds");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "chosen evaluators that leave out one the cases need are refused unless --allow-missing-evaluators",
+    async () => {
+      const f = hueStandIn({ judge: true });
+      const cwd = await workspace();
+      // The judge alone: the case-outcome evaluator, which grades the checks, is left out.
+      const args = [
+        "--set",
+        "Refund flow",
+        "--scorer-version",
+        f.judgeVersion.id,
+        "./hue-agent.ts",
+        "--origin",
+        f.baseUrl,
+        "--check",
+      ];
+      try {
+        const refused = await hue(args, { cwd });
+        expect(refused.status).toBe(1);
+        expect(refused.stderr).toContain(
+          "The chosen evaluators leave out one evaluator that the case needs: Case outcome (checks, 1 case).",
+        );
+        expect(refused.stderr).toContain("--allow-missing-evaluators");
+        const allowed = await hue([...args, "--allow-missing-evaluators"], { cwd });
+        expect(allowed.status).toBe(0);
+        expect(allowed.stderr).toContain(
+          "Warning: running without one evaluator that the case needs: Case outcome (checks, 1 case), so they are not graded.",
+        );
+        // Every evaluator the cases need, chosen explicitly, passes without a warning.
+        const complete = await hue([...args, "--scorer-version", f.scorerVersion.id], { cwd });
+        expect(complete.status).toBe(0);
+        expect(complete.stderr).toBe("");
+        expect(f.experiments.size).toBe(0);
+        // A deployment that cannot list them keeps the old rule: name an evaluator.
+        const older = hueStandIn({ runDefaults: false });
+        try {
+          const unlisted = await hue(
+            ["--set", "Refund flow", "./hue-agent.ts", "--origin", older.baseUrl, "--check"],
+            { cwd },
+          );
+          expect(unlisted.status).toBe(2);
+          expect(unlisted.stderr).toContain(
+            "--set needs at least one --scorer or --scorer-version",
+          );
+        } finally {
+          older.stop();
+        }
+        // Checks Hue could choose no evaluator for: with no evaluator chosen the run is refused
+        // with Hue's reason, and the judge alone leaves those checks ungraded, so it is refused
+        // too; a candidate outcome evaluator closes the gap.
+        const gap = hueStandIn({ judge: true, outcomeGap: true });
+        try {
+          const set = [
+            "--set",
+            "Refund flow",
+            "./hue-agent.ts",
+            "--origin",
+            gap.baseUrl,
+            "--check",
+          ];
+          const unchosen = await hue(set, { cwd });
+          expect(unchosen.status).toBe(1);
+          expect(unchosen.stderr).toContain(
+            "Hue cannot choose every evaluator the case needs: 1 hand-authored cases carry world checks",
+          );
+          const judgeOnly = await hue([...set, "--scorer-version", gap.judgeVersion.id], { cwd });
+          expect(judgeOnly.status).toBe(1);
+          expect(judgeOnly.stderr).toContain(
+            `The chosen evaluators leave out the checks of 1 case, which no chosen evaluator grades (${gap.scorerVersion.id}, `,
+          );
+          const closed = await hue(
+            [
+              ...set,
+              "--scorer-version",
+              gap.judgeVersion.id,
+              "--scorer-version",
+              gap.scorerVersion.id,
+            ],
+            { cwd },
+          );
+          expect(closed.status).toBe(0);
+          expect(closed.stderr).toBe("");
+        } finally {
+          gap.stop();
+        }
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "--only and --case inside --set run the named cases of the set alone",
+    async () => {
+      const f = hueStandIn({ answerOnlyCases: 2, judge: true });
+      const cwd = await workspace();
+      const set = ["--set", "Refund flow", "./hue-agent.ts", "--origin", f.baseUrl];
+      try {
+        // By title: one answer-only case, graded by the outcome evaluator alone.
+        const byTitle = await hue([...set, "--only", "answer case 2", "--check", "--json"], {
+          cwd,
+        });
+        expect(byTitle.status).toBe(0);
+        expect(JSON.parse(byTitle.stdout).check).toMatchObject({
+          selection: {
+            cases: 1,
+            only: ["answer-2"],
+            evaluatorVersionIds: [f.scorerVersion.id],
+          },
+          mode: "direct",
+        });
+        expect(f.calls.runReads.at(-1)).toEqual([f.answerOnly[1]!.id]);
+        const several = await hue([...set, "--only", "answer", "--check"], { cwd });
+        expect(several.status).toBe(2);
+        expect(several.stderr).toContain('Several cases match "answer"');
+        const unknown = await hue([...set, "--only", "missing", "--check"], { cwd });
+        expect(unknown.status).toBe(2);
+        expect(unknown.stderr).toContain(
+          'No case of this eval set version matches "missing". Cases: refund, answer-1, answer-2',
+        );
+        // `--case` inside `--set` is one `--only`; the run is created over that case alone.
+        const run = await hue([...set, "--case", "REFUND", "--wait", "0"], { cwd });
+        expect(run.stdout).toContain("Evaluators (every one the selected case needs)");
+        expect(f.calls.experiments[0]).toMatchObject({
+          caseIds: [f.frozenCase.id],
+          scorerVersionIds: [f.scorerVersion.id, f.judgeVersion.id],
+        });
+        // A set case is not a published case: `--case` alone names the --only form.
+        const alone = await hue(
+          ["--case", "answer-1", "./hue-agent.ts", "--origin", f.baseUrl, "--check"],
+          { cwd },
+        );
+        expect(alone.status).toBe(1);
+        expect(alone.stderr).toContain('No published case matches "answer-1"');
+        expect(alone.stderr).toContain('pass --set "<eval set>" --only "answer-1"');
+        expect(alone.stderr).not.toContain("Scenario");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "--json gives each case its stored answer as reply",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      try {
+        // The published case pins the outcome evaluator alone, which this stand-in scores.
+        const result = await hue(
+          ["--case", "refund FLOW", "./hue-agent.ts", "--origin", f.baseUrl, "--json"],
+          { cwd },
+        );
+        expect(result.status).toBe(0);
+        const document = JSON.parse(result.stdout) as {
+          cases: { externalKey: string; reply: unknown }[];
+        };
+        expect(document.cases).toEqual([
+          expect.objectContaining({
+            externalKey: "refund",
+            reply: expect.objectContaining({ answer: "saved", caseKey: "refund" }),
+          }),
+        ]);
+        expect(document.cases[0]).not.toHaveProperty("replyUnavailable");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test("a reply Hue fails to return is unavailable, never an empty answer", async () => {
+    const outputs: Record<string, () => unknown> = {
+      stored: () => ({ hasOutput: true, output: "two drafts sent" }),
+      withheld: () => ({ hasOutput: false }),
+      gone: () => {
+        throw new HueApiError(404);
+      },
+      failing: () => {
+        throw new HueApiError(503);
+      },
+    };
+    const client = {
+      getSubject: async (id: string) => outputs[id]!(),
+    } as unknown as Pick<EvaluationClient, "getSubject">;
+    const { replies, unavailable } = await caseReplies(
+      client,
+      Object.keys(outputs).map((id) => ({ caseId: `case-${id}`, subjectId: id })),
+    );
+    expect(Object.fromEntries(replies)).toEqual({
+      "case-stored": "two drafts sent",
+      "case-withheld": null,
+      "case-gone": null,
+      "case-failing": null,
+    });
+    expect([...unavailable]).toEqual(["case-failing"]);
+    // A stop reads nothing more: the unread cases are unavailable, not empty answers.
+    const stopped = new AbortController();
+    stopped.abort();
+    const afterStop = await caseReplies(
+      client,
+      [{ caseId: "case-stored", subjectId: "stored" }],
+      stopped.signal,
+    );
+    expect([...afterStop.unavailable]).toEqual(["case-stored"]);
+  });
+
+  test(
     "compares verdicts with a --baseline experiment",
     async () => {
       const f = hueStandIn();
@@ -2830,6 +3176,44 @@ describe("hue eval", () => {
       }
     },
     SPAWN_TIMEOUT * 3,
+  );
+
+  test(
+    "--worker --json gives each case its stored reply too",
+    async () => {
+      const f = hueStandIn();
+      f.enqueueRun();
+      const cwd = await workspace();
+      try {
+        const result = await hue(
+          [
+            "--worker",
+            "./hue-agent.ts",
+            "--origin",
+            f.baseUrl,
+            "--max-runs",
+            "1",
+            "--no-judges",
+            "--json",
+            "--checkpoint-dir",
+            join(cwd, "worker-state"),
+          ],
+          { cwd },
+        );
+        expect(result.status).toBe(0);
+        const documents = result.stdout
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { cases?: { reply?: unknown }[] })
+          .filter((document) => document.cases);
+        expect(documents).toHaveLength(1);
+        expect(documents[0]!.cases![0]!.reply).toMatchObject({ answer: "saved" });
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
   );
 
   test(

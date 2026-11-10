@@ -104,6 +104,74 @@ export interface DatasetVersion {
   /** Digest of the frozen content, or `null` for a draft. */
   contentDigest: string | null;
 }
+/** One evaluator version a run of an eval set version pins by default. */
+export interface EvalSetRunEvaluator {
+  /** Evaluator version ID. */
+  id: string;
+  /** Owning evaluator ID. */
+  evaluatorId: string;
+  /** Evaluator slug. */
+  slug: string;
+  /** Evaluator display name. */
+  name: string;
+  /** Definition kind, such as `world_outcome` (a case's checks) or `world_judge`. */
+  kind: string;
+  /** Version number within the evaluator. */
+  version: number;
+  /** How many of the selected cases need it. */
+  cases: number;
+}
+/**
+ * The evaluators a run of an eval set version, or of some of its cases, needs: the outcome
+ * evaluator for cases with checks and each judge a case's criteria name, at its latest version,
+ * whether or not the cases were published from traces. `hue eval --set` pins these when no
+ * evaluator is chosen.
+ */
+export interface EvalSetVersionRun {
+  /** The eval set version. */
+  datasetVersionId: string;
+  /** Same as `datasetVersionId`. */
+  evalSetVersionId: string;
+  /** Version number. */
+  version: number;
+  /** Whether the version is saved (frozen). */
+  saved: boolean;
+  /** Selected cases. */
+  cases: number;
+  /** Selected cases that pin a World. */
+  worldCases: number;
+  /** Selected cases no evaluator grades. */
+  ungradedCases: number;
+  /** Whether a run with `evaluatorVersionIds` grades every selected case as it needs. */
+  ready: boolean;
+  /** What stops such a run, in the order to resolve them. */
+  blockers: string[];
+  /** Evaluator versions to pin, outcome evaluators first, then judges. */
+  evaluatorVersionIds: string[];
+  /** The same versions, named. */
+  evaluators: EvalSetRunEvaluator[];
+  /** Judges some cases pin that a run would apply to every case; left out, add them on purpose. */
+  judgeVersionIdsLeftOut: string[];
+  /** Cases whose checks no single outcome evaluator was chosen for, with the candidates. */
+  outcomeGaps: {
+    /** `world` checks need a case-outcome evaluator; `answer` checks the shared answer one. */
+    grading: "world" | "answer";
+    /** Cases whose checks it leaves ungraded. */
+    cases: number;
+    /** `none`: no evaluator could grade them; `several`: more than one could; `stale`: only
+     * ones on an older entry could. */
+    reason: "none" | "several" | "stale";
+    /** Evaluator versions to choose from with `--scorer-version`, newest first. */
+    candidates: string[];
+  }[];
+  /** Judge slugs cases name that the project has no evaluator for. */
+  unresolvedJudges: {
+    /** The judge slug a case's criteria name. */
+    slug: string;
+    /** Cases that name it. */
+    cases: number;
+  }[];
+}
 /** A case's frozen World model selection: Hue prepares its runtime World at execution. */
 export interface WorldModelReference {
   /** The World model the case was built against. */
