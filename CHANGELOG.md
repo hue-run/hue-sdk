@@ -43,6 +43,16 @@ refuses to publish a version without a matching entry below.
   published case has points to `--set "<eval set>" --only "<name>"`.
 - `hue eval --help` lists `HUE_WORLD_NOW` among the World variables a `--command` receives.
 
+### [0.29.1] - 2026-11-09
+
+#### Added
+
+- `hue listen` reads the World instance's expiry from a pull answer's optional `instanceExpiresAt`.
+  It prints the expiry once, with the `Ready` line when the first pull names it, warns once when 15
+  minutes or less remain, and after the expiry reports that the instance expired instead of a
+  refused world token. Without the field, as for a connection key's subscription, the output is
+  unchanged.
+
 ### [0.29.0] - 2026-11-09
 
 #### Breaking

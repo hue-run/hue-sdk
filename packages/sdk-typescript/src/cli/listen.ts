@@ -73,6 +73,8 @@ const MAX_FOREIGN_TEXT = 16_384;
 /** A stop request this soon after the first is the same one: under `npx`, npm forwards the
  * terminal's SIGINT to a process group that already received it. */
 const REPEATED_STOP_MS = 1_000;
+/** How long before the World instance expires the listener warns that its events will stop. */
+const EXPIRY_WARNING_MS = 15 * 60_000;
 
 /** Connection-level headers the local request sets for itself. */
 const HOP_BY_HOP = new Set([
@@ -158,6 +160,9 @@ type PullResult =
       /** When the answer arrived, and how long its leases have left by the server's clock. */
       receivedAt: number;
       leaseLeftMs: (delivery: Delivery) => number;
+      /** A world subscription's World instance expiry and the time left by the server's clock;
+       * null when the answer names none. */
+      instanceExpiry: { at: number; leftMs: number } | null;
     }
   | { kind: "retry"; reason: string; retryAfterMs: number | null }
   | { kind: "fatal"; message: string }
@@ -702,6 +707,17 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
   });
   const remembered = new Map<string, LocalAnswer>();
   let fatal: string | null = null;
+  // A world subscription's pull answers name the World instance's expiry. After it, the world
+  // token no longer pulls, so a refusal then is the expiry, not a wrong credential.
+  let instanceExpiresAt: number | null = null;
+  let expiryWarned = false;
+  /** The World instance's expiry once `serverNow` (an answer's `Date`) has reached it, else null. */
+  const expiredAt = (serverNow: number): Date | null =>
+    instanceExpiresAt !== null &&
+    // The `Date` header is truncated to the second, so it may read up to a second early.
+    (Number.isFinite(serverNow) ? serverNow + 1_000 : Date.now()) >= instanceExpiresAt
+      ? new Date(instanceExpiresAt)
+      : null;
 
   const pull = async (waitMs: number): Promise<PullResult> => {
     const request = new AbortController();
@@ -748,6 +764,7 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
 
   const readPull = async (response: Response, receivedAt: number): Promise<PullResult> => {
     const status = response.status;
+    const serverNow = Date.parse(response.headers.get("date") ?? "");
     if (status === 200) {
       let parsed: unknown;
       try {
@@ -775,12 +792,25 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
       }
       // A lease is measured on the server's clock: its stated end less the answer's `Date`, which
       // is truncated to the second and so may be up to a second early.
-      const serverNow = Date.parse(response.headers.get("date") ?? "");
       const leaseLeftMs = (delivery: Delivery) =>
         delivery.leaseExpiresAt === null || !Number.isFinite(serverNow)
           ? LEASE_MS
           : Math.min(LEASE_MS, Math.max(0, delivery.leaseExpiresAt - serverNow - 1_000));
-      return { kind: "deliveries", deliveries, skipped, excess, receivedAt, leaseLeftMs };
+      // Absent from a connection key's subscription and from servers that predate the field.
+      const stated = isObject(parsed) ? parsed.instanceExpiresAt : undefined;
+      const at = typeof stated === "string" ? Date.parse(stated) : Number.NaN;
+      const instanceExpiry = Number.isFinite(at)
+        ? { at, leftMs: at - (Number.isFinite(serverNow) ? serverNow : Date.now()) }
+        : null;
+      return {
+        kind: "deliveries",
+        deliveries,
+        skipped,
+        excess,
+        receivedAt,
+        leaseLeftMs,
+        instanceExpiry,
+      };
     }
     const code = await refusalCode(response);
     const named = `HTTP ${status}${code ? ` ${code}` : ""}`;
@@ -788,6 +818,12 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
       return {
         kind: "fatal",
         message: `Hue answered the pull with a redirect (${named}); hue listen follows none. Check --origin.`,
+      };
+    const expired = status >= 400 && status <= 499 && status !== 429 ? expiredAt(serverNow) : null;
+    if (expired && code !== "pull_in_progress")
+      return {
+        kind: "fatal",
+        message: `The World instance expired at ${expired.toISOString()}, so its events stopped and its world token no longer pulls (${named}). Start a new instance (its lifetime can be up to 24 hours), create a listen subscription for it, and run hue listen again with its world token.`,
       };
     if (status === 401)
       return {
@@ -936,9 +972,22 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
       }
       failures = 0;
       const waited = ready;
+      const expiry = result.instanceExpiry;
+      // The expiry is printed once, when a pull first names it.
+      const learned =
+        expiry !== null && instanceExpiresAt === null
+          ? `The World instance expires at ${new Date(expiry.at).toISOString()}.`
+          : null;
+      if (expiry !== null) instanceExpiresAt = expiry.at;
       if (!ready) {
         ready = true;
-        out("Ready: waiting for events.");
+        out(`Ready: waiting for events.${learned ? ` ${learned}` : ""}`);
+      } else if (learned) out(learned);
+      if (expiry !== null && !expiryWarned && expiry.leftMs <= EXPIRY_WARNING_MS) {
+        expiryWarned = true;
+        warn(
+          `Warning: the World instance expires in ${Math.max(1, Math.round(expiry.leftMs / 60_000))} min, at ${new Date(expiry.at).toISOString()}; its events stop then. To keep testing, start a new instance and a listen subscription for it.`,
+        );
       }
       if (result.skipped)
         warn(

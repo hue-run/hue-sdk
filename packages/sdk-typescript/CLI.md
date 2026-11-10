@@ -504,6 +504,11 @@ fragments in the URL are refused. Output is one line per delivery (time, event i
 bot's status and duration, and the state Hue recorded), never a body, a signature or a credential;
 credentials in error messages are replaced with `[redacted]`.
 
+For a world's subscription, Hue may name the World instance's expiry in each pull answer. The
+`Ready` line then gives it, one warning is printed when 15 minutes or less remain, and a refusal
+after the expiry says that the instance expired instead of reporting a refused world token. Without
+it, as for a connection key's subscription, the output is unchanged.
+
 Ctrl+C or `SIGTERM` stops pulling (a waiting pull is cancelled), finishes the deliveries in flight
 and acknowledges them, then exits `0`, no sooner than a second after the first Ctrl+C. A second
 Ctrl+C a second or more after the first abandons the forwards and acknowledgements still in flight
