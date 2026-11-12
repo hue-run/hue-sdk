@@ -231,7 +231,8 @@ credential cannot reach it, Hue returns HTTP `404`; change or remove `--project`
 in again does not change the credential's reach.
 
 `--read-only` selects a key and adds `?read_only=true` to its URL, so Hue hides and rejects write
-tools whatever the key allows. A project key, with or without it, keeps reaching its one project.
+tools whatever the key allows. An API key reaches every active project in its organization unless
+the connection is pinned. Existing keys retain their original default project without rotation.
 With `--auth oauth` it is refused, as is any `read_only` in a sign-in `--url` (Hue reads only
 `true` or `1`): a sign-in connection has **Read and write** access, so use a **Read** project key
 for read-only access.
@@ -316,7 +317,7 @@ does not see that shell's variables, and Conductor's agents read the login-shell
 Conductor captures, so sign-in is the simpler choice there. After a sign-in installation it says
 how the client loads the server (restart Claude Code, or a new Codex session) and names its
 authentication action. Both end with the prompt that verifies the connection:
-`Use the Hue MCP: call list_projects and confirm which project to inspect. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. For an organization connection, pass the project's id or slug as project_id on each call after list_projects.` A pinned installation instead verifies `connection.pinned: true` and omits `project_id`. `list_projects` returns a project key's one project too. Exit codes:
+`Use the Hue MCP: call list_projects and confirm which project to inspect. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. For an organization connection, pass the project's id or slug as project_id on each call after list_projects.` A pinned installation instead verifies `connection.pinned: true` and omits `project_id`. An unpinned API key lists all active projects in its organization; calls without `project_id` keep using its default. Exit codes:
 `0` done or printed, `1` failed, `2` usage error.
 
 ## Create a World and run your agent in it
