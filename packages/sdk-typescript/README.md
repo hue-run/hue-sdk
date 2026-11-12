@@ -63,7 +63,13 @@ evaluations and judges read the prompts, responses and tool inputs/outputs it re
 [Privacy and content](#privacy-and-content).
 
 The default destination is `https://app.hue.run`. Data goes to
-`/api/v1/otlp/v1/traces` and `/api/v1/otlp/v1/logs` with a Bearer project key.
+`/api/v1/otlp/v1/traces` and `/api/v1/otlp/v1/logs` with a Bearer API key.
+API keys authorize every active project in their organization. Existing keys need no rotation
+and keep their original project as the default destination while it remains active. New keys,
+and keys whose default project was archived, use the organization's oldest active, non-demo project.
+`checkConnection()` returns that destination.
+Direct HTTP clients select another project with `X-Hue-Project` or `?project_id=`;
+MCP clients use `project_id` or `hue mcp install --project <id-or-slug>`.
 Set `baseUrl` only for another Hue deployment. It must be an origin without an API path; a trailing slash is accepted.
 HTTPS is required except for loopback HTTP or the explicit
 [`allowInsecureHttp`](#local-development-without-a-hue-account) opt-in. Redirects are refused for both

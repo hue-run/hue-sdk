@@ -24,6 +24,13 @@ uv add hue-run
 
 ## Trace serving requests
 
+API keys authorize every active project in their organization. Existing keys need no rotation
+and keep their original project as the default destination while it remains active. New keys,
+and keys whose default project was archived, use the organization's oldest active, non-demo project.
+`validate_project()` returns that destination.
+Direct HTTP clients select another project with `X-Hue-Project` or `?project_id=`;
+MCP clients use `project_id` or a pinned `?project=<id-or-slug>` URL.
+
 Create one safe client per serving process, after fork. Completed records export in the background. Keep connection checks, receipt verification and explicit delivery waits outside request handling:
 
 ```python
