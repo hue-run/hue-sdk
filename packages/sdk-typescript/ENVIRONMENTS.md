@@ -306,7 +306,9 @@ execution, the stable key, the case span's context and the agent revision, pass 
 `context.world`, and finish and wait for the seal before returning so telemetry is flushed and the
 execution completed afterwards. For one compatibility release `context.mcp` is the world's first MCP mirror with the
 world token, so an adapter that read `HUE_MCP_URL` and `HUE_MCP_TOKEN` keeps working;
-`agentEnvironment` sets those names too unless `legacyMcpVariables: false`. A gateway world binds
+`agentEnvironment` sets those names too unless `legacyMcpVariables: false`. It always sets
+`HUE_WORLD_EXPIRES_AT` to the world's `expiresAt` (RFC 3339), until when the world token is valid,
+unless the world's `env` names it. A gateway world binds
 no Hue-native `tools` (Hue refuses them); a world created while the gateway is off keeps its tools
 and the `hue_sim_` capability and emits a one-time `DeprecationWarning`.
 

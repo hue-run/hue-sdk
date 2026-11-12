@@ -50,7 +50,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.30.0`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.30.1`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -410,7 +410,8 @@ printed.
 
 `hue world run <world version id> -- <command> [args...]` starts an instance, then runs the
 command (no shell; everything after `--` is its arguments) with the instance's variables:
-one `HUE_SIM_<SURFACE ID>_URL` per simulated app, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW`,
+one `HUE_SIM_<SURFACE ID>_URL` per simulated app, `HUE_WORLD_TOKEN`, `HUE_WORLD_EXPIRES_AT` (when the
+instance expires, RFC 3339; the token is valid until then), `HUE_WORLD_NOW`,
 `HUE_WORLD_ID`, `HUE_MCP_CONFIG` naming an owner-only `mcpServers` file that is removed after the
 command, and `HUE_MCP_URL`, `HUE_MCP_TOKEN` and `HUE_MCP_EXPIRES_AT` for the first MCP mirror. The
 rest of your environment, including `--env-path` variables, is passed on except `HUE_API_KEY`,
@@ -430,6 +431,20 @@ Coverage gaps: 1
   1 × linear/graphql customerNeeds (unimplemented)
 ```
 
+When no call reached the World, a warning follows the summary. The command may still be calling
+a mock or the real app, for example when its tests stub the app clients:
+
+```text
+Calls: none
+Writes: none
+Coverage gaps: none
+Warning: no app calls reached the World. The command may still be using a mock or the real app.
+```
+
+With `--require-calls`, a command that exits `0` without a call reaching the World makes
+`hue world run` exit `1` after the summary and the warning. A command that fails keeps its own
+exit code.
+
 The command's stdout and stderr are its own; Hue's lines go to stderr. Ctrl+C reaches the
 command; a second stop request a second or more after the first kills it, and the instance is
 still finished and reported. Without a terminal (in CI or a script) the command runs in a
@@ -440,8 +455,9 @@ reaches everything it started. If the MCP configuration file cannot be written, 
 abandoned. Exit codes: `create` exits `0` when the World is ready (or started
 with `--wait 0`, or previewed), `1` when it failed or is not ready in time, and `130` when stopped;
 `run` exits with the command's code (`128` plus the signal number when a signal ended it, `127`
-when it could not start), or `1` when the instance could not start or the command succeeded but
-Hue could not finish or report the instance. Both exit `2` for a usage error.
+when it could not start), or `1` when the instance could not start, when the command succeeded but
+Hue could not finish or report the instance, or when the command succeeded with `--require-calls`
+and no call reached the World. Both exit `2` for a usage error.
 
 ## Deliver simulated events to a local bot
 
@@ -534,8 +550,8 @@ and Hue never receives or stores them. The command is part of the `hue` executab
 #   LANGFUSE_PUBLIC_KEY=pk-lf-...
 #   LANGFUSE_SECRET_KEY=sk-lf-...
 #   LANGFUSE_BASE_URL=https://cloud.langfuse.com
-npx -y @hue-run/sdk@0.30.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.30.0 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.30.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.30.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` come from the environment or `--env-path`
@@ -1083,7 +1099,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.30.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.30.1.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -1094,7 +1110,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.30.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.30.1.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -1136,11 +1152,11 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.30.0 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.30.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.30.0 eval --set "Billing regressions" --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.30.0 eval --set "Billing regressions" --only "refund-eligible" --command "node agent.js"
-npx -y @hue-run/sdk@0.30.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.30.1 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.30.1 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.30.1 eval --set "Billing regressions" --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.30.1 eval --set "Billing regressions" --only "refund-eligible" --command "node agent.js"
+npx -y @hue-run/sdk@0.30.1 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 `--set` (or `--dataset-version`) without `--scorer` or `--scorer-version` runs with every
@@ -1190,7 +1206,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.30.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.30.1 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
@@ -1263,7 +1279,8 @@ the next ordinary invocation starts a new run as usual.
 verdict-read failure is logged and the worker keeps accepting runs.
 
 `--command "<shell command>"` spawns the command once per case (or per scripted message, below) with the world's environment
-(`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW` (the world's clock at creation, RFC 3339; `worldNow()` reads it and returns
+(`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `HUE_WORLD_EXPIRES_AT` (when the world expires, RFC 3339; the token is valid until then),
+`HUE_WORLD_NOW` (the world's clock at creation, RFC 3339; `worldNow()` reads it and returns
 `null` without it, so fall back explicitly with `worldNow() ?? new Date()`), one `HUE_SIM_<SURFACE ID>_URL` per provider
 mirror,
 `HUE_MCP_CONFIG` naming an owner-only `mcpServers` file that is removed after the case, and

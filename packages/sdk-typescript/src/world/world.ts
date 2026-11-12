@@ -150,7 +150,7 @@ export interface AgentEnvironmentOptions {
   includeHueCredentials?: boolean;
   /** Also set `HUE_MCP_URL`, `HUE_MCP_TOKEN` and `HUE_MCP_EXPIRES_AT` from the world's first
    * MCP mirror, the names the `hue_sim_` bridge used, for one compatibility release. On by
-   * default; the canonical carriers are the world's own `env`. */
+   * default; the canonical carriers are the world's own `env` and `HUE_WORLD_EXPIRES_AT`. */
   legacyMcpVariables?: boolean;
 }
 
@@ -171,7 +171,8 @@ export function withoutWorldVariables(environment: Record<string, string>): Reco
 /**
  * The environment for an agent child process running one case (the coordination briefs'
  * recommended policy): the parent's variables minus Hue control-plane credentials and any
- * world-scoped variable, then the world's carriers. Nothing here is logged.
+ * world-scoped variable, then the world's carriers and `HUE_WORLD_EXPIRES_AT`, the world's
+ * `expiresAt` unless the carriers name it. Nothing here is logged.
  */
 export function agentEnvironment(
   world: WorldHandoff,
@@ -188,6 +189,7 @@ export function agentEnvironment(
       : stripHueControlPlaneCredentials(parent),
   );
   Object.assign(child, world.env);
+  child.HUE_WORLD_EXPIRES_AT ??= world.expiresAt;
   if (options.legacyMcpVariables ?? true) {
     const legacy = legacyMcpCapability(world);
     if (legacy) {

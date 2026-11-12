@@ -372,6 +372,25 @@ def test_agent_environment_drops_hue_control_plane_credentials_unless_opted_in()
     }
 
 
+def test_agent_environment_names_the_worlds_expiry_as_hue_world_expires_at():
+    world = world_handoff(gateway_run())
+    assert world is not None
+    # A parent's value is another world's (the HUE_WORLD_ prefix is world-scoped): this world's
+    # expiry replaces it, with or without the MCP compatibility names.
+    parent = {"PATH": "/usr/bin", "HUE_WORLD_EXPIRES_AT": "2000-01-01T00:00:00.000Z"}
+    for legacy in (True, False):
+        child = agent_environment(world, parent=parent, legacy_mcp_variables=legacy)
+        assert child["HUE_WORLD_EXPIRES_AT"] == world["expiresAt"]
+    # A Hue that names it in the world's carriers keeps its own value.
+    run = gateway_run()
+    run["env"] = {**run["env"], "HUE_WORLD_EXPIRES_AT": "2026-09-24T13:00:00.000Z"}
+    named = world_handoff(run)
+    assert named is not None
+    assert agent_environment(named, parent=parent)["HUE_WORLD_EXPIRES_AT"] == (
+        "2026-09-24T13:00:00.000Z"
+    )
+
+
 def test_legacy_projection_uses_the_first_mcp_mirror():
     world = world_handoff(gateway_run())
     assert world is not None
