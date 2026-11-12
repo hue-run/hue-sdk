@@ -121,11 +121,14 @@ description, or both, and prints its URL and World version once it is ready.
                          once Hue has started on it
 
 hue world run starts an instance of the World version, runs the command with the instance's
-environment (HUE_SIM_<SURFACE>_URL, HUE_WORLD_TOKEN, HUE_WORLD_NOW, HUE_MCP_CONFIG and the rest
-of the instance's variables), finishes the instance when the command exits and prints the calls
-the command made, what it changed and the coverage gaps it met. The command does not receive
-HUE_API_KEY or any other Hue project credential. Ctrl+C reaches the command; a second one at
-least a second later kills it.
+environment (HUE_SIM_<SURFACE>_URL, HUE_WORLD_TOKEN, HUE_WORLD_EXPIRES_AT, HUE_WORLD_NOW,
+HUE_MCP_CONFIG and the rest of the instance's variables), finishes the instance when the command
+exits and prints the calls the command made, what it changed and the coverage gaps it met, with
+a warning when no app call reached the World. The command does not receive HUE_API_KEY or any
+other Hue project credential. Ctrl+C reaches the command; a second one at least a second later
+kills it.
+
+  --require-calls        Exit 1 when the command exits 0 but no app call reached the World
 
 Hue:
   HUE_API_KEY            A Read and write project key (environment, --env-path or ./.env.hue)
@@ -136,8 +139,9 @@ Hue:
 
 Exit codes: create exits 0 when the World is ready (or started with --wait 0, or previewed with
 --dry-run) and 1 when it failed or is not ready in time. run exits with the command's code, or
-1 when the command succeeded but Hue could not finish or report the instance. Both exit 2 for a
-usage error and 130 when stopped before the command ran.`;
+1 when the command succeeded but Hue could not finish or report the instance, or when it
+succeeded with --require-calls and no app call reached the World. Both exit 2 for a usage error
+and 130 when stopped before the command ran.`;
 
 class UsageError extends Error {}
 /** A failure that ends the command with exit code 1; its message names no credential. */
@@ -1030,6 +1034,7 @@ function parseRunArguments(argv: string[]) {
       strict: true,
       options: {
         origin: { type: "string" },
+        "require-calls": { type: "boolean", default: false },
         ...envFileOptions,
         help: { type: "boolean", short: "h", default: false },
       },
@@ -1149,7 +1154,12 @@ async function runInWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pro
         sealed.completingUntil ?? null,
       );
       if (!evidence) return code || 130;
-      printSummary(ctx.note, evidence);
+      if (printSummary(ctx.note, evidence) === 0) {
+        ctx.note(
+          "Warning: no app calls reached the World. The command may still be using a mock or the real app.",
+        );
+        if (code === 0 && values["require-calls"]) return 1;
+      }
     } catch (error) {
       if (!(error instanceof HueWorldError)) throw error;
       ctx.note(`Error: Hue could not finish or report instance ${instance.id}: ${error.message}`);
@@ -1278,11 +1288,12 @@ function section(print: (line: string) => void, title: string, total: number, li
   if (lines.length > LISTED) print(`  ... and ${lines.length - LISTED} more`);
 }
 
-/** The calls the command made, what it changed and the calls the World does not simulate. */
+/** Prints the calls the command made, what it changed and the calls the World does not
+ * simulate; returns the number of calls. */
 function printSummary(
   print: (line: string) => void,
   evidence: { ledger: JsonObject; diff: JsonObject },
-) {
+): number {
   const listOf = (part: unknown) =>
     isObject(part) && Array.isArray(part.items) ? part.items.filter(isObject) : [];
   const calls = listOf(evidence.ledger.ledger).map((call) => {
@@ -1319,4 +1330,5 @@ function printSummary(
     ...counted(gaps.map((call) => call.line)),
     ...reported,
   ]);
+  return calls.length;
 }

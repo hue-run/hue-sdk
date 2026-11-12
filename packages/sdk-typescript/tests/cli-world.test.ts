@@ -50,6 +50,8 @@ function hue(
     pollRateLimited?: boolean;
     /** Every instance start answers that the World is still being prepared. */
     preparing?: boolean;
+    /** The instance's evidence holds no calls, no writes and no reported gap. */
+    noCalls?: boolean;
     /** Runs when Hue receives the World creation, before it answers. */
     onCreate?: () => Promise<unknown>;
   } = {},
@@ -226,6 +228,13 @@ function hue(
       if (url.pathname === `/api/v1/instances/${INSTANCE}/evidence`) {
         if (conflicts-- > 0)
           return Response.json({ error: "World evidence is unavailable" }, { status: 409 });
+        if (options.noCalls)
+          return Response.json({
+            world: { id: INSTANCE },
+            coverage: { validity: "complete" },
+            ledger: { items: [], nextCursor: null },
+            diff: { items: [] },
+          });
         const coverage = {
           validity: "environment_incomplete",
           firstGap: {
@@ -745,7 +754,13 @@ describe("hue world run", () => {
     const result = await world(
       ["run", VERSION, "--origin", stand.origin, "--", ...(await recorder(0)), "--flag"],
       {
-        env: { RECORD: record, HUE_MCP_KEY: "hue_mcp_project_key_value", OPENAI_API_KEY: "sk-own" },
+        env: {
+          RECORD: record,
+          HUE_MCP_KEY: "hue_mcp_project_key_value",
+          OPENAI_API_KEY: "sk-own",
+          // Left in the shell by an earlier instance.
+          HUE_WORLD_EXPIRES_AT: "2000-01-01T00:00:00.000Z",
+        },
       },
     );
 
@@ -758,6 +773,7 @@ describe("hue world run", () => {
     };
     expect(seen.argv).toEqual(["--flag"]);
     expect(seen.env.HUE_WORLD_TOKEN).toBe(TOKEN);
+    expect(seen.env.HUE_WORLD_EXPIRES_AT).toBe("2026-10-24T13:00:00.000Z");
     expect(seen.env.HUE_WORLD_NOW).toBe("2026-03-02T09:00:00.000Z");
     expect(seen.env.HUE_SIM_LINEAR_GRAPHQL_URL).toBe(`${stand.origin}/sim/linear/graphql`);
     expect(seen.env.OPENAI_API_KEY).toBe("sk-own");
@@ -791,7 +807,66 @@ describe("hue world run", () => {
         "  reported: linear customerNeeds (unimplemented)",
       ].join("\n"),
     );
+    expect(result.stderr).not.toContain("Warning: no app calls");
     expect(result.stdout + result.stderr).not.toContain(TOKEN);
+  });
+
+  const NO_CALLS =
+    "Warning: no app calls reached the World. The command may still be using a mock or the real app.";
+
+  test("warns after the summary when no app call reached the World, and still exits 0", async () => {
+    const stand = hue({ noCalls: true });
+    const result = await world(["run", VERSION, "--origin", stand.origin, "--", "true"]);
+    expect(result.code).toBe(0);
+    expect(stand.finishes[0]!.status).toBe("completed");
+    expect(result.stderr).toEndWith(
+      ["Calls: none", "Writes: none", "Coverage gaps: none", NO_CALLS, ""].join("\n"),
+    );
+  });
+
+  test("--require-calls exits 1 when the command succeeded but no app call reached the World", async () => {
+    const stand = hue({ noCalls: true });
+    const result = await world([
+      "run",
+      VERSION,
+      "--require-calls",
+      "--origin",
+      stand.origin,
+      "--",
+      "true",
+    ]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toEndWith(
+      ["Calls: none", "Writes: none", "Coverage gaps: none", NO_CALLS, ""].join("\n"),
+    );
+  });
+
+  test("--require-calls keeps a failing command's code, and exits 0 once calls reached the World", async () => {
+    const failing = await world([
+      "run",
+      VERSION,
+      "--require-calls",
+      "--origin",
+      hue({ noCalls: true }).origin,
+      "--",
+      process.execPath,
+      "-e",
+      "process.exit(3)",
+    ]);
+    expect(failing.code).toBe(3);
+    expect(failing.stderr).toContain(NO_CALLS);
+    const called = await world([
+      "run",
+      VERSION,
+      "--require-calls",
+      "--origin",
+      hue().origin,
+      "--",
+      "true",
+    ]);
+    expect(called.code).toBe(0);
+    expect(called.stderr).toContain("Calls: 4");
+    expect(called.stderr).not.toContain("Warning: no app calls");
   });
 
   test("abandons the instance and exits with the command's code when it fails", async () => {

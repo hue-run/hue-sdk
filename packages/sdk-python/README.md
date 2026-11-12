@@ -674,7 +674,9 @@ directly supplied handoff before writing its private file.
 credential (`hue_sk_`, `hue_setup_`, `hue_attempt_`, `hue_mcp_`, `hue_inv_`, `hue_install_`,
 `hue_at_`, `hue_rt_`, `hue_it_`, `hue_oauth_`) anywhere in it, including wrapped, percent-encoded or
 JSON-Unicode-escaped values, unless
-`include_hue_credentials=True`; world tokens and `hue_sim_` capabilities pass. For one compatibility
+`include_hue_credentials=True`; world tokens and `hue_sim_` capabilities pass. It sets
+`HUE_WORLD_EXPIRES_AT` to the world's `expiresAt` (RFC 3339), until when the world token is valid,
+unless the world's `env` names it. For one compatibility
 release it also sets `HUE_MCP_URL`, `HUE_MCP_TOKEN` and `HUE_MCP_EXPIRES_AT` from the first MCP
 mirror. Nothing here logs the token. The world has its own date: `world["now"]` (also `HUE_WORLD_NOW` in the child's
 environment) is the world's clock at creation, a trace-built world's recorded start, and

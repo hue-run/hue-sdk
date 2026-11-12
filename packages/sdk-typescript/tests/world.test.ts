@@ -469,6 +469,23 @@ describe("world handoff helpers", () => {
     });
   });
 
+  test("the agent environment names the world's expiry as HUE_WORLD_EXPIRES_AT", () => {
+    const world = worldHandoff(gatewayRun())!;
+    // A parent's value is another world's (the HUE_WORLD_ prefix is world-scoped): this world's
+    // expiry replaces it, with or without the MCP compatibility names.
+    const parent = { PATH: "/usr/bin", HUE_WORLD_EXPIRES_AT: "2000-01-01T00:00:00.000Z" };
+    for (const legacyMcpVariables of [true, false])
+      expect(agentEnvironment(world, { parent, legacyMcpVariables }).HUE_WORLD_EXPIRES_AT).toBe(
+        world.expiresAt,
+      );
+    // A Hue that names it in the world's carriers keeps its own value.
+    const run = gatewayRun();
+    run.env = { ...run.env, HUE_WORLD_EXPIRES_AT: "2026-03-02T10:00:00.000Z" };
+    expect(agentEnvironment(worldHandoff(run)!, { parent }).HUE_WORLD_EXPIRES_AT).toBe(
+      "2026-03-02T10:00:00.000Z",
+    );
+  });
+
   test("the legacy projection uses the first MCP mirror and is absent without one", () => {
     const world = worldHandoff(gatewayRun())!;
     expect(legacyMcpCapability(world)).toEqual({ url: mirror, token, expiresAt: world.expiresAt });

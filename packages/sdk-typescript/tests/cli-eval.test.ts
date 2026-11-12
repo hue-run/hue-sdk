@@ -1032,6 +1032,7 @@ process.stdout.write(JSON.stringify({
     hasApiKey: "HUE_API_KEY" in process.env,
     worldToken: process.env.HUE_WORLD_TOKEN,
     worldNow: process.env.HUE_WORLD_NOW ?? null,
+    worldExpiresAt: process.env.HUE_WORLD_EXPIRES_AT ?? null,
     gmailMirror: process.env.HUE_SIM_GOOGLE_GMAIL_MCP_URL,
     staleMirror: process.env.HUE_SIM_NOTION_MCP_URL ?? null,
     signingKey: process.env.HUE_WORLD_TOKEN_KEY ?? null,
@@ -1466,8 +1467,9 @@ describe("hue eval", () => {
             caseId: f.scenario.publication.caseId,
             executionId: world!.executionId,
             worldId: world!.id,
-            // A world the gateway does not serve names no date.
+            // A world the gateway does not serve names no date and no World expiry.
             worldNow: null,
+            worldExpiresAt: null,
             // The project key never reaches the agent unless the caller opts in.
             hasApiKey: false,
             staleMirror: null,
@@ -1559,6 +1561,8 @@ describe("hue eval", () => {
           worldToken: "[redacted]",
           // The world's date reaches the agent with the world's other carriers.
           worldNow: worldNowText,
+          // So does the instance's expiry, under the World's own name.
+          worldExpiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
           gmailMirror: mirror,
           staleMirror: null,
           signingKey: null,
