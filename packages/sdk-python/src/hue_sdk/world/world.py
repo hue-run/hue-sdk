@@ -209,7 +209,8 @@ def agent_environment(
     """The environment for an agent child process running one case: the parent's variables
     minus Hue control-plane credentials (unless ``include_hue_credentials``) and any
     world-scoped variable (an earlier world's carriers or date, a server's signing key), then
-    the world's carriers, which win. ``legacy_mcp_variables`` also sets ``HUE_MCP_URL``,
+    the world's carriers, which win, and ``HUE_WORLD_EXPIRES_AT``, the world's ``expiresAt``
+    unless the carriers name it. ``legacy_mcp_variables`` also sets ``HUE_MCP_URL``,
     ``HUE_MCP_TOKEN`` and ``HUE_MCP_EXPIRES_AT`` from the first MCP mirror, the names the
     ``hue_sim_`` bridge used. Nothing here is logged."""
     source = os.environ if parent is None else parent
@@ -219,6 +220,7 @@ def agent_environment(
         else strip_hue_control_plane_credentials(source)
     )
     child.update(world["env"])
+    child.setdefault("HUE_WORLD_EXPIRES_AT", world["expiresAt"])
     if legacy_mcp_variables:
         legacy = legacy_mcp_capability(world)
         if legacy is not None:

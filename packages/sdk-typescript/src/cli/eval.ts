@@ -139,8 +139,8 @@ Selection (exactly one, not used with --worker):
 Agent (exactly one):
   <adapter-file>                  Module exporting default or runMyAgent(inputs, context)
   --command "<shell command>"     Simulation: spawned per case with the world's environment
-                                  (HUE_WORLD_ID, HUE_WORLD_TOKEN, HUE_WORLD_NOW, one
-                                  HUE_SIM_<SURFACE>_URL per
+                                  (HUE_WORLD_ID, HUE_WORLD_TOKEN, HUE_WORLD_EXPIRES_AT,
+                                  HUE_WORLD_NOW, one HUE_SIM_<SURFACE>_URL per
                                   provider mirror, HUE_MCP_CONFIG, plus HUE_MCP_URL, HUE_MCP_TOKEN
                                   and HUE_MCP_EXPIRES_AT for the first MCP mirror), HUE_EXECUTION_ID,
                                   HUE_ENVIRONMENT_RUN_ID, HUE_CASE_ID and HUE_CASE_KEY set;

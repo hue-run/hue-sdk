@@ -8,6 +8,21 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.30.1] - 2026-11-12
+
+#### Added
+
+- `hue world run` prints `Warning: no app calls reached the World. The command may still be using
+  a mock or the real app.` after the summary when the instance's evidence holds no calls, as when
+  the command's tests stub the app clients. The exit code is unchanged.
+- `hue world run --require-calls` exits 1 when the command exits 0 but no app call reached the
+  World, after the summary and the warning. A command that fails keeps its own exit code.
+- `hue world run` and `hue eval --command` give the command `HUE_WORLD_EXPIRES_AT`, the time the
+  instance expires (RFC 3339), until when `HUE_WORLD_TOKEN` is valid. `agentEnvironment` sets it
+  from the handoff's `expiresAt` unless the world's `env` names it, and replaces a value inherited
+  from the parent like the other `HUE_WORLD_*` variables. `HUE_MCP_EXPIRES_AT` stays with the MCP
+  compatibility names.
+
 ### [0.30.0] - 2026-11-09
 
 #### Breaking
@@ -2152,6 +2167,14 @@ No registry release is claimed until publication and registry acceptance complet
 - Documented runtime and integration matrix, including dependency-resolution and cross-language content and delivery boundaries; verified release archives and registry bytes.
 
 ## hue-run (Python)
+
+### Unreleased
+
+#### Added
+
+- `agent_environment` sets `HUE_WORLD_EXPIRES_AT` to the world's `expiresAt` (RFC 3339), until
+  when the world token is valid, unless the world's `env` names it. A value inherited from the
+  parent is replaced like the other `HUE_WORLD_*` variables.
 
 ### [0.15.1] - 2026-11-08
 
