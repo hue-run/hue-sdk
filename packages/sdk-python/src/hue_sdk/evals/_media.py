@@ -234,7 +234,7 @@ def _answer(response: requests.Response) -> Any:
         raise requests.ConnectionError(error) from None
     try:
         return json.loads(b"".join(chunks).decode("utf-8"))
-    except (ValueError, UnicodeError):
+    except (ValueError, UnicodeError, RecursionError):
         return None
 
 
