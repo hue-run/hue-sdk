@@ -1400,8 +1400,8 @@ when the `CI` environment variable is set to anything but an empty string, `0` o
 Actions, GitLab and most CI services set it), closes the run instead, since nothing in CI runs the
 command again: a job cancelled by a newer push would otherwise leave its run in progress. From the
 first interrupt, while the agents stop, the CLI lets cases that already answered save their
-outcomes, cancels each case whose attempt is still started (sealing the world of an agent still
-stopping; the case's trace evidence is omitted), gives each case that never started a cancelled
+outcomes, cancels each case whose attempt is still started (sealing its world first if it is still
+open; the case's trace evidence is omitted), gives each case that never started a cancelled
 attempt, and finishes the run. It prints
 `Interrupted. Cancelled 2 unfinished cases and closed the run: <run URL>` and exits 130; the same
 command then starts a new run. Every request ends 6 seconds after the first interrupt, inside the

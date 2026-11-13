@@ -92,6 +92,8 @@ function hueStandIn(
     slowFirstItemsMs?: number;
     /** Never answer, or refuse with 500, a completion that cancels a case. */
     cancelFault?: "hang" | "fail";
+    /** Answer a legacy world's MCP capability this many milliseconds late. */
+    slowCapabilityMs?: number;
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
@@ -719,12 +721,14 @@ function hueStandIn(
           coverageGap: null,
         });
       }
-      if (path === "/local-agent-worker/mcp-capability")
+      if (path === "/local-agent-worker/mcp-capability") {
+        if (options.slowCapabilityMs) await sleep(options.slowCapabilityMs);
         return Response.json({
           url: `${url.origin}/api/v1/simulation-mcp/${String(body.runId)}`,
           token: mcpToken,
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         });
+      }
       if (path === "/local-agent-worker/register") {
         calls.register.push(body);
         // Hue answers with the key as `agentKey`, not the registration's `key`.
@@ -2543,6 +2547,36 @@ describe("hue eval", () => {
         ]);
         expect(f.calls.evidence).toEqual([{}]);
         expect(finishes).toHaveLength(1);
+        expect(finished).toBeTruthy();
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "in CI an interrupt seals a world whose agent has not started and cancels its case",
+    async () => {
+      // The world exists, but its MCP capability is still on its way past the close's wait for
+      // the runner, so the runner has not sealed it yet.
+      const f = hueStandIn({ slowCapabilityMs: 4_000 });
+      const cwd = await workspace();
+      try {
+        const result = await hue(
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--origin", f.baseUrl, "--wait", "0"],
+          { cwd, env: { CI: "true" }, interruptOn: /world created/ },
+        );
+        expect(result.status).toBe(130);
+        const { runUrl, finished } = closedRun(f, result);
+        expect(result.stderr).toContain(
+          `Interrupted. Cancelled 1 unfinished case and closed the run: ${runUrl}`,
+        );
+        expect([...f.worlds.values()].map((world) => world.status)).toEqual(["abandoned"]);
+        expect(f.calls.completions).toEqual([
+          { executionId: expect.any(String), state: "cancelled" },
+        ]);
         expect(finished).toBeTruthy();
       } finally {
         f.stop();

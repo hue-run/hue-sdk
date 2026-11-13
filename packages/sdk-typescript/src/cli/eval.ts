@@ -2269,9 +2269,7 @@ async function runOnce(
         signal,
         target: closer
           ? (inputs, context) =>
-              closer.agent(context.executionId, context.environmentRunId, () =>
-                agents.simulation(inputs, context),
-              )
+              closer.agent(context.executionId, () => agents.simulation(inputs, context))
           : agents.simulation,
         ...(judging
           ? {
@@ -2303,6 +2301,11 @@ async function runOnce(
               output.log(`[${label}] waiting for World preparation`);
             return;
           }
+          if (event.type === "world_created" || event.type === "world_sealed")
+            closer?.world(
+              event.executionId,
+              event.type === "world_created" ? event.environmentRunId : undefined,
+            );
           if (event.type === "world_created") output.log(`[${label}] world created`);
           else if (event.type === "target_started") output.log(`[${label}] agent started`);
           else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
@@ -2520,11 +2523,8 @@ async function runExperimentAttempt(
     output.log(`Run id: ${experimentId} (MCP get_run, list_run_items)`);
     // Each agent call is recorded, so an interrupted run's close knows which cases the runner
     // still saves an outcome for.
-    const track = async <T>(
-      executionId: string,
-      world: string | undefined,
-      call: () => T | Promise<T>,
-    ): Promise<T> => (closer ? closer.agent(executionId, world, call) : call());
+    const track = async <T>(executionId: string, call: () => T | Promise<T>): Promise<T> =>
+      closer ? closer.agent(executionId, call) : call();
     try {
       report = await runExperiment({
         client,
@@ -2563,6 +2563,11 @@ async function runExperimentAttempt(
                     output.log(`[${label}] waiting for World preparation`);
                   return;
                 }
+                if (event.type === "world_created" || event.type === "world_sealed")
+                  closer?.world(
+                    context.executionId,
+                    event.type === "world_created" ? event.environmentRunId : undefined,
+                  );
                 if (event.type === "world_created") output.log(`[${label}] world created`);
                 else if (event.type === "target_started") output.log(`[${label}] agent started`);
                 else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
@@ -2570,7 +2575,7 @@ async function runExperimentAttempt(
                   output.log(`[${label}] attempt prepared: ${event.status}`);
               },
               target: (targetInputs, targetContext) =>
-                track(targetContext.executionId, targetContext.environmentRunId, () =>
+                track(targetContext.executionId, () =>
                   run.agents.simulation(
                     structuredClone(targetInputs),
                     simulationTargetContext(targetContext),
@@ -2578,7 +2583,7 @@ async function runExperimentAttempt(
                 ),
             });
           output.log(`[${label}] agent started`);
-          const result = await track(context.executionId, undefined, () =>
+          const result = await track(context.executionId, () =>
             run.agents.direct(inputs, {
               mode: "direct",
               config: structuredClone(context.config),

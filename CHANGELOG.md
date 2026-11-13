@@ -15,7 +15,7 @@ refuses to publish a version without a matching entry below.
 - `hue eval --on-interrupt <resume|cancel>` chooses what Ctrl+C or `SIGTERM` does with a one-shot
   run (`--set`, `--case`, `--dataset-version`). `resume` leaves it open for the same command to
   resume, as before. `cancel` lets cases that already answered save their outcomes, completes each
-  case still started as cancelled (sealing the world of an agent still stopping, with its trace
+  case still started as cancelled (sealing its world first if it is still open, with its trace
   evidence omitted), gives each case that never started a cancelled attempt, finishes the run and
   prints `Interrupted. Cancelled N unfinished cases and closed the run: <run URL>`. Its requests
   end 6 seconds after the first interrupt; when Hue refuses or does not answer in time, the run

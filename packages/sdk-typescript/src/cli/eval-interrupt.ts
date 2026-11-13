@@ -19,12 +19,9 @@ const PARALLEL = 16;
 const FORCED_CLOSE_MS = 2_000;
 const OMISSION = "The run was interrupted before this case finished";
 
-/** The agent call of one execution: its world, and whether the agent is still running, answered
- * (or failed before the interrupt, so the runner saves that outcome) or was stopped. */
-interface Agent {
-  world: string | undefined;
-  state: "running" | "answered" | "stopped";
-}
+/** Where one execution's agent call stands: still running, answered (or failed before the
+ * interrupt, so the runner saves that outcome) or stopped by the interrupt. */
+type Agent = "running" | "answered" | "stopped";
 
 /** A run the close finished, and the cases it cancelled. */
 export interface ClosedRun {
@@ -43,7 +40,7 @@ export function closedMessage({ url, cancelled }: ClosedRun): string {
  * `--on-interrupt cancel`: closes an interrupted one-shot run instead of leaving it open for the
  * same command to resume. It starts at the first interrupt, while the agents stop, and waits up
  * to two seconds for the runner to save what it holds. It then cancels every case whose latest
- * attempt is still started (sealing the world of an agent still stopping) and every case that
+ * attempt is still started (sealing its world first if still open) and every case that
  * never started, waits for the outcomes of agents that answered, and finishes the run. Every
  * Hue call ends six seconds after the interrupt; a close that fails leaves the run open, as
  * `resume` does.
@@ -51,6 +48,8 @@ export function closedMessage({ url, cancelled }: ClosedRun): string {
 export class RunCloser {
   readonly #connection: { apiKey: string; baseUrl: string };
   readonly #agents = new Map<string, Agent>();
+  /** The open world of each execution that has one. */
+  readonly #worlds = new Map<string, string>();
   #run: { id: string; url: string } | undefined;
   #interruptedAt: number | undefined;
   /** The runner returned or threw: it saves nothing more, and a close not begun never begins. */
@@ -89,21 +88,22 @@ export class RunCloser {
     this.#wake?.();
   }
 
+  /** An execution's world was created (`world` names it) or sealed (undefined). */
+  world(executionId: string, world: string | undefined): void {
+    if (world) this.#worlds.set(executionId, world);
+    else this.#worlds.delete(executionId);
+  }
+
   /** Runs one execution's agent, recording whether the runner saves its outcome. */
-  async agent<T>(
-    executionId: string,
-    world: string | undefined,
-    call: () => T | Promise<T>,
-  ): Promise<T> {
-    const agent: Agent = { world, state: "running" };
-    this.#agents.set(executionId, agent);
+  async agent<T>(executionId: string, call: () => T | Promise<T>): Promise<T> {
+    this.#agents.set(executionId, "running");
     try {
       const result = await call();
-      agent.state = "answered";
+      this.#agents.set(executionId, "answered");
       return result;
     } catch (error) {
       // Before the interrupt the runner saves the failure; after it, the case stays open.
-      agent.state = this.#interruptedAt === undefined ? "answered" : "stopped";
+      this.#agents.set(executionId, this.#interruptedAt === undefined ? "answered" : "stopped");
       throw error;
     }
   }
@@ -134,27 +134,30 @@ export class RunCloser {
 
   async #close(run: { id: string; url: string }, interruptedAt: number) {
     const end = interruptedAt + CLOSE_MS;
+    const left = () => Math.floor(end - performance.now());
+    // Node.js takes whole milliseconds only.
+    const deadline = AbortSignal.timeout(Math.max(1, left()));
     const client = new EvaluationClient({
       ...this.#connection,
       timeoutMillis: REQUEST_MS,
       maxAttempts: 2,
-      // Node.js takes whole milliseconds only.
-      signal: AbortSignal.timeout(Math.max(1, Math.ceil(end - performance.now()))),
-    });
-    const worlds = createEnvironmentClient({
-      ...this.#connection,
-      timeoutMillis: REQUEST_MS,
-      maxAttempts: 1,
+      signal: deadline,
     });
     await this.#until(interruptedAt + SETTLE_MS, () => this.#settled);
     if (this.#finished) return undefined;
     let cancelled = 0;
     const cancel = async (execution: Execution) => {
-      // Hue completes no execution whose world is open. An agent still stopping keeps its world
-      // open: seal it abandoned, under the key the runner seals it with once the agent ends.
-      const world = this.#agents.get(execution.id)?.world;
-      if (world)
-        await worlds
+      // Hue completes no execution whose world is open. A world the runner has not sealed yet
+      // (its agent still stopping, or not started) is sealed abandoned here, under the key the
+      // runner seals it with.
+      const world = this.#worlds.get(execution.id);
+      // The World client's shortest timeout is 100 ms.
+      if (world && left() >= 100)
+        await createEnvironmentClient({
+          ...this.#connection,
+          timeoutMillis: Math.min(REQUEST_MS, left()),
+          maxAttempts: 1,
+        })
           .finishRun(world, {
             idempotencyKey: `execution:${execution.id}:abandoned`,
             status: "abandoned",
@@ -171,7 +174,7 @@ export class RunCloser {
       cancelled++;
     };
     const answered: Execution[] = [];
-    await each(await runItems(client, run.id), async ({ id, execution }) => {
+    await each(deadline, await runItems(client, run.id), async ({ id, execution }) => {
       // Hue finishes a run once every case's latest attempt has ended, so a case that never
       // started gets an attempt, cancelled at once.
       if (!execution)
@@ -181,7 +184,7 @@ export class RunCloser {
           }),
         );
       if (execution.state !== "started") return;
-      if (this.#agents.get(execution.id)?.state === "answered") answered.push(execution);
+      if (this.#agents.get(execution.id) === "answered") answered.push(execution);
       else await cancel(execution);
     });
     // The runner is still saving the outcome of an agent that answered: wait for it, then cancel
@@ -194,7 +197,7 @@ export class RunCloser {
       );
       saving = read.filter((execution) => execution.state === "started");
     }
-    await each(saving, cancel);
+    await each(deadline, saving, cancel);
     await client.finishExperiment(run.id, `interrupted:${run.id}`);
     return { id: run.id, url: run.url, cancelled };
   }
@@ -227,13 +230,18 @@ async function runItems(client: EvaluationClient, id: string): Promise<Experimen
   return items;
 }
 
-/** Runs `work` over every item, `PARALLEL` at a time. A case that cannot be cancelled leaves the
- * finish to refuse, so its failure stops nothing else. */
-async function each<T>(items: T[], work: (item: T) => Promise<unknown>): Promise<void> {
+/** Runs `work` over the items, `PARALLEL` at a time, starting none after the deadline. A case
+ * that cannot be cancelled leaves the finish to refuse, so its failure stops nothing else. */
+async function each<T>(
+  deadline: AbortSignal,
+  items: T[],
+  work: (item: T) => Promise<unknown>,
+): Promise<void> {
   let next = 0;
   await Promise.all(
     Array.from({ length: Math.min(PARALLEL, items.length) }, async () => {
-      while (next < items.length) await work(items[next++]!).catch(() => undefined);
+      while (next < items.length && !deadline.aborted)
+        await work(items[next++]!).catch(() => undefined);
     }),
   );
 }
