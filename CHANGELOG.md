@@ -8,6 +8,28 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.30.2] - 2026-11-13
+
+#### Added
+
+- `hue eval --on-interrupt <resume|cancel>` chooses what Ctrl+C or `SIGTERM` does with a one-shot
+  run (`--set`, `--case`, `--dataset-version`). `resume` leaves it open for the same command to
+  resume, as before. `cancel` lets cases that already answered save their outcomes, completes each
+  case still started as cancelled (sealing its world first if it is still open, with its trace
+  evidence omitted), gives each case that never started a cancelled attempt, finishes the run and
+  prints `Interrupted. Cancelled N unfinished cases and closed the run: <run URL>`. Its requests
+  end 6 seconds after the first interrupt; when Hue refuses or does not answer in time, the run
+  stays open with the `resume` message. The same command then starts a new run. `--worker` refuses
+  the flag.
+
+#### Changed
+
+- Where the `CI` environment variable is set to anything but an empty string, `0` or `false`, an
+  interrupted one-shot `hue eval` cancels and finishes its run by default. A CI job cancelled by a
+  newer push used to leave its run in progress with started cases that never settled, since
+  nothing in CI runs the same command again. Pass `--on-interrupt resume` to keep the previous
+  behavior.
+
 ### [0.30.1] - 2026-11-12
 
 #### Added

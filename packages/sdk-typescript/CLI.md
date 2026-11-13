@@ -50,7 +50,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.30.1`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.30.2`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -551,8 +551,8 @@ and Hue never receives or stores them. The command is part of the `hue` executab
 #   LANGFUSE_PUBLIC_KEY=pk-lf-...
 #   LANGFUSE_SECRET_KEY=sk-lf-...
 #   LANGFUSE_BASE_URL=https://cloud.langfuse.com
-npx -y @hue-run/sdk@0.30.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.30.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.30.2 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.30.2 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` come from the environment or `--env-path`
@@ -1100,7 +1100,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.30.1.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.30.2.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -1111,7 +1111,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.30.1.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.30.2.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -1153,11 +1153,11 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.30.1 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.30.1 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.30.1 eval --set "Billing regressions" --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.30.1 eval --set "Billing regressions" --only "refund-eligible" --command "node agent.js"
-npx -y @hue-run/sdk@0.30.1 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.30.2 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.30.2 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.30.2 eval --set "Billing regressions" --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.30.2 eval --set "Billing regressions" --only "refund-eligible" --command "node agent.js"
+npx -y @hue-run/sdk@0.30.2 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 `--set` (or `--dataset-version`) without `--scorer` or `--scorer-version` runs with every
@@ -1207,7 +1207,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.30.1 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.30.2 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
@@ -1392,6 +1392,22 @@ Resumable checkpoints live in `.hue/eval/<agent-key>/<project id>/` (a `.gitigno
 inside `.hue/eval/`); `--checkpoint-dir` overrides the root. Rerunning the same selection resumes
 an interrupted run without invoking the agent again; a different selection is refused until the
 unfinished one is resumed or its directory is removed.
+
+`--on-interrupt <resume|cancel>` chooses what Ctrl+C or `SIGTERM` does with a one-shot run.
+`resume`, the default, leaves the run open for the same command to resume, and prints
+`Interrupted. The run stays open; run the same command again to resume it.` `cancel`, the default
+when the `CI` environment variable is set to anything but an empty string, `0` or `false` (GitHub
+Actions, GitLab and most CI services set it), closes the run instead, since nothing in CI runs the
+command again: a job cancelled by a newer push would otherwise leave its run in progress. From the
+first interrupt, while the agents stop, the CLI lets cases that already answered save their
+outcomes, cancels each case whose attempt is still started (sealing its world first if it is still
+open; the case's trace evidence is omitted), gives each case that never started a cancelled
+attempt, and finishes the run. It prints
+`Interrupted. Cancelled 2 unfinished cases and closed the run: <run URL>` and exits 130; the same
+command then starts a new run. Every request ends 6 seconds after the first interrupt, inside the
+7.5 seconds GitHub Actions allows before `SIGTERM`; when Hue refuses or does not answer in time,
+the run stays open and the `resume` line is printed. A second interrupt still kills the agents at
+once, and gives a close underway up to 2 more seconds. `--worker` takes no `--on-interrupt`.
 
 Exit codes: `0` every case passed the evaluators that apply to it (advisory ones never count),
 `1` a case failed, errored (including one no pinned evaluator applies to or decides), was skipped,
