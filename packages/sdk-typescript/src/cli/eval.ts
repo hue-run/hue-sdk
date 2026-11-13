@@ -74,6 +74,7 @@ import {
 import type { JsonValue } from "../types.js";
 import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
 import { runCiEvalCommand, type ExecuteCiRun } from "./eval-ci.js";
+import { closedMessage, RunCloser } from "./eval-interrupt.js";
 import {
   driveTurns,
   scriptedConversation,
@@ -199,6 +200,10 @@ Output and limits:
   --check                         One-shot: check the key, selection and agent, print what the
                                   run would do and exit without creating a run or a world
   --checkpoint-dir <path>         Private checkpoint directory (default: .hue/eval/<agent-key>)
+  --on-interrupt <resume|cancel>  One-shot: on Ctrl+C or SIGTERM, leave the run open for the
+                                  same command to resume (the default), or cancel its
+                                  unfinished cases and finish it (the default when CI is set
+                                  to anything but 0 or false)
   --concurrency <n>               Cases in flight, positive integer (default: 20)
   --trace-not-accepted <policy>   A case whose telemetry Hue did not accept in time: fail_case
                                   (default) completes it as failed with the evidence omitted;
@@ -224,6 +229,15 @@ function traceNotAcceptedPolicy(value: string | undefined): "fail_case" | "pendi
   if (value === undefined || value === "fail_case") return "fail_case";
   if (value === "pending") return "pending";
   throw new UsageError("--trace-not-accepted must be fail_case or pending");
+}
+/** `--on-interrupt`: an interrupted one-shot run stays open for the same command to resume it, or
+ * has its unfinished cases cancelled and is finished. Where `CI` is set (GitHub Actions, GitLab
+ * and most CI services set it) nothing runs the command again, so cancel is the default there. */
+function interruptPolicy(value: string | undefined): "resume" | "cancel" {
+  if (value === "resume" || value === "cancel") return value;
+  if (value !== undefined) throw new UsageError("--on-interrupt must be resume or cancel");
+  const ci = process.env.CI?.trim().toLowerCase();
+  return ci && ci !== "0" && ci !== "false" ? "cancel" : "resume";
 }
 /** The `--turns` mode: who drives a conversation case's scripted messages. */
 function turnsMode(value: string | undefined): TurnsMode {
@@ -285,6 +299,7 @@ function parse(argv: string[]) {
         "save-version": { type: "boolean", default: false },
         check: { type: "boolean", default: false },
         "checkpoint-dir": { type: "string" },
+        "on-interrupt": { type: "string" },
         concurrency: { type: "string" },
         timeout: { type: "string" },
         wait: { type: "string" },
@@ -1285,6 +1300,22 @@ async function prepareCheckpointDirectory(
   return checkpointPath(join(root, agentKey), ...segments);
 }
 
+/** After a close cancelled and finished the run of the saved attempt, marks the attempt completed
+ * so the same command starts a new run instead of resuming one Hue has finished. Best effort. */
+async function closeAttempt(directory: string, identity: unknown, experimentId: string) {
+  let store: CheckpointStore | undefined;
+  try {
+    store = await CheckpointStore.acquire(directory, identity);
+    const attempt = await store.read<{ stage: string; experimentId?: string }>("active-attempt");
+    if (attempt?.experimentId === experimentId && attempt.stage !== "completed")
+      await store.write("active-attempt", { ...attempt, stage: "completed" });
+  } catch {
+    // Left as it was, the attempt resumes the finished run.
+  } finally {
+    await store?.release();
+  }
+}
+
 /** Worker-side client that reports registration and claims without changing the worker. */
 class ObservedClient extends EvaluationClient {
   registered = false;
@@ -2113,6 +2144,7 @@ async function runOnce(
   hue: HueClient,
   output: Output,
   signal: AbortSignal,
+  closer: RunCloser | undefined,
 ): Promise<number> {
   const client = new EvaluationClient(connection);
   const concurrency = integer("concurrency", values.concurrency, 20, 1, Number.MAX_SAFE_INTEGER);
@@ -2200,6 +2232,7 @@ async function runOnce(
           baselineId,
           judging,
           checkpointDirectory,
+          closer,
         },
         connection,
       );
@@ -2207,67 +2240,89 @@ async function runOnce(
     const caseKeys = new Map<string, string>();
     let runUrl = "";
     const telemetry = telemetryReporter(output);
-    const report = await runSimulation({
-      client,
-      environmentClient,
-      hue,
-      checkpointDirectory,
-      definition: {
-        kind: "pins",
-        datasetVersionId: pins.datasetVersionId,
-        scorerVersionIds: pins.scorerVersionIds,
-        ...(pins.caseIds ? { caseIds: pins.caseIds } : {}),
-      },
-      runName,
-      // Outputs, error messages and explanations are stored unless opted out; --content governs
-      // only the telemetry.
-      persistResultContent: !values["no-output"],
-      traceEvidence: { mode: "required" },
-      // A case whose telemetry Hue did not accept fails instead of staying started.
-      traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
-      onTelemetryNotAccepted: telemetry.report,
-      concurrency,
-      agentRevision: agent.revision,
-      // The CLI adapts to whatever the deployment serves; the library warning is for code that
-      // still reads the legacy capability itself.
-      deprecationWarnings: false,
-      signal,
-      target: agents.simulation,
-      ...(judging
-        ? {
-            onUploaded: (report: SimulationReport) =>
-              checkpointJudges(judging, report, { kind: "attempt" }),
+    let report: SimulationReport;
+    try {
+      report = await runSimulation({
+        client,
+        environmentClient,
+        hue,
+        checkpointDirectory,
+        definition: {
+          kind: "pins",
+          datasetVersionId: pins.datasetVersionId,
+          scorerVersionIds: pins.scorerVersionIds,
+          ...(pins.caseIds ? { caseIds: pins.caseIds } : {}),
+        },
+        runName,
+        // Outputs, error messages and explanations are stored unless opted out; --content governs
+        // only the telemetry.
+        persistResultContent: !values["no-output"],
+        traceEvidence: { mode: "required" },
+        // A case whose telemetry Hue did not accept fails instead of staying started.
+        traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
+        onTelemetryNotAccepted: telemetry.report,
+        concurrency,
+        agentRevision: agent.revision,
+        // The CLI adapts to whatever the deployment serves; the library warning is for code that
+        // still reads the legacy capability itself.
+        deprecationWarnings: false,
+        signal,
+        target: closer
+          ? (inputs, context) =>
+              closer.agent(context.executionId, context.environmentRunId, () =>
+                agents.simulation(inputs, context),
+              )
+          : agents.simulation,
+        ...(judging
+          ? {
+              onUploaded: (report: SimulationReport) =>
+                checkpointJudges(judging, report, { kind: "attempt" }),
+            }
+          : {}),
+        async onProgress(event: SimulationProgress) {
+          if (event.type === "run_created") {
+            runUrl = event.runUrl;
+            closer?.created(event.experimentId, event.runUrl);
+            output.log(`Run: ${event.runUrl}`);
+            output.log(`Run id: ${event.experimentId} (MCP get_run, list_run_items)`);
+            try {
+              let after: string | undefined;
+              do {
+                const page = await client.listExperimentItems(event.experimentId, { after });
+                for (const item of page.items) caseKeys.set(item.id, item.externalKey);
+                after = page.nextCursor ?? undefined;
+              } while (after);
+            } catch {
+              // Progress labels fall back to case IDs; the run itself is unaffected.
+            }
+            return;
           }
-        : {}),
-      async onProgress(event: SimulationProgress) {
-        if (event.type === "run_created") {
-          runUrl = event.runUrl;
-          output.log(`Run: ${event.runUrl}`);
-          output.log(`Run id: ${event.experimentId} (MCP get_run, list_run_items)`);
-          try {
-            let after: string | undefined;
-            do {
-              const page = await client.listExperimentItems(event.experimentId, { after });
-              for (const item of page.items) caseKeys.set(item.id, item.externalKey);
-              after = page.nextCursor ?? undefined;
-            } while (after);
-          } catch {
-            // Progress labels fall back to case IDs; the run itself is unaffected.
+          const label = caseKeys.get(event.caseId) ?? event.caseId;
+          if (event.type === "world_preparing") {
+            if (preparingLogged(event.caseId))
+              output.log(`[${label}] waiting for World preparation`);
+            return;
           }
-          return;
-        }
-        const label = caseKeys.get(event.caseId) ?? event.caseId;
-        if (event.type === "world_preparing") {
-          if (preparingLogged(event.caseId)) output.log(`[${label}] waiting for World preparation`);
-          return;
-        }
-        if (event.type === "world_created") output.log(`[${label}] world created`);
-        else if (event.type === "target_started") output.log(`[${label}] agent started`);
-        else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
-        else if (event.type === "attempt_prepared")
-          output.log(`[${label}] attempt prepared: ${event.status}`);
-      },
-    });
+          if (event.type === "world_created") output.log(`[${label}] world created`);
+          else if (event.type === "target_started") output.log(`[${label}] agent started`);
+          else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
+          else if (event.type === "attempt_prepared")
+            output.log(`[${label}] attempt prepared: ${event.status}`);
+        },
+      });
+    } catch (error) {
+      closer?.settled();
+      // A closed run is not resumed: the same command starts a new one.
+      const closed = await closer?.closing;
+      if (closed)
+        await closeAttempt(
+          checkpointDirectory,
+          { kind: "simulation", projectId: project.id, baseUrl: client.baseUrl },
+          closed.id,
+        );
+      throw error;
+    }
+    closer?.settled(true);
     telemetry.rest(report.telemetryNotAccepted);
     return await reportVerdicts(
       client,
@@ -2412,10 +2467,11 @@ async function runExperimentAttempt(
     baselineId: string | undefined;
     judging?: JudgeCheckpoint;
     checkpointDirectory: string;
+    closer: RunCloser | undefined;
   },
   connection: Connection,
 ): Promise<number> {
-  const { client, kind, values, pins, output, signal } = run;
+  const { client, kind, values, pins, output, signal, closer } = run;
   const config = { agentKey: run.agent.key, agentRevision: run.agent.revision };
   const store = await CheckpointStore.acquire(run.checkpointDirectory, {
     kind,
@@ -2459,79 +2515,102 @@ async function runExperimentAttempt(
     }
     experimentId = attempt.experimentId;
     runUrl = new URL(`/runs/${experimentId}`, connection.baseUrl).toString();
+    closer?.created(experimentId, runUrl);
     output.log(`Run: ${runUrl}`);
     output.log(`Run id: ${experimentId} (MCP get_run, list_run_items)`);
-    report = await runExperiment({
-      client,
-      hue: run.hue,
-      experimentId,
-      checkpointDirectory: checkpointPath(store.directory, [experimentId, "experiment id"]),
-      // Outputs, error messages and explanations are stored unless opted out; --content governs
-      // only the telemetry.
-      persistResultContent: !values["no-output"],
-      traceEvidence: { mode: "required" },
-      traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
-      onTelemetryNotAccepted: telemetry.report,
-      concurrency: run.concurrency,
-      signal,
-      scorers: [],
-      deferUnboundLocalScorers: true,
-      environmentEvidence: "when_pinned",
-      async target(inputs, context) {
-        if (signal.aborted) throw new TargetCancelledError();
-        const label = context.item.externalKey;
-        if (environmentClient && pinsWorld(context.item))
-          return runEnvironmentTarget({
-            client,
-            environmentClient,
-            hue: run.hue,
-            inputs,
-            context,
-            agentRevision: run.agent.revision,
-            // The CLI adapts to whatever the deployment serves; the library warning is for
-            // code that still reads the legacy capability itself.
-            deprecationWarnings: false,
-            signal,
-            onProgress(event) {
-              if (event.type === "world_preparing") {
-                if (preparingLogged(context.item.id))
-                  output.log(`[${label}] waiting for World preparation`);
-                return;
-              }
-              if (event.type === "world_created") output.log(`[${label}] world created`);
-              else if (event.type === "target_started") output.log(`[${label}] agent started`);
-              else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
-              else if (event.type === "attempt_prepared")
-                output.log(`[${label}] attempt prepared: ${event.status}`);
-            },
-            target: (targetInputs, targetContext) =>
-              run.agents.simulation(
-                structuredClone(targetInputs),
-                simulationTargetContext(targetContext),
-              ),
-          });
-        output.log(`[${label}] agent started`);
-        const result = await run.agents.direct(inputs, {
-          mode: "direct",
-          config: structuredClone(context.config),
-          item: {
-            id: context.item.id,
-            externalKey: context.item.externalKey,
-          },
-          executionId: context.executionId,
-          trace: { traceId: context.span.traceId, spanId: context.span.spanId },
-          files: structuredClone(context.files),
-          outputDirectory: context.outputDirectory,
-          signal,
-        });
-        const count =
-          result instanceof TargetResult ? result.files.length : result === undefined ? 0 : null;
-        output.log(
-          `[${context.item.externalKey}] ${count === null ? "answer returned" : `${count} file${count === 1 ? "" : "s"} produced`}`,
-        );
-        return result;
-      },
-    });
+    // Each agent call is recorded, so an interrupted run's close knows which cases the runner
+    // still saves an outcome for.
+    const track = async <T>(
+      executionId: string,
+      world: string | undefined,
+      call: () => T | Promise<T>,
+    ): Promise<T> => (closer ? closer.agent(executionId, world, call) : call());
+    try {
+      report = await runExperiment({
+        client,
+        hue: run.hue,
+        experimentId,
+        checkpointDirectory: checkpointPath(store.directory, [experimentId, "experiment id"]),
+        // Outputs, error messages and explanations are stored unless opted out; --content governs
+        // only the telemetry.
+        persistResultContent: !values["no-output"],
+        traceEvidence: { mode: "required" },
+        traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
+        onTelemetryNotAccepted: telemetry.report,
+        concurrency: run.concurrency,
+        signal,
+        scorers: [],
+        deferUnboundLocalScorers: true,
+        environmentEvidence: "when_pinned",
+        async target(inputs, context) {
+          if (signal.aborted) throw new TargetCancelledError();
+          const label = context.item.externalKey;
+          if (environmentClient && pinsWorld(context.item))
+            return runEnvironmentTarget({
+              client,
+              environmentClient,
+              hue: run.hue,
+              inputs,
+              context,
+              agentRevision: run.agent.revision,
+              // The CLI adapts to whatever the deployment serves; the library warning is for
+              // code that still reads the legacy capability itself.
+              deprecationWarnings: false,
+              signal,
+              onProgress(event) {
+                if (event.type === "world_preparing") {
+                  if (preparingLogged(context.item.id))
+                    output.log(`[${label}] waiting for World preparation`);
+                  return;
+                }
+                if (event.type === "world_created") output.log(`[${label}] world created`);
+                else if (event.type === "target_started") output.log(`[${label}] agent started`);
+                else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
+                else if (event.type === "attempt_prepared")
+                  output.log(`[${label}] attempt prepared: ${event.status}`);
+              },
+              target: (targetInputs, targetContext) =>
+                track(targetContext.executionId, targetContext.environmentRunId, () =>
+                  run.agents.simulation(
+                    structuredClone(targetInputs),
+                    simulationTargetContext(targetContext),
+                  ),
+                ),
+            });
+          output.log(`[${label}] agent started`);
+          const result = await track(context.executionId, undefined, () =>
+            run.agents.direct(inputs, {
+              mode: "direct",
+              config: structuredClone(context.config),
+              item: {
+                id: context.item.id,
+                externalKey: context.item.externalKey,
+              },
+              executionId: context.executionId,
+              trace: { traceId: context.span.traceId, spanId: context.span.spanId },
+              files: structuredClone(context.files),
+              outputDirectory: context.outputDirectory,
+              signal,
+            }),
+          );
+          const count =
+            result instanceof TargetResult ? result.files.length : result === undefined ? 0 : null;
+          output.log(
+            `[${context.item.externalKey}] ${count === null ? "answer returned" : `${count} file${count === 1 ? "" : "s"} produced`}`,
+          );
+          return result;
+        },
+      });
+    } catch (error) {
+      closer?.settled();
+      // A closed run is not resumed: the same command starts a new one.
+      if ((await closer?.closing)?.id === experimentId) {
+        attempt.stage = "completed";
+        await store.write("active-attempt", attempt);
+      }
+      throw error;
+    }
+    closer?.settled(true);
     if (run.judging)
       await checkpointJudges(
         run.judging,
@@ -2805,6 +2884,10 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
   const secrets: string[] = [];
   const controller = new AbortController();
   let firstInterrupt = 0;
+  /** With `--on-interrupt cancel`, closes the one-shot run the first interrupt stops. */
+  let closer: RunCloser | undefined;
+  let forcedAt: number | undefined;
+  let reported = false;
   // The first interrupt stops the agents within their grace; a repeated one kills their process
   // groups at once and exits, so no agent is left running with its world token. `npm run` and
   // `npx` forward the terminal's SIGINT a moment after the terminal delivers it, so a repeat
@@ -2815,15 +2898,27 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       if (runningCommands.size)
         process.stderr.write("Stopping the agent; press Ctrl+C again to force.\n");
       controller.abort(new Error("Interrupted"));
+      closer?.interrupt();
       return;
     }
-    if (performance.now() - firstInterrupt < 50) return;
+    if (performance.now() - (forcedAt ?? firstInterrupt) < 50) return;
+    // A further signal while a forced exit waits for the close exits at once.
+    if (forcedAt !== undefined) process.exit(130);
+    forcedAt = performance.now();
     for (const command of runningCommands) command.kill();
     // The exit cannot wait for the normal cleanup: remove the world cases' files, the MCP
     // configurations holding world tokens and the checkpoint locks now.
     runForcedExitCleanups();
-    process.stderr.write("Interrupted.\n");
-    process.exit(130);
+    // A close underway gets at most two seconds more; the agents are already stopped.
+    const closing = closer?.force();
+    if (!closing) {
+      process.stderr.write("Interrupted.\n");
+      process.exit(130);
+    }
+    void closing.then((closed) => {
+      process.stderr.write(closed && !reported ? closedMessage(closed) : "Interrupted.\n");
+      process.exit(130);
+    });
   };
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", interrupt);
@@ -2842,6 +2937,9 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     values.judges = !values["no-judges"] && !values["no-output"];
     // A usage error before anything is prepared or created: no run is left to recover from it.
     traceNotAcceptedPolicy(values["trace-not-accepted"]);
+    if (values.worker && values["on-interrupt"] !== undefined)
+      throw new UsageError("--on-interrupt applies to one-shot runs");
+    const onInterrupt = interruptPolicy(values["on-interrupt"]);
     const turns = turnsMode(values.turns);
     json = values.json;
     const output: Output = {
@@ -2950,15 +3048,23 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       captureContent: values.content ?? !values["no-content"],
       timeoutMillis: CASE_TRACE_EXPORT_MILLIS,
     });
-    return values.worker
-      ? await runWorker(values, connection, agents, agent, hue, output, controller.signal)
-      : await runOnce(values, connection, agents, agent, hue, output, controller.signal);
+    if (values.worker)
+      return await runWorker(values, connection, agents, agent, hue, output, controller.signal);
+    if (onInterrupt === "cancel") {
+      closer = new RunCloser(connection);
+      if (controller.signal.aborted) closer.interrupt();
+    }
+    return await runOnce(values, connection, agents, agent, hue, output, controller.signal, closer);
   } catch (error) {
     if (controller.signal.aborted || error instanceof TargetCancelledError) {
+      const closed = await closer?.closing;
+      reported = true;
       process.stderr.write(
         worker
           ? "Interrupted.\n"
-          : "Interrupted. The run stays open; run the same command again to resume it.\n",
+          : closed
+            ? closedMessage(closed)
+            : "Interrupted. The run stays open; run the same command again to resume it.\n",
       );
       return 130;
     }

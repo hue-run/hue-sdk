@@ -88,6 +88,10 @@ function hueStandIn(
     outcomeGap?: boolean;
     /** `false`: the deployment predates the version run route and answers it 404. */
     runDefaults?: boolean;
+    /** Answer a run's first case listing this many milliseconds late. */
+    slowFirstItemsMs?: number;
+    /** Never answer, or refuse with 500, a completion that cancels a case. */
+    cancelFault?: "hang" | "fail";
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
@@ -244,6 +248,7 @@ function hueStandIn(
   const creationRequests: unknown[] = [];
   const baselineRequests: unknown[] = [];
   let heldCompletion = false;
+  const slowedItems = new Set<string>();
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -541,25 +546,31 @@ function hueStandIn(
       if (experimentMatch) {
         const experiment = experiments.get(experimentMatch[1]!);
         if (!experiment) return new Response(null, { status: 404 });
-        if (experimentMatch[4]) {
-          experiment.finishedAt = new Date().toISOString();
-          return Response.json({ id: experiment.id, finishedAt: experiment.finishedAt });
-        }
-        if (experimentMatch[3]) {
-          calls.starts.push(body);
-          const prior = [...executions.values()]
+        const latest = () =>
+          [...executions.values()]
             .filter(
               (execution) =>
                 execution.experimentId === experiment.id && execution.caseId === frozenCase.id,
             )
             .at(-1);
+        if (experimentMatch[4]) {
+          // As Hue does: a run finishes once every case's latest attempt has ended.
+          if (!["succeeded", "error", "cancelled"].includes(latest()?.state ?? ""))
+            return new Response(null, { status: 409 });
+          experiment.finishedAt = new Date().toISOString();
+          return Response.json({ id: experiment.id, finishedAt: experiment.finishedAt });
+        }
+        if (experimentMatch[3]) {
+          calls.starts.push(body);
+          const prior = latest();
           if (prior && body.previousExecutionId !== prior.id) return Response.json(prior);
           if (prior) prior.state = "uncertain";
           const execution = {
             id: randomUUID(),
             attempt: (prior?.attempt ?? 0) + 1,
             state: "started" as const,
-            traceExternalId: String(body.traceExternalId),
+            traceExternalId:
+              body.traceExternalId === undefined ? null : String(body.traceExternalId),
             experimentId: experiment.id,
             caseId: frozenCase.id,
           };
@@ -570,7 +581,11 @@ function hueStandIn(
           if (experimentMatch[2] !== frozenCase.id) return new Response(null, { status: 404 });
           return Response.json(frozenCase);
         }
-        if (path.endsWith("/items"))
+        if (path.endsWith("/items")) {
+          if (options.slowFirstItemsMs && !slowedItems.has(experiment.id)) {
+            slowedItems.add(experiment.id);
+            await sleep(options.slowFirstItemsMs);
+          }
           return Response.json({
             items: [
               {
@@ -585,6 +600,7 @@ function hueStandIn(
             ],
             nextCursor: null,
           });
+        }
         return Response.json(experiment);
       }
       if (path === "/environment-runs") {
@@ -743,6 +759,10 @@ function hueStandIn(
         const execution = executions.get(executionMatch[1]!);
         if (!execution) return new Response(null, { status: 404 });
         if (!executionMatch[2]) return Response.json(execution);
+        if (body.state === "cancelled" && options.cancelFault === "hang")
+          return new Promise<Response>(() => {});
+        if (body.state === "cancelled" && options.cancelFault === "fail")
+          return new Response(null, { status: 500 });
         const world = [...worlds.values()].find((item) => item.executionId === execution.id);
         if (world?.status === "open") return new Response(null, { status: 409 });
         const experiment = experiments.get(execution.experimentId)!;
@@ -939,8 +959,9 @@ function hue(
     /** Sends SIGINT (or `signal`) this many times, 100 ms apart, once this file exists. */
     interruptAfter?: { file: string; times: number; gapMillis?: number; signal?: NodeJS.Signals };
   },
-): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  const { HUE_API_KEY: _key, HUE_BASE_URL: _origin, ...inherited } = process.env;
+): Promise<{ status: number | null; stdout: string; stderr: string; signalledAt?: number }> {
+  // `CI` decides what an interrupt does with the run; a test that needs it sets it.
+  const { HUE_API_KEY: _key, HUE_BASE_URL: _origin, CI: _ci, ...inherited } = process.env;
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cli, "eval", ...args], {
       cwd: options.cwd,
@@ -957,9 +978,11 @@ function hue(
     let stdout = "";
     let stderr = "";
     let interrupted = false;
+    let signalledAt: number | undefined;
     const maybeInterrupt = (text: string) => {
       if (!interrupted && options.interruptOn?.test(text)) {
         interrupted = true;
+        signalledAt = performance.now();
         child.kill("SIGINT");
       }
     };
@@ -976,6 +999,7 @@ function hue(
       const waiting = setInterval(() => {
         if (!existsSync(file)) return;
         clearInterval(waiting);
+        signalledAt = performance.now();
         for (let index = 0; index < times; index++)
           setTimeout(() => child.kill(signal), index * gapMillis);
       }, 50);
@@ -988,7 +1012,7 @@ function hue(
     });
     child.on("close", (status) => {
       clearTimeout(timer);
-      resolve({ status, stdout, stderr });
+      resolve({ status, stdout, stderr, ...(signalledAt === undefined ? {} : { signalledAt }) });
     });
   });
 }
@@ -2420,6 +2444,286 @@ describe("hue eval", () => {
     },
     SPAWN_TIMEOUT * 2,
   );
+
+  /** The CLI's run, its finish requests, and the case it says it cancelled. */
+  const closedRun = (
+    f: ReturnType<typeof hueStandIn>,
+    result: { stdout: string; stderr: string },
+  ) => {
+    const runUrl = /Run: (\S+)/.exec(result.stdout + result.stderr)?.[1] ?? "";
+    return {
+      runUrl,
+      finishes: f.calls.requests.filter((request) =>
+        /^POST \/experiments\/[^/]+\/finish$/.test(request),
+      ),
+      finished: f.experiments.get(runUrl.split("/runs/")[1] ?? "")?.finishedAt ?? null,
+    };
+  };
+  const omitted = {
+    traceEvidence: "omit",
+    omissionReason: "The run was interrupted before this case finished",
+  };
+
+  for (const direct of [false, true])
+    test(
+      `in CI an interrupt cancels the ${direct ? "direct" : "world"} case and finishes the run, and the same command starts a new one`,
+      async () => {
+        const f = hueStandIn(direct ? { answerOnlyScenario: true } : {});
+        const cwd = await workspace();
+        const survivor = join(cwd, "survivor.txt");
+        const args = [
+          "--scenario",
+          "Refund flow",
+          "--command",
+          `${process.execPath} ${join(cwd, "agent-once.mjs")}`,
+          "--origin",
+          f.baseUrl,
+          "--wait",
+          "0",
+        ];
+        const env = { CI: "true", HUE_TEST_SURVIVOR: survivor };
+        try {
+          const interrupted = await hue(args, {
+            cwd,
+            env,
+            interruptAfter: { file: survivor, times: 1 },
+          });
+          expect(interrupted.status).toBe(130);
+          const { runUrl, finishes, finished } = closedRun(f, interrupted);
+          expect(interrupted.stderr).toContain(
+            `Interrupted. Cancelled 1 unfinished case and closed the run: ${runUrl}`,
+          );
+          expect(interrupted.stderr).not.toContain("The run stays open");
+          expect(f.calls.completions).toEqual([
+            { executionId: expect.any(String), state: "cancelled" },
+          ]);
+          expect(f.calls.evidence).toEqual([omitted]);
+          expect(finishes).toHaveLength(1);
+          expect(finished).toBeTruthy();
+          if (!direct)
+            expect([...f.worlds.values()].map((world) => world.status)).toEqual(["abandoned"]);
+          expectNoSecrets(interrupted);
+
+          // Hue finished the run, so the same command starts a new one instead of resuming it.
+          const rerun = await hue(args, { cwd, env });
+          expect(rerun.status).toBe(0);
+          expect(f.calls.experiments).toHaveLength(2);
+          expect(rerun.stdout + rerun.stderr).not.toContain(`Run: ${runUrl}`);
+        } finally {
+          f.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT * 2,
+    );
+
+  test(
+    "in CI an interrupt before the case starts gives it a cancelled attempt so the run finishes",
+    async () => {
+      // The first case listing waits, so the interrupt lands before the runner starts the case.
+      const f = hueStandIn({ slowFirstItemsMs: 1_000 });
+      const cwd = await workspace();
+      try {
+        const result = await hue(
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--origin", f.baseUrl, "--wait", "0"],
+          { cwd, env: { CI: "1" }, interruptOn: /Run id:/ },
+        );
+        expect(result.status).toBe(130);
+        const { runUrl, finishes, finished } = closedRun(f, result);
+        expect(result.stderr).toContain(
+          `Interrupted. Cancelled 1 unfinished case and closed the run: ${runUrl}`,
+        );
+        // Started without a trace and completed without evidence: the agent never ran.
+        expect(f.calls.starts).toEqual([
+          { idempotencyKey: expect.stringMatching(/^interrupted:/) },
+        ]);
+        expect(f.calls.worldCreates).toEqual([]);
+        expect(f.calls.completions).toEqual([
+          { executionId: expect.any(String), state: "cancelled" },
+        ]);
+        expect(f.calls.evidence).toEqual([{}]);
+        expect(finishes).toHaveLength(1);
+        expect(finished).toBeTruthy();
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  for (const forced of [false, true])
+    test(
+      `in CI ${forced ? "a second interrupt kills an agent that ignores SIGTERM and still closes the run" : "an interrupt closes the run of an agent that ignores SIGTERM before its stop grace ends"}`,
+      async () => {
+        const f = hueStandIn();
+        const cwd = await workspace();
+        const survivor = join(cwd, "survivor.txt");
+        let pid: number | undefined;
+        try {
+          const result = await hue(
+            [
+              "--scenario",
+              "Refund flow",
+              "--command",
+              `${process.execPath} agent-stubborn.mjs >/dev/null 2>&1; true`,
+              "--origin",
+              f.baseUrl,
+              "--wait",
+              "0",
+            ],
+            {
+              cwd,
+              env: { CI: "true", HUE_TEST_SURVIVOR: survivor },
+              interruptAfter: { file: survivor, times: forced ? 2 : 1 },
+            },
+          );
+          pid = Number(await readFile(survivor, "utf8"));
+          const exitedAfter = performance.now() - result.signalledAt!;
+          expect(result.status).toBe(130);
+          const { runUrl, finished } = closedRun(f, result);
+          expect(result.stderr).toContain(
+            `Interrupted. Cancelled 1 unfinished case and closed the run: ${runUrl}`,
+          );
+          // The agent was still running: its world was sealed for the case to complete.
+          expect([...f.worlds.values()].map((world) => world.status)).toEqual(["abandoned"]);
+          expect(f.calls.completions).toEqual([
+            { executionId: expect.any(String), state: "cancelled" },
+          ]);
+          const closedAfter =
+            Date.parse(finished!) - (performance.timeOrigin + result.signalledAt!);
+          if (forced) expect(exitedAfter).toBeLessThan(2_500);
+          // Closed within the settle wait and the cancellation, not after the 5 s kill grace.
+          else expect(closedAfter).toBeLessThan(4_000);
+          for (let waited = 0; alive(pid) && waited < 1_000; waited += 50) await sleep(50);
+          expect(alive(pid)).toBe(false);
+        } finally {
+          if (pid !== undefined && alive(pid)) process.kill(pid, "SIGKILL");
+          f.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT,
+    );
+
+  for (const [ci, flag, closes] of [
+    ["true", "resume", false],
+    ["false", "cancel", true],
+    ["0", undefined, false],
+    ["", "cancel", true],
+  ] as const)
+    test(
+      `with CI=${JSON.stringify(ci)}${flag ? ` and --on-interrupt ${flag}` : ""} an interrupt ${closes ? "closes the run" : "keeps the run open"}`,
+      async () => {
+        const f = hueStandIn();
+        const cwd = await workspace();
+        const survivor = join(cwd, "survivor.txt");
+        try {
+          const result = await hue(
+            [
+              "--scenario",
+              "Refund flow",
+              "--command",
+              `${process.execPath} agent-once.mjs`,
+              "--origin",
+              f.baseUrl,
+              "--wait",
+              "0",
+              ...(flag ? ["--on-interrupt", flag] : []),
+            ],
+            {
+              cwd,
+              env: { CI: ci, HUE_TEST_SURVIVOR: survivor },
+              interruptAfter: { file: survivor, times: 1 },
+            },
+          );
+          expect(result.status).toBe(130);
+          const { runUrl, finishes } = closedRun(f, result);
+          if (closes) {
+            expect(result.stderr).toContain(
+              `Interrupted. Cancelled 1 unfinished case and closed the run: ${runUrl}`,
+            );
+            expect(f.calls.completions).toEqual([
+              { executionId: expect.any(String), state: "cancelled" },
+            ]);
+            expect(finishes).toHaveLength(1);
+          } else {
+            expect(result.stderr).toContain(
+              "Interrupted. The run stays open; run the same command again to resume it.",
+            );
+            expect(f.calls.completions).toEqual([]);
+            expect(finishes).toHaveLength(0);
+          }
+        } finally {
+          f.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT,
+    );
+
+  for (const fault of ["hang", "fail"] as const)
+    test(
+      `in CI a Hue that ${fault === "hang" ? "never answers" : "refuses"} the cancellation leaves the run open and the exit within its bound`,
+      async () => {
+        const f = hueStandIn({ cancelFault: fault });
+        const cwd = await workspace();
+        const survivor = join(cwd, "survivor.txt");
+        try {
+          const result = await hue(
+            [
+              "--scenario",
+              "Refund flow",
+              "--command",
+              `${process.execPath} agent-once.mjs`,
+              "--origin",
+              f.baseUrl,
+              "--wait",
+              "0",
+            ],
+            {
+              cwd,
+              env: { CI: "true", HUE_TEST_SURVIVOR: survivor },
+              interruptAfter: { file: survivor, times: 1 },
+            },
+          );
+          // Every call of the close ends 6 s after the interrupt, before GitHub Actions' SIGTERM.
+          const exitedAfter = performance.now() - result.signalledAt!;
+          expect(exitedAfter).toBeLessThan(7_500);
+          expect(result.status).toBe(130);
+          expect(result.stderr).toContain(
+            "Interrupted. The run stays open; run the same command again to resume it.",
+          );
+          expect(closedRun(f, result).finishes.length).toBeLessThanOrEqual(1);
+          expect(closedRun(f, result).finished).toBeNull();
+        } finally {
+          f.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT,
+    );
+
+  test("--on-interrupt is refused when it names no policy or with --worker", async () => {
+    const cwd = await workspace();
+    try {
+      for (const [args, message] of [
+        [
+          ["--case", "Refund flow", "--on-interrupt", "later"],
+          "--on-interrupt must be resume or cancel",
+        ],
+        [["--worker", "--on-interrupt", "cancel"], "--on-interrupt applies to one-shot runs"],
+      ] as const) {
+        const result = await hue([...args, "./hue-agent.ts", "--origin", "http://127.0.0.1:9"], {
+          cwd,
+        });
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain(message);
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
 
   test(
     "a run whose process was killed stays uncertain without replaying its world agent",
