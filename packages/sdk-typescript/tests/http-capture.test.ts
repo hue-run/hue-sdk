@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { request } from "node:http";
+import type { WireRecord } from "./sdk-receiver.js";
 import { brotliCompressSync, deflateSync, gzipSync } from "node:zlib";
 import { createHue, createHueTransport, type HueOptions } from "../src/index.js";
 import { apiKey, attr, receiver } from "./sdk-receiver.js";
@@ -244,6 +245,274 @@ describe("default outbound HTTP capture", () => {
       expect(() =>
         createHueTransport({ apiKey, serviceName: "http-options", enabled, [key]: "false" }),
       ).toThrow();
+    }
+  });
+});
+
+const oauthCode = "placeholder-oauth-code";
+const pkceVerifier = "placeholder-pkce-verifier";
+const oauthAssertion = "placeholder-oauth-assertion";
+const querySignature = "placeholder-query-signature";
+const querySig = "placeholder-query-sig";
+const sessionValue = "placeholder-session-value";
+const sidValue = "placeholder-sid-value";
+const amzSecurityToken = "placeholder-amz-security-token";
+const amzSignature = "placeholder-amz-signature";
+const knownToken = "placeholder-known-token";
+const clientSecret = "placeholder-client-secret";
+const resourceCode = "placeholder-resource-code";
+/** Values the default recorder must not upload. These are placeholders, not live credentials. */
+const withheld = [
+  oauthCode,
+  pkceVerifier,
+  oauthAssertion,
+  querySignature,
+  querySig,
+  sessionValue,
+  sidValue,
+  amzSecurityToken,
+  amzSignature,
+  knownToken,
+  clientSecret,
+];
+
+function presignedQuery(): string {
+  return new URLSearchParams({
+    "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+    "X-Amz-Date": "20260101T000000Z",
+    "X-Amz-Signature": amzSignature,
+    "X-Amz-Security-Token": amzSecurityToken,
+    signature: querySignature,
+    sig: querySig,
+    session: sessionValue,
+    sid: sidValue,
+    token: knownToken,
+  }).toString();
+}
+
+function oauthForm(): URLSearchParams {
+  return new URLSearchParams({
+    grant_type: "authorization_code",
+    code: oauthCode,
+    code_verifier: pkceVerifier,
+    assertion: oauthAssertion,
+    client_id: "placeholder-client-id",
+    client_secret: clientSecret,
+    token: knownToken,
+  });
+}
+
+function loopback() {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => Response.json({ ok: true }),
+  });
+  return { server, origin: `http://127.0.0.1:${server.port}` };
+}
+
+function nodeHttpPost(url: string, body: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const sent = request(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "content-length": String(Buffer.byteLength(body)),
+        },
+      },
+      (response) => {
+        response.resume();
+        response.on("end", () => resolve());
+        response.on("error", reject);
+      },
+    );
+    sent.on("error", reject);
+    sent.end(body);
+  });
+}
+
+function httpSpans(endpoint: ReturnType<typeof receiver>): WireRecord[] {
+  return endpoint.accepted().filter((span) => attr(span, "http.request.method"));
+}
+
+function spanInput(span: WireRecord): unknown {
+  const text = attr(span, "input.value")?.stringValue;
+  expect(typeof text).toBe("string");
+  return JSON.parse(text ?? "");
+}
+
+describe("default HTTP capture of OAuth grants and presigned queries", () => {
+  test("redacts an OAuth token form and the query it was called with before export", async () => {
+    const endpoint = receiver();
+    const target = loopback();
+    const hue = createHue({
+      apiKey,
+      baseUrl: endpoint.url,
+      serviceName: "http-oauth-form",
+      liveSpans: false,
+    });
+    try {
+      const response = await fetch(`${target.origin}/oauth/token?${presignedQuery()}`, {
+        method: "POST",
+        body: oauthForm(),
+      });
+      expect(await response.json()).toEqual({ ok: true });
+      await hue.flush();
+      const records = httpSpans(endpoint);
+      expect(records).toHaveLength(1);
+      const span = records[0]!;
+      expect(attr(span, "url.full")?.stringValue).toBe(`${target.origin}/oauth/token`);
+      expect(spanInput(span)).toMatchObject({
+        grant_type: "authorization_code",
+        client_id: "placeholder-client-id",
+        "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+        "X-Amz-Date": "20260101T000000Z",
+        code: "[redacted]",
+        code_verifier: "[redacted]",
+        assertion: "[redacted]",
+        signature: "[redacted]",
+        sig: "[redacted]",
+        session: "[redacted]",
+        sid: "[redacted]",
+        "X-Amz-Signature": "[redacted]",
+        "X-Amz-Security-Token": "[redacted]",
+        token: "[redacted]",
+        client_secret: "[redacted]",
+      });
+      const wire = endpoint.requests.map((item) => item.raw).join("\n");
+      for (const secret of withheld) expect(wire).not.toContain(secret);
+    } finally {
+      await hue.shutdownSafe();
+      await target.server.stop(true);
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("redacts a presigned URL query when the request has no body", async () => {
+    const endpoint = receiver();
+    const target = loopback();
+    const hue = createHue({
+      apiKey,
+      baseUrl: endpoint.url,
+      serviceName: "http-presigned-get",
+      liveSpans: false,
+    });
+    try {
+      const response = await fetch(
+        `${target.origin}/object?${presignedQuery()}&code=${resourceCode}`,
+      );
+      expect(await response.json()).toEqual({ ok: true });
+      await hue.flush();
+      const records = httpSpans(endpoint);
+      expect(records).toHaveLength(1);
+      const span = records[0]!;
+      expect(attr(span, "url.full")?.stringValue).toBe(`${target.origin}/object`);
+      expect(spanInput(span)).toMatchObject({
+        "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+        code: resourceCode,
+        signature: "[redacted]",
+        sig: "[redacted]",
+        session: "[redacted]",
+        sid: "[redacted]",
+        "X-Amz-Signature": "[redacted]",
+        "X-Amz-Security-Token": "[redacted]",
+        token: "[redacted]",
+      });
+      const wire = endpoint.requests.map((item) => item.raw).join("\n");
+      for (const secret of withheld) expect(wire).not.toContain(secret);
+      expect(wire).toContain(resourceCode);
+    } finally {
+      await hue.shutdownSafe();
+      await target.server.stop(true);
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("redacts OAuth fields in a JSON token request body", async () => {
+    const endpoint = receiver();
+    const target = loopback();
+    const hue = createHue({
+      apiKey,
+      baseUrl: endpoint.url,
+      serviceName: "http-oauth-json",
+      liveSpans: false,
+    });
+    try {
+      const response = await fetch(`${target.origin}/oauth/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          grant_type: "authorization_code",
+          code: oauthCode,
+          code_verifier: pkceVerifier,
+          assertion: oauthAssertion,
+          client_id: "placeholder-client-id",
+          client_secret: clientSecret,
+          token: knownToken,
+        }),
+      });
+      expect(await response.json()).toEqual({ ok: true });
+      await hue.flush();
+      const records = httpSpans(endpoint);
+      expect(records).toHaveLength(1);
+      expect(spanInput(records[0]!)).toMatchObject({
+        grant_type: "authorization_code",
+        client_id: "placeholder-client-id",
+        code: "[redacted]",
+        code_verifier: "[redacted]",
+        assertion: "[redacted]",
+        client_secret: "[redacted]",
+        token: "[redacted]",
+      });
+      const wire = endpoint.requests.map((item) => item.raw).join("\n");
+      for (const secret of [oauthCode, pkceVerifier, oauthAssertion, clientSecret, knownToken])
+        expect(wire).not.toContain(secret);
+    } finally {
+      await hue.shutdownSafe();
+      await target.server.stop(true);
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("redacts the same form and query when node:http writes the body", async () => {
+    const endpoint = receiver();
+    const target = loopback();
+    const hue = createHue({
+      apiKey,
+      baseUrl: endpoint.url,
+      serviceName: "http-oauth-node",
+      liveSpans: false,
+    });
+    try {
+      await nodeHttpPost(
+        `${target.origin}/oauth/token?${presignedQuery()}`,
+        oauthForm().toString(),
+      );
+      await hue.flush();
+      const records = httpSpans(endpoint);
+      expect(records).toHaveLength(1);
+      const span = records[0]!;
+      expect(attr(span, "url.full")?.stringValue).toBe(`${target.origin}/oauth/token`);
+      expect(spanInput(span)).toMatchObject({
+        grant_type: "authorization_code",
+        code: "[redacted]",
+        code_verifier: "[redacted]",
+        assertion: "[redacted]",
+        "X-Amz-Signature": "[redacted]",
+        "X-Amz-Security-Token": "[redacted]",
+        signature: "[redacted]",
+        sig: "[redacted]",
+        session: "[redacted]",
+        sid: "[redacted]",
+      });
+      const wire = endpoint.requests.map((item) => item.raw).join("\n");
+      for (const secret of withheld) expect(wire).not.toContain(secret);
+    } finally {
+      await hue.shutdownSafe();
+      await target.server.stop(true);
+      await endpoint.server.stop(true);
     }
   });
 });

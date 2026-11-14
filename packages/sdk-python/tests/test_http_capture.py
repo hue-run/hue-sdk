@@ -7,6 +7,7 @@ import io
 import json
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 import zlib
 from dataclasses import dataclass, field
@@ -1684,6 +1685,153 @@ def test_pipedream_uses_real_httpx_transport(receiver, app):
     assert fields["http.request.method"] == "POST"
     assert json.loads(fields["input.value"])["external_user_id"] == "synthetic-user"
     assert json.loads(fields["output.value"]) == PAYLOAD
+
+
+OAUTH_CODE = "placeholder-oauth-code"
+PKCE_VERIFIER = "placeholder-pkce-verifier"
+OAUTH_ASSERTION = "placeholder-oauth-assertion"
+QUERY_SIGNATURE = "placeholder-query-signature"
+QUERY_SIG = "placeholder-query-sig"
+SESSION_VALUE = "placeholder-session-value"
+SID_VALUE = "placeholder-sid-value"
+AMZ_SECURITY_TOKEN = "placeholder-amz-security-token"
+AMZ_SIGNATURE = "placeholder-amz-signature"
+KNOWN_TOKEN = "placeholder-known-token"
+CLIENT_SECRET = "placeholder-client-secret"
+RESOURCE_CODE = "placeholder-resource-code"
+WITHHELD = (
+    OAUTH_CODE,
+    PKCE_VERIFIER,
+    OAUTH_ASSERTION,
+    QUERY_SIGNATURE,
+    QUERY_SIG,
+    SESSION_VALUE,
+    SID_VALUE,
+    AMZ_SECURITY_TOKEN,
+    AMZ_SIGNATURE,
+    KNOWN_TOKEN,
+    CLIENT_SECRET,
+)
+
+
+def _presigned_query() -> str:
+    return urllib.parse.urlencode(
+        {
+            "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+            "X-Amz-Date": "20260101T000000Z",
+            "X-Amz-Signature": AMZ_SIGNATURE,
+            "X-Amz-Security-Token": AMZ_SECURITY_TOKEN,
+            "signature": QUERY_SIGNATURE,
+            "sig": QUERY_SIG,
+            "session": SESSION_VALUE,
+            "sid": SID_VALUE,
+            "token": KNOWN_TOKEN,
+        }
+    )
+
+
+def _oauth_form() -> dict[str, str]:
+    return {
+        "grant_type": "authorization_code",
+        "code": OAUTH_CODE,
+        "code_verifier": PKCE_VERIFIER,
+        "assertion": OAUTH_ASSERTION,
+        "client_id": "placeholder-client-id",
+        "client_secret": CLIENT_SECRET,
+        "token": KNOWN_TOKEN,
+    }
+
+
+def _export_payload(receiver) -> bytes:
+    return b"".join(body for _, _, body in receiver.requests)
+
+
+def _post_form(kind: str, url: str, form: dict[str, str]) -> None:
+    body = urllib.parse.urlencode(form).encode()
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    if kind == "requests":
+        response = requests.post(url, data=body, headers=headers)
+        assert response.status_code == 200
+        return
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(request) as response:
+        assert response.status == 200
+        response.read()
+
+
+@pytest.mark.parametrize("kind", ("requests", "urllib"))
+def test_oauth_form_and_presigned_query_are_redacted_before_export(receiver, app, kind):
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        _post_form(kind, f"{app.url}/oauth/token?{_presigned_query()}", _oauth_form())
+        assert hue.force_flush()
+    (span,) = http_spans(receiver)
+    fields = attributes(span)
+    assert fields["url.full"] == app.url + "/oauth/token"
+    recorded = json.loads(fields["input.value"])
+    assert recorded["grant_type"] == "authorization_code"
+    assert recorded["client_id"] == "placeholder-client-id"
+    assert recorded["X-Amz-Algorithm"] == "AWS4-HMAC-SHA256"
+    for key in (
+        "code",
+        "code_verifier",
+        "assertion",
+        "signature",
+        "sig",
+        "session",
+        "sid",
+        "X-Amz-Signature",
+        "X-Amz-Security-Token",
+        "token",
+        "client_secret",
+    ):
+        assert recorded[key] == "[redacted]"
+    payload = _export_payload(receiver)
+    for secret in WITHHELD:
+        assert secret.encode() not in payload
+
+
+def test_presigned_get_query_is_redacted_and_a_lone_code_remains(receiver, app):
+    query = _presigned_query() + "&" + urllib.parse.urlencode({"code": RESOURCE_CODE})
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        response = requests.get(f"{app.url}/object?{query}")
+        assert response.status_code == 200
+        assert hue.force_flush()
+    (span,) = http_spans(receiver)
+    fields = attributes(span)
+    assert fields["url.full"] == app.url + "/object"
+    recorded = json.loads(fields["input.value"])
+    assert recorded["X-Amz-Algorithm"] == "AWS4-HMAC-SHA256"
+    assert recorded["code"] == RESOURCE_CODE
+    for key in (
+        "signature",
+        "sig",
+        "session",
+        "sid",
+        "X-Amz-Signature",
+        "X-Amz-Security-Token",
+        "token",
+    ):
+        assert recorded[key] == "[redacted]"
+    payload = _export_payload(receiver)
+    for secret in WITHHELD:
+        assert secret.encode() not in payload
+    assert RESOURCE_CODE.encode() in payload
+
+
+def test_json_oauth_body_is_redacted_before_export(receiver, app):
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        response = requests.post(f"{app.url}/oauth/token", json=_oauth_form())
+        assert response.status_code == 200
+        assert hue.force_flush()
+    (span,) = http_spans(receiver)
+    recorded = json.loads(attributes(span)["input.value"])
+    assert recorded["grant_type"] == "authorization_code"
+    assert recorded["client_id"] == "placeholder-client-id"
+    for key in ("code", "code_verifier", "assertion", "token", "client_secret"):
+        assert recorded[key] == "[redacted]"
+    payload = _export_payload(receiver)
+    for secret in (OAUTH_CODE, PKCE_VERIFIER, OAUTH_ASSERTION, CLIENT_SECRET, KNOWN_TOKEN):
+        assert secret.encode() not in payload
 
 
 def test_import_hook_instruments_clients_first_imported_after_hue(receiver, app):
