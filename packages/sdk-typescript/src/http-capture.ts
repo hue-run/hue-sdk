@@ -82,37 +82,55 @@ const behaviorHeaders = new Set([
 ]);
 type Headers = Map<string, string>;
 
+const httpName = (key: string) => key.toLowerCase().replace(/[-_]/g, "");
+
+// Continuation tokens route to another page; they do not authenticate the caller.
+const continuationKeys = new Set([
+  "pagetoken",
+  "nextpagetoken",
+  "previouspagetoken",
+  "prevpagetoken",
+  "continuationtoken",
+  "nexttoken",
+  "previoustoken",
+  "resumetoken",
+  "deltatoken",
+  "cursortoken",
+]);
+
 /** HTTP payloads also contain business headers and pagination tokens, unlike tool credentials. */
 function isHttpCredentialKey(key: string): boolean {
-  const name = key.toLowerCase().replace(/[-_]/g, "");
+  const name = httpName(key);
+  if (continuationKeys.has(name)) return false;
   return (
     [
       "authorization",
-      "authorizationtoken",
       "proxyauthorization",
       "cookie",
       "setcookie",
-      "apikey",
-      "xapikey",
-      "accesstoken",
-      "refreshtoken",
-      "idtoken",
-      "authtoken",
-      "sessiontoken",
-      "bearertoken",
-      "token",
-      "secret",
-      "password",
-      "credential",
       "credentials",
-    ].includes(name) || /(?:apikey|secret|password|credential)$/.test(name)
+      "codeverifier",
+      "devicecode",
+      "sig",
+      "session",
+      "sid",
+    ].includes(name) ||
+    /(?:apikey|secret|password|credential|token|signature|assertion)$/.test(name)
   );
+}
+
+/** A token request's `code` is a redeemable grant; a lone `code` is often a resource ID. */
+function redactGrantCode(value: object): void {
+  const names = Object.keys(value);
+  if (!names.some((key) => ["granttype", "codeverifier"].includes(httpName(key)))) return;
+  for (const key of names) if (httpName(key) === "code") Reflect.set(value, key, "[redacted]");
 }
 
 function parseHttpJson(text: string, depth = 0): unknown {
   return JSON.parse(text, (key, value: unknown) => {
     if (isHttpCredentialKey(key)) return "[redacted]";
     if (typeof value === "string") return scrubHttpText(value, depth + 1);
+    if (value && typeof value === "object") redactGrantCode(value);
     if (
       value &&
       typeof value === "object" &&
@@ -598,6 +616,7 @@ class Exchange {
                   : body !== null && typeof body === "object" && !Array.isArray(body)
                     ? { ...query, ...body }
                     : { ...query, body };
+            if (input && typeof input === "object") redactGrantCode(input);
             this.content("input.value", input, cut, queryBytes + this.input.size);
             this.setAttribute("input.mime_type", "application/json");
           }

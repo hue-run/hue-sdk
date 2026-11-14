@@ -157,10 +157,14 @@ def _scrub(value: Any, depth: int = 0) -> Any:
         result = {}
         header_name = value.get("name")
         sensitive_header = isinstance(header_name, str) and _credential_key(header_name)
+        # A token request's ``code`` is a redeemable grant; a lone ``code`` is often a resource ID.
+        grant = any(_normalized(key) in {"granttype", "codeverifier"} for key in value)
         for key, item in value.items():
             result[_scrub_credential_text_unbounded(key)] = (
                 REDACTED
-                if _credential_key(key) or (key == "value" and sensitive_header)
+                if _credential_key(key)
+                or (key == "value" and sensitive_header)
+                or (grant and _normalized(key) == "code")
                 else _scrub(item, depth + 1)
             )
         return result
@@ -176,11 +180,29 @@ def _scrub(value: Any, depth: int = 0) -> Any:
     return value
 
 
+def _normalized(key: str) -> str:
+    return key.lower().replace("-", "").replace("_", "")
+
+
 def _credential_key(key: str) -> bool:
-    normalized = key.lower().replace("-", "").replace("_", "")
+    normalized = _normalized(key)
     if normalized == "headers" or normalized in _CONTINUATION_KEYS:
         return False
-    return normalized in {"cookie", "setcookie", "proxyauthorization"} or _is_credential_key(key)
+    return (
+        normalized
+        in {
+            "cookie",
+            "setcookie",
+            "proxyauthorization",
+            "codeverifier",
+            "devicecode",
+            "sig",
+            "session",
+            "sid",
+        }
+        or normalized.endswith(("signature", "assertion"))
+        or _is_credential_key(key)
+    )
 
 
 @dataclass
