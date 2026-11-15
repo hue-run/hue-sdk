@@ -12,7 +12,7 @@ import zlib
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Thread
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import pytest
 import requests
@@ -143,8 +143,15 @@ def http_spans(receiver):
     return [span for span in receiver.spans() if "http.request.method" in attributes(span)]
 
 
-def drive(kind, url, *, stream=False, body=b'{"user_id":"synthetic-user","count":2}'):
-    headers = {"Content-Type": "application/json", "Notion-Version": "2022-06-28"}
+def drive(
+    kind,
+    url,
+    *,
+    stream=False,
+    body=b'{"user_id":"synthetic-user","count":2}',
+    content_type="application/json",
+):
+    headers = {"Content-Type": content_type, "Notion-Version": "2022-06-28"}
     if kind == "requests":
         with requests.Session() as client:
             with client.post(url, data=body, headers=headers, stream=stream) as response:
@@ -1743,3 +1750,93 @@ assert errors == []
 assert imported[0].__name__ == 'httplib2'
 """
     subprocess.run([sys.executable, "-c", script, receiver.url], check=True, timeout=20)
+
+
+# Values an OAuth token request or a presigned URL would carry. Placeholders only.
+_LEAKED = {
+    "code": "synthetic-oauth-code",
+    "code_verifier": "synthetic-pkce-verifier",
+    "code-verifier": "synthetic-pkce-hyphen-verifier",
+    "signature": "synthetic-request-signature",
+    "sig": "synthetic-request-sig",
+    "client_assertion": "synthetic-client-assertion",
+    "assertion": "synthetic-assertion",
+}
+_LEAKED_VALUES = tuple(_LEAKED.values()) + ("synthetic-oauth-code-again",)
+
+
+def _export_payload(receiver) -> bytes:
+    return b"".join(body for _, _, body in receiver.requests)
+
+
+def _assert_hidden(receiver, fields, attribute, kept_name, kept_value, secrets=_LEAKED_VALUES):
+    """The kept field proves this exchange was exported. The secret values must not be."""
+    recorded = fields[attribute]
+    text = recorded if isinstance(recorded, str) else json.dumps(recorded)
+    assert kept_value in text and f'"{kept_name}"' in text
+    for secret in secrets:
+        assert secret not in text
+    payload = _export_payload(receiver)
+    for secret in secrets:
+        assert secret.encode() not in payload
+
+
+@pytest.mark.parametrize("kind", TRANSPORTS)
+def test_query_oauth_and_signature_values_are_not_exported(receiver, app, kind):
+    # Repeated ``code`` is stored as a list. ``code-verifier`` is the hyphenated spelling.
+    query = urlencode([("pageToken", "synthetic-next-page"), *_LEAKED.items()])
+    query += "&code=synthetic-oauth-code-again"
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        assert drive(kind, app.url + "/token?" + query, body=b"") == BODY
+        assert hue.force_flush()
+    (span,) = http_spans(receiver)
+    _assert_hidden(receiver, attributes(span), "input.value", "pageToken", "synthetic-next-page")
+
+
+@pytest.mark.parametrize("kind", TRANSPORTS)
+def test_form_oauth_and_signature_values_are_not_exported(receiver, app, kind):
+    body = urlencode([("pageToken", "synthetic-next-page"), *_LEAKED.items()]).encode()
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        assert (
+            drive(
+                kind,
+                app.url + "/token",
+                body=body,
+                content_type="application/x-www-form-urlencoded",
+            )
+            == BODY
+        )
+        assert hue.force_flush()
+    (span,) = http_spans(receiver)
+    _assert_hidden(receiver, attributes(span), "input.value", "pageToken", "synthetic-next-page")
+
+
+@pytest.mark.parametrize("kind", TRANSPORTS)
+def test_json_oauth_and_signature_values_are_not_exported(receiver, app, kind):
+    body = json.dumps(
+        {
+            "user_id": "synthetic-user",
+            **_LEAKED,
+            "grant": {"code": "synthetic-oauth-code-again", "sig": "synthetic-request-sig"},
+        }
+    ).encode()
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        assert drive(kind, app.url + "/token", body=body) == BODY
+        assert hue.force_flush()
+    (span,) = http_spans(receiver)
+    _assert_hidden(receiver, attributes(span), "input.value", "user_id", "synthetic-user")
+
+
+def test_response_json_oauth_and_signature_values_are_not_exported(receiver, app):
+    app.body = json.dumps(
+        {
+            "user_id": "synthetic-user",
+            **_LEAKED,
+            "grant": {"code": "synthetic-oauth-code-again"},
+        }
+    ).encode()
+    with Hue(receiver.url, "synthetic-http-key", live_spans=False) as hue:
+        assert requests.get(app.url + "/token").content == app.body
+        assert hue.force_flush()
+    (span,) = http_spans(receiver)
+    _assert_hidden(receiver, attributes(span), "output.value", "user_id", "synthetic-user")
