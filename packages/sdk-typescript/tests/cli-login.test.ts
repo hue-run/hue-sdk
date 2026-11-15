@@ -223,7 +223,7 @@ describe("hue login", () => {
     expect(result.stdout).not.toContain("Opened");
     const envPath = join(root, ".env.hue");
     expect(await readFile(envPath, "utf8")).toBe(
-      `HUE_API_KEY=${KEY}\nHUE_BASE_URL=${ORIGIN}\nHUE_MCP_KEY=${KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
+      `HUE_API_KEY='${KEY}'\nHUE_BASE_URL='${ORIGIN}'\nHUE_MCP_KEY='${KEY}'\nHUE_MCP_URL='${ORIGIN}/api/mcp'\n`,
     );
     expect(await mode(envPath)).toBe(0o600);
 
@@ -358,7 +358,7 @@ describe("hue login", () => {
     expect(only.stdout).toContain('Paste the "Read and write" key (HUE_MCP_KEY): ');
     expect(only.stdout).not.toContain("Evaluations access accepted");
     expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
-      `HUE_MCP_KEY=${MCP_KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
+      `HUE_MCP_KEY='${MCP_KEY}'\nHUE_MCP_URL='${ORIGIN}/api/mcp'\n`,
     );
   });
 
@@ -390,7 +390,7 @@ describe("hue login", () => {
     });
     expect(agentOnly.code).toBe(0);
     expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
-      `HUE_MCP_KEY=${READ_KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
+      `HUE_MCP_KEY='${READ_KEY}'\nHUE_MCP_URL='${ORIGIN}/api/mcp'\n`,
     );
   });
 
@@ -413,6 +413,8 @@ describe("hue login", () => {
     }
     expect(invalidKeyReason(`bad${"\u0000"}key`)).toBe("That does not look like a Hue key.");
     expect(invalidKeyReason("x".repeat(4097))).toBe("That does not look like a Hue key.");
+    expect(invalidKeyReason("bad'key")).toBe("A key cannot contain a quote or a backslash.");
+    expect(invalidKeyReason("bad\\key")).toBe("A key cannot contain a quote or a backslash.");
     expect(invalidKeyReason(EVAL_KEY)).toBeNull();
     const ended = await login(["--keys", "evaluations", "--origin", ORIGIN], { cwd: root });
     expect(ended.code).toBe(1);
@@ -453,7 +455,7 @@ describe("hue login", () => {
     );
     expect(same.code).toBe(0);
     expect(await readFile(envPath, "utf8")).toBe(
-      `# local settings\nOTHER=1\nexport HUE_API_KEY=hue_live_previous\nHUE_BASE_URL=${ORIGIN}\nTRAILING=yes\n`,
+      `# local settings\nOTHER=1\nexport HUE_API_KEY='hue_live_previous'\nHUE_BASE_URL='${ORIGIN}'\nTRAILING=yes\n`,
     );
 
     // The eval hint prints for a detected language and carries the non-default env file.
@@ -464,7 +466,7 @@ describe("hue login", () => {
     });
     expect(forced.code).toBe(0);
     expect(await readFile(envPath, "utf8")).toBe(
-      `# local settings\nOTHER=1\nexport HUE_API_KEY=${KEY}\nHUE_BASE_URL=${ORIGIN}\nTRAILING=yes\nHUE_MCP_KEY=${KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
+      `# local settings\nOTHER=1\nexport HUE_API_KEY='${KEY}'\nHUE_BASE_URL='${ORIGIN}'\nTRAILING=yes\nHUE_MCP_KEY='${KEY}'\nHUE_MCP_URL='${ORIGIN}/api/mcp'\n`,
     );
     expect(await mode(envPath)).toBe(0o600);
     expect(forced.stdout).toContain("--env-file config/.env.local");
@@ -480,7 +482,7 @@ describe("hue login", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("in .env.local.");
     expect(await readFile(join(root, ".env.local"), "utf8")).toBe(
-      `HUE_API_KEY=${KEY}\nHUE_BASE_URL=${ORIGIN}\nHUE_MCP_KEY=${KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
+      `HUE_API_KEY='${KEY}'\nHUE_BASE_URL='${ORIGIN}'\nHUE_MCP_KEY='${KEY}'\nHUE_MCP_URL='${ORIGIN}/api/mcp'\n`,
     );
     expect(await mode(join(root, ".env.local"))).toBe(0o600);
     await expect(lstat(join(root, ".env.hue"))).rejects.toThrow();
@@ -498,11 +500,14 @@ describe("hue login", () => {
     ).toBe("second");
     expect(readEnvValue('HUE_API_KEY="same" # keep this note\n', "HUE_API_KEY")).toBe("same");
     expect(readEnvValue("A=1\n", "HUE_API_KEY")).toBeUndefined();
-    expect(mergeEnvText("", { HUE_API_KEY: "k" })).toBe("HUE_API_KEY=k\n");
-    expect(mergeEnvText("A=1", { HUE_API_KEY: "k" })).toBe("A=1\nHUE_API_KEY=k\n");
+    expect(mergeEnvText("", { HUE_API_KEY: "k" })).toBe("HUE_API_KEY='k'\n");
+    expect(mergeEnvText("A=1", { HUE_API_KEY: "k" })).toBe("A=1\nHUE_API_KEY='k'\n");
     expect(
       mergeEnvText("HUE_API_KEY=old\n\n# keep\nHUE_API_KEY=older\nB=2\n", { HUE_API_KEY: "new" }),
-    ).toBe("HUE_API_KEY=new\n\n# keep\nB=2\n");
+    ).toBe("HUE_API_KEY='new'\n\n# keep\nB=2\n");
+    expect(() => mergeEnvText("", { HUE_BASE_URL: "https://a'b.example" })).toThrow(
+      "A stored value cannot contain a quote, a backslash or a line break.",
+    );
   });
 
   test("refuses a symlinked env file and leaves its target untouched", async () => {
@@ -675,7 +680,7 @@ describe("hue login", () => {
       expect(stdout.text()).toContain('Evaluations access accepted for project "Loopback".');
       expect(stdout.text()).toContain("lists 1 tools");
       expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
-        `HUE_API_KEY=${KEY}\nHUE_BASE_URL=${origin}\nHUE_MCP_KEY=${KEY}\nHUE_MCP_URL=${origin}/api/mcp\n`,
+        `HUE_API_KEY='${KEY}'\nHUE_BASE_URL='${origin}'\nHUE_MCP_KEY='${KEY}'\nHUE_MCP_URL='${origin}/api/mcp'\n`,
       );
     } finally {
       server.stop(true);
@@ -714,7 +719,7 @@ describe("hue login", () => {
     expect(stdout.text()).toContain('Paste the "Read and write" key (HUE_API_KEY): \n');
     expect(stdout.text()).not.toContain(EVAL_KEY);
     expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
-      `HUE_API_KEY=${EVAL_KEY}\nHUE_BASE_URL=${ORIGIN}\n`,
+      `HUE_API_KEY='${EVAL_KEY}'\nHUE_BASE_URL='${ORIGIN}'\n`,
     );
 
     const interruptedStdin = terminal();
@@ -734,7 +739,7 @@ describe("hue login", () => {
     expect(interrupted.text()).not.toContain("partial");
     expect(hue.calls).toHaveLength(2);
     expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
-      `HUE_API_KEY=${EVAL_KEY}\nHUE_BASE_URL=${ORIGIN}\n`,
+      `HUE_API_KEY='${EVAL_KEY}'\nHUE_BASE_URL='${ORIGIN}'\n`,
     );
   });
 });
