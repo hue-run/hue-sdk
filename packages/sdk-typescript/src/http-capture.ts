@@ -105,7 +105,16 @@ function isHttpCredentialKey(key: string): boolean {
       "password",
       "credential",
       "credentials",
-    ].includes(name) || /(?:apikey|secret|password|credential)$/.test(name)
+      // OAuth codes, client assertions and presigned-URL signatures redeem or replay a grant.
+      "code",
+      "authcode",
+      "authorizationcode",
+      "devicecode",
+      "sig",
+      "hmac",
+      "samlresponse",
+    ].includes(name) ||
+    /(?:apikey|secret|password|credential|verifier|signature|assertion)$/.test(name)
   );
 }
 
