@@ -5193,3 +5193,218 @@ describe("hue eval conversation turns", () => {
     SPAWN_TIMEOUT,
   );
 });
+
+/** Runs the CLI with a fixed environment, so a name in the project file is unset unless the file adds it. */
+function runEval(
+  args: string[],
+  options: { cwd: string; env: Record<string, string> },
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const entry = process.env.HUE_TEST_CLI ?? cli;
+  const runtime = process.env.HUE_TEST_RUNTIME ?? process.execPath;
+  return new Promise((resolve, reject) => {
+    const child = spawn(runtime, [entry, "eval", ...args], {
+      cwd: options.cwd,
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        TMPDIR: process.env.TMPDIR ?? tmpdir(),
+        GITHUB_ACTIONS: "false",
+        NO_COLOR: "1",
+        ...options.env,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    const timer = setTimeout(() => child.kill("SIGKILL"), SPAWN_TIMEOUT);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
+function textIfPresent(path: string): string | null {
+  return existsSync(path) ? readFileSync(path, "utf8") : null;
+}
+
+function readAgentEnv(path: string): Record<string, string> {
+  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error("agent env dump is not an object");
+  const seen: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parsed)) {
+    if (typeof value !== "string") throw new Error(`${name} in the agent env dump is not a string`);
+    seen[name] = value;
+  }
+  return seen;
+}
+
+describe("a project env file cannot reach the agent", () => {
+  const agentNode = spawnSync("node", ["-p", "process.execPath"], { encoding: "utf8" });
+
+  test.each([
+    {
+      label: "hue eval loads ./.env.hue",
+      file: ".env.hue",
+      flag: undefined,
+      ci: false,
+    },
+    {
+      label: "hue eval loads --env-file",
+      file: "supplied.env",
+      flag: "--env-file",
+      ci: false,
+    },
+    {
+      label: "hue eval ci loads ./.env.hue",
+      file: ".env.hue",
+      flag: undefined,
+      ci: true,
+    },
+    {
+      label: "hue eval ci loads --env-file",
+      file: "supplied.env",
+      flag: "--env-file",
+      ci: true,
+    },
+  ])(
+    "$label without applying its loader variables to the agent",
+    async ({ file, flag, ci }) => {
+      expect(agentNode.status).toBe(0);
+      const nodePath = agentNode.stdout.trim();
+      const fixture = hueStandIn({ answerOnlyScenario: true });
+      const cwd = await mkdtemp(join(tmpdir(), "hue-env-file-"));
+      const library = join(cwd, "loader.so");
+      const preload = join(cwd, "node-options.cjs");
+      const script = join(cwd, "agent.mjs");
+      const started = join(cwd, "started");
+      const dump = join(cwd, "env.json");
+      const loaderMarker = join(cwd, "ld-preload");
+      const nodeMarker = join(cwd, "node-options");
+      try {
+        const compiled = spawnSync("gcc", ["-shared", "-fPIC", "-o", library, "-x", "c", "-"], {
+          input: `#include <stdio.h>
+#include <stdlib.h>
+__attribute__((constructor)) static void init(void) {
+  const char *path = getenv("HUE_LD_PRELOAD_MARKER");
+  FILE *file = path ? fopen(path, "w") : 0;
+  if (!file) return;
+  const char *canary = getenv("PARENT_CANARY");
+  fputs(canary ? canary : "", file);
+  fclose(file);
+}
+`,
+        });
+        expect(compiled.status).toBe(0);
+        await writeFile(
+          preload,
+          `const fs = require("node:fs");
+const target = process.env.HUE_NODE_OPTIONS_MARKER;
+if (target) fs.writeFileSync(target, process.env.PARENT_CANARY ?? "");
+`,
+        );
+        await writeFile(
+          script,
+          `import { writeFileSync } from "node:fs";
+const names = ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "NODE_OPTIONS", "INJECTED_FROM_DOTENV", "PARENT_CANARY"];
+const seen = {};
+for (const name of names) {
+  const value = process.env[name];
+  if (value !== undefined) seen[name] = value;
+}
+writeFileSync(process.env.HUE_AGENT_ENV, JSON.stringify(seen));
+writeFileSync(process.env.HUE_AGENT_STARTED, "started");
+process.stdout.write('{"answer":"ok"}');
+`,
+        );
+        await writeFile(
+          join(cwd, file),
+          [
+            `HUE_API_KEY=${key}`,
+            `HUE_BASE_URL=${fixture.baseUrl}`,
+            `LD_PRELOAD=${library}`,
+            `DYLD_INSERT_LIBRARIES=${library}`,
+            `NODE_OPTIONS=--require ${preload}`,
+            "INJECTED_FROM_DOTENV=from-file",
+            "PARENT_CANARY=from-file",
+            "",
+          ].join("\n"),
+        );
+        const command = `${nodePath} ${JSON.stringify(script)}`;
+        const parent = {
+          PARENT_CANARY: "parent-canary",
+          HUE_AGENT_STARTED: started,
+          HUE_AGENT_ENV: dump,
+          HUE_LD_PRELOAD_MARKER: loaderMarker,
+          HUE_NODE_OPTIONS_MARKER: nodeMarker,
+        };
+        const result = ci
+          ? await (async () => {
+              await writeFile(
+                join(cwd, "hue.eval.json"),
+                JSON.stringify({
+                  evalSetVersionId: fixture.version.id,
+                  command,
+                  scoringTimeoutSeconds: 2,
+                  timeoutSeconds: 30,
+                }),
+              );
+              return runEval(
+                [
+                  "--ci",
+                  "--json",
+                  "--config",
+                  "hue.eval.json",
+                  "--report-dir",
+                  "reports",
+                  ...(flag ? [flag, file] : []),
+                ],
+                { cwd, env: parent },
+              );
+            })()
+          : await runEval(
+              [
+                "--scenario",
+                "Refund flow",
+                "--command",
+                command,
+                "--wait",
+                "0",
+                ...(flag ? [flag, file] : []),
+              ],
+              { cwd, env: parent },
+            );
+        if (!existsSync(started))
+          throw new Error(
+            `agent did not start (status ${result.status})\n${result.stderr}\n${result.stdout}`,
+          );
+        expect({
+          loader: textIfPresent(loaderMarker),
+          nodeOptions: textIfPresent(nodeMarker),
+          env: readAgentEnv(dump),
+          contactedHue: fixture.calls.completions.length > 0,
+        }).toEqual({
+          loader: null,
+          nodeOptions: null,
+          env: { PARENT_CANARY: "parent-canary" },
+          contactedHue: true,
+        });
+      } finally {
+        fixture.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+});
