@@ -415,8 +415,8 @@ one `HUE_SIM_<SURFACE ID>_URL` per simulated app, `HUE_WORLD_TOKEN`, `HUE_WORLD_
 instance expires, RFC 3339; the token is valid until then), `HUE_WORLD_NOW`,
 `HUE_WORLD_ID`, `HUE_MCP_CONFIG` naming an owner-only `mcpServers` file that is removed after the
 command, and `HUE_MCP_URL`, `HUE_MCP_TOKEN` and `HUE_MCP_EXPIRES_AT` for the first MCP mirror. The
-rest of your environment, including `--env-path` variables, is passed on except `HUE_API_KEY`,
-`HUE_MCP_KEY` and any other Hue project credential. When the command exits, the instance is
+rest of your environment is passed on except `HUE_API_KEY`, `HUE_MCP_KEY` and any other Hue
+project credential; no variable from `--env-path` or `./.env.hue` reaches the command. When the command exits, the instance is
 finished as `completed` (exit code 0) or `abandoned`, and stderr lists the calls the command made,
 by app surface, operation and classification, what it changed, and the coverage gaps it met
 (calls the World does not simulate, and a gap reported to Hue):
@@ -1349,7 +1349,8 @@ A Scenario or eval set whose dataset version is not saved cannot back an experim
 exits 1 and asks for **Save eval-set version** in Hue or `--save-version`, which freezes that
 version at its current revision. Connection settings are `HUE_API_KEY` and `HUE_BASE_URL`
 (default `https://app.hue.run`), loaded from `--env-file <path>` (or its alias `--env-path`) first when given, otherwise from
-`./.env.hue` when the shell has no `HUE_API_KEY` (a key in the shell keeps its own origin); `--origin`
+`./.env.hue` when the shell has no `HUE_API_KEY` (a key in the shell keeps its own origin); no other
+variable in the file is read or passed to the agent; `--origin`
 overrides the origin. Since TypeScript 0.14.0, telemetry content capture defaults on; `--no-content` opts out.
 Earlier releases require `--content`; the examples include it for compatibility. Model and tool spans inside the agent come
 only from the agent's own instrumentation. Case outputs, error messages and explanations are

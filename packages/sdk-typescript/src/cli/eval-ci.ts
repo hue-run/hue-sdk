@@ -18,7 +18,7 @@ import {
 } from "../evals/invocations.js";
 import { UncertainExecutionError, TargetOutcomeUncertainError } from "../evals/runner.js";
 import { evalReport, trialReport, trialRun, writeEvalReports } from "./eval-reports.js";
-import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
+import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions, loadHueSettings } from "./env-file.js";
 
 const seconds = z.number().int().positive().max(2_147_483);
 export const evalConfig = z
@@ -262,7 +262,7 @@ export async function runCiEvalCommand(argv: string[], execute: ExecuteCiRun): P
       (!process.env.HUE_API_KEY && existsSync(DEFAULT_ENV_FILE) ? DEFAULT_ENV_FILE : undefined);
     if (envFile) {
       try {
-        process.loadEnvFile(resolve(envFile));
+        loadHueSettings(resolve(envFile));
       } catch {
         throw new ConfigurationError("Cannot load the configured environment file");
       }

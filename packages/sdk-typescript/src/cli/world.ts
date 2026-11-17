@@ -14,7 +14,7 @@ import {
   writeMcpConfig,
   type McpConfigFile,
 } from "../world/world.js";
-import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
+import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions, hueSettings } from "./env-file.js";
 import { ExportError, packJson } from "./world-export.js";
 import { exportGmail } from "./world-export-gmail.js";
 import { pipedreamTransport } from "./world-export-pipedream.js";
@@ -134,7 +134,8 @@ Hue:
   HUE_API_KEY            A Read and write project key (environment, --env-path or ./.env.hue)
   --origin URL           Hue origin (default HUE_BASE_URL, then ${DEFAULT_ORIGIN})
   --env-path PATH        Load a dotenv file first (--env-file also works when it exists);
-                         ./.env.hue loads when HUE_API_KEY is not set. Variables already set win
+                         ./.env.hue loads HUE_API_KEY and HUE_BASE_URL when HUE_API_KEY is not
+                         set. Variables already set win; run passes no file variable to the command
   -h, --help             Show this help
 
 Exit codes: create exits 0 when the World is ready (or started with --wait 0, or previewed with
@@ -201,6 +202,7 @@ async function withEnvFile(
   env: NodeJS.ProcessEnv,
   cwd: string,
   file: string,
+  parse: (content: string) => NodeJS.Dict<string> = parseEnv,
 ): Promise<NodeJS.ProcessEnv> {
   let content: string;
   try {
@@ -210,11 +212,11 @@ async function withEnvFile(
       `Unable to load ${file}: ${(error as NodeJS.ErrnoException).code ?? "unreadable"}`,
     );
   }
-  return { ...parseEnv(content), ...env };
+  return { ...parse(content), ...env };
 }
 
-/** The environment with the named env file loaded, then `./.env.hue` (where `hue login` stores
- * the key) when neither set `HUE_API_KEY`. */
+/** The environment with the named env file loaded, then the Hue settings of `./.env.hue` (where
+ * `hue login` stores the key) when neither set `HUE_API_KEY`. */
 async function loadEnv(
   env: NodeJS.ProcessEnv,
   cwd: string,
@@ -222,7 +224,7 @@ async function loadEnv(
 ): Promise<NodeJS.ProcessEnv> {
   const named = file ? await withEnvFile(env, cwd, file) : env;
   if (named.HUE_API_KEY?.trim() || !existsSync(resolve(cwd, DEFAULT_ENV_FILE))) return named;
-  return withEnvFile(named, cwd, DEFAULT_ENV_FILE);
+  return withEnvFile(named, cwd, DEFAULT_ENV_FILE, hueSettings);
 }
 
 /** The Hue origin and project key every subcommand needs. */
@@ -1060,7 +1062,7 @@ async function runInWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pro
   if (extra.length)
     throw new UsageError(`Unexpected argument: ${extra[0]}; put the command after --`);
   if (!command.length) throw new UsageError("Name the command to run after --");
-  const { origin, apiKey, env } = await connect(ctx, values);
+  const { origin, apiKey } = await connect(ctx, values);
   const client = createWorldClient({ apiKey, baseUrl: origin });
 
   // While the command runs, a stop request is the command's: the first is passed on (a terminal's
@@ -1122,8 +1124,9 @@ async function runInWorld(argv: string[], ctx: Context, io: WorldCommandIo): Pro
           `World instance ${instance.id} of version ${version} is live until ${handoff.expiresAt}.`,
         );
         // The parent's variables minus Hue's project credentials and any other World's variables.
+        // An env file's variables never reach the command: one could name LD_PRELOAD or NODE_OPTIONS.
         const childEnv = {
-          ...agentEnvironment(handoff, { parent: env }),
+          ...agentEnvironment(handoff, { parent: ctx.env }),
           HUE_MCP_CONFIG: mcp.path,
         };
         // A stop that came while the file was written ends here: the command never starts. The
