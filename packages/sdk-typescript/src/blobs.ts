@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
+import type { LookupFunction } from "node:net";
 import { context, type HrTime } from "@opentelemetry/api";
 import { suppressTracing } from "@opentelemetry/core";
 import { suppressHttpCapture } from "./http-capture.js";
@@ -44,6 +45,7 @@ import {
 } from "./large-media.js";
 import { capLogBody, TRUNCATED_KEY, truncatedMarker, withTruncatedKeys } from "./privacy.js";
 import { truncateUtf8 } from "./safety.js";
+import { uploadLookup } from "./upload-destination.js";
 
 /**
  * Large values and binary media travel apart from their span through reservation, presigned PUT,
@@ -369,6 +371,7 @@ interface Grant {
   url: URL;
   headers: Record<string, string>;
   expiresAt: number;
+  lookup: LookupFunction | undefined;
 }
 
 type Reservation =
@@ -878,6 +881,12 @@ export class BlobUploader {
       (url.protocol === "http:" &&
         (isLoopbackHost(url.hostname) || this.options.allowInsecureHttp));
     if (!secure || url.username || url.password) return { fallback: "failed" };
+    let lookup: LookupFunction | undefined;
+    try {
+      lookup = uploadLookup(url, this.options.baseUrl);
+    } catch {
+      return { fallback: "failed" };
+    }
     const headers: Record<string, string> = {};
     const entries = Object.entries(answer.headers);
     if (entries.length > 32) return { fallback: "failed" };
@@ -897,7 +906,12 @@ export class BlobUploader {
     return {
       exists: false,
       contentType,
-      grant: { url, headers, expiresAt: Number.isFinite(expiresAt) ? expiresAt : Infinity },
+      grant: {
+        url,
+        headers,
+        expiresAt: Number.isFinite(expiresAt) ? expiresAt : Infinity,
+        lookup,
+      },
     };
   }
 
@@ -919,6 +933,7 @@ export class BlobUploader {
       deadline,
       MAX_ERROR_RESPONSE_BYTES,
       size,
+      grant.lookup,
     );
     if (isByteSource(value) && value.changed) return "changed";
     if (!reply) return { retryAfter: undefined };
@@ -947,6 +962,7 @@ export class BlobUploader {
     deadline: number,
     maxResponseBytes: number,
     length?: number,
+    lookup?: LookupFunction,
   ): Promise<Reply | undefined> {
     if (this.closed || deadline <= Date.now()) return undefined;
     let http: typeof import("node:http");
@@ -992,7 +1008,7 @@ export class BlobUploader {
               // Uploads are the SDK's own export traffic: an http instrumentation must not trace them.
               request = http.request(
                 url,
-                { method, headers: requestHeaders, agent: false },
+                { method, headers: requestHeaders, agent: false, ...(lookup ? { lookup } : {}) },
                 (response: IncomingMessage) => {
                   const chunks: Buffer[] = [];
                   let size = 0;

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import ipaddress
 import json
 import os
 import random
@@ -73,6 +72,7 @@ from ._limits import TRUNCATED_KEY, cut_utf8, over_utf8
 from ._otel_compat import export_context
 from ._records import truncated_marker, with_truncated_keys
 from ._tool_definitions import scrub_tool_credentials
+from ._upload_destination import loopback, mount, upload_adapter
 
 # The span attribute listing the values the SDK uploaded apart from the span: one compact JSON
 # object per value, ``{"key", "sha256", "size", "content_type"}``, with an optional ``name``.
@@ -321,13 +321,6 @@ def _blob_entry(
     if name is not None:
         entry["name"] = name
     return json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
-
-
-def _loopback(hostname: str) -> bool:
-    try:
-        return ipaddress.ip_address(hostname).is_loopback
-    except ValueError:
-        return hostname.lower() == "localhost"
 
 
 class HeldValues:
@@ -1209,9 +1202,12 @@ class BlobUploader:
             # Uploads are the SDK's own export traffic: an instrumentation must not trace them.
             token = attach(export_context())
             with requests.Session() as session:
-                # The environment's proxy and CA settings apply, as to the OTLP requests; an
-                # explicit no-op auth keeps .netrc credentials off every request, the store's
+                # The environment's proxy and CA settings apply, as to the OTLP requests, except
+                # that a store PUT a remote Hue named goes through no proxy (``upload_adapter``);
+                # an explicit no-op auth keeps .netrc credentials off every request, the store's
                 # included, whose signature is in its URL.
+                if method == "PUT":
+                    mount(session, upload_adapter(url, self._base_url))
                 response = session.request(
                     method,
                     url,
@@ -1358,8 +1354,13 @@ class BlobUploader:
         except ValueError:
             return {"fallback": "failed"}
         # The bytes go only where TLS protects them, or to a loopback development store.
-        secure = parsed.scheme == "https" or (parsed.scheme == "http" and _loopback(hostname))
+        secure = parsed.scheme == "https" or (parsed.scheme == "http" and loopback(hostname))
         if not secure or parsed.username is not None or parsed.password is not None:
+            return {"fallback": "failed"}
+        try:
+            # Refused here, so the PUT is never tried; ``_request`` connects it as this decides.
+            upload_adapter(url, self._base_url)
+        except ValueError:
             return {"fallback": "failed"}
         signed: dict[str, str] = {}
         for name, value in headers.items():
