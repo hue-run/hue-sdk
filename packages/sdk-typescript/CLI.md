@@ -58,12 +58,19 @@ The generated bootstrap supplies standard active SERVER-span context across asyn
 handlers; the core SDK's global-provider/context ownership is unchanged. It preserves a working
 caller context manager and disposes only its own instance. Unknown local imports, custom/late manager
 bootstraps, runtime preloads and conflicting OTel dependencies require manual review before any
-mutation or provisioning. Automatic Express entrypoints import only Express, the standard OTel API,
-or the supported `node:fs`, `node:fs/promises`, `node:timers/promises` and `node:stream` modules.
-Syntax parsing, not matches inside comments/strings/templates/regular expressions, establishes the
-constructor and literal route. Custom middleware, alternate route methods, app aliases/escapes and
-extra Flask handler decorators are outside the automatic matrix. The one selected request must finish with a 2xx response; a 404 or
-telemetry failure never authorizes a business retry.
+mutation or provisioning.
+
+Setup runs the entrypoint, so it accepts only a fixed set of statements and nothing else. An
+Express entrypoint is exactly `import express from "express";`, `const app = express();`, one
+`app.get("<path>", (request, response) => ...)` and the listener. The handler may only call
+`status`, `type`, `set`, `send`, `json`, `write` or `end` on its response parameter with string or
+number literals. A Flask `app.py` is exactly `import os`, `from flask import Flask`,
+`app = Flask(__name__)`, one `@app.get("<path>")` function with no parameters that returns a string
+literal, and the listener. Any other import, statement, call or handler logic needs manual
+integration. Comments are ignored. A package named `express`, `@hue-run/sdk` or one of the pinned
+OTel packages, and a Bun project whose `tsconfig.json` or `jsconfig.json` remaps imports, also need
+manual integration. The one selected request must finish with a 2xx response; a 404 or telemetry
+failure never authorizes a business retry.
 
 Bun runtime checks and application launch use an explicit empty config and disable dotenv loading.
 Local runtime/preload settings, dotenv files and a global `.bunfig.toml` require manual review before
@@ -88,8 +95,12 @@ listener behavior. This prevents accidental requests to an unrelated listener, n
 malicious code running as the same local user.
 
 Setup creates no simulation, Hue Run, evaluation, source capture, worker or remote execution. Package
-manager lifecycle scripts are disabled. The supported existing application entrypoint is executed
-directly with fixed argv solely for its bounded local HTTP verification; no shell command is accepted.
+manager lifecycle scripts are disabled. Setup executes the supported entrypoint directly with fixed
+argv solely for its bounded local HTTP verification; no shell command is accepted. That process gets
+only `PATH`, `PORT` and the two setup variables (plus `SYSTEMROOT` on Windows), not the rest of
+your environment. Flask starts with
+`python -I`, so files in the project directory cannot replace `flask`, `hue_sdk` or standard library
+imports, and setup compiles `hue_setup.py` from source.
 
 ## Technical preflight and privacy disclosure
 
