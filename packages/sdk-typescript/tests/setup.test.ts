@@ -76,7 +76,7 @@ async function writeExpressProject(root: string, runtime = false): Promise<void>
   await writeFile(join(root, "package-lock.json"), JSON.stringify({ lockfileVersion: 3 }));
   await writeFile(
     join(root, "src", "server.mjs"),
-    `${runtime ? `import { appendFileSync } from "node:fs";\n` : ""}import express from "express";\nconst app = express();\napp.get("/", (_request, response) => {${runtime ? ` appendFileSync(${JSON.stringify(join(root, "handler-count.txt"))}, "1");` : ""} response.end("ok"); });\napp.listen(Number(process.env.PORT), "127.0.0.1");\n`,
+    `import express from "express";\nconst app = express();\napp.get("/", (_request, response) => { response.end("ok"); });\napp.listen(Number(process.env.PORT), "127.0.0.1");\n`,
   );
   if (!runtime) return;
   const express = join(root, "node_modules", "express");
@@ -89,7 +89,7 @@ async function writeExpressProject(root: string, runtime = false): Promise<void>
   );
   await writeFile(
     join(express, "index.js"),
-    `import { createServer } from "node:http";\nexport default function express(){const middleware=[];const routes=new Map();const app=(request,response)=>{request.path=new URL(request.url,"http://localhost").pathname;let index=0;const next=()=>{const item=middleware[index++];if(item)return item(request,response,next);const handler=routes.get(request.method+" "+request.path);if(handler){request.route={path:request.path};return handler(request,response);}response.statusCode=404;response.end();};next();};app.use=(value)=>middleware.push(value);app.get=(path,value)=>routes.set("GET "+path,value);app.listen=(port,host)=>createServer(app).listen(port,host);return app;}\n`,
+    `import { appendFileSync } from "node:fs";\nimport { createServer } from "node:http";\nexport default function express(){const middleware=[];const routes=new Map();const app=(request,response)=>{request.path=new URL(request.url,"http://localhost").pathname;let index=0;const next=()=>{const item=middleware[index++];if(item)return item(request,response,next);const handler=routes.get(request.method+" "+request.path);if(handler){request.route={path:request.path};appendFileSync(${JSON.stringify(join(root, "handler-count.txt"))}, "1");return handler(request,response);}response.statusCode=404;response.end();};next();};app.use=(value)=>middleware.push(value);app.get=(path,value)=>routes.set("GET "+path,value);app.listen=(port,host)=>createServer(app).listen(port,host);return app;}\n`,
   );
   await symlink(
     resolve(dirname(import.meta.dir)),

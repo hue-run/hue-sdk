@@ -28,190 +28,102 @@ function member(value: unknown, owner: string, name: string): boolean {
     identifier(item.property, name)
   );
 }
-function walk(value: unknown, visit: (value: Node, parent?: Node) => void, parent?: Node): void {
-  if (Array.isArray(value)) for (const item of value) walk(item, visit, parent);
-  else if (node(value)) {
-    visit(value as Node, parent);
-    for (const [key, item] of Object.entries(value as Node))
-      if (key !== "loc" && key !== "comments" && key !== "tokens") walk(item, visit, value as Node);
-  }
+const RESPONSE_METHODS = ["status", "type", "set", "send", "json", "write", "end"];
+
+/** `response.status(200).end("ok")`: fixed-argument calls on the response parameter only. */
+function responseCall(value: unknown, response: string): boolean {
+  const call = node(value);
+  const callee = node(call?.callee);
+  return (
+    call?.type === "CallExpression" &&
+    callee?.type === "MemberExpression" &&
+    callee.computed === false &&
+    RESPONSE_METHODS.some((name) => identifier(callee.property, name)) &&
+    nodes(call.arguments).every((item) =>
+      ["StringLiteral", "NumericLiteral"].includes(item.type),
+    ) &&
+    (identifier(callee.object, response) || responseCall(callee.object, response))
+  );
 }
 
-/** Syntax inspection only: no application imports, evaluation, or package lifecycle. */
+function fixedResponseHandler(value: unknown): boolean {
+  const handler = node(value);
+  const params = nodes(handler?.params);
+  const response = params[1]?.name;
+  if (
+    !["FunctionExpression", "ArrowFunctionExpression"].includes(handler?.type ?? "") ||
+    params.length !== 2 ||
+    params.some((param) => param.type !== "Identifier") ||
+    typeof response !== "string"
+  )
+    return false;
+  const body = node(handler!.body);
+  if (body?.type !== "BlockStatement") return responseCall(body, response);
+  const statements = nodes(body.body);
+  return (
+    statements.length > 0 &&
+    nodes(body.directives).length === 0 &&
+    statements.every(
+      (item) => item.type === "ExpressionStatement" && responseCall(item.expression, response),
+    )
+  );
+}
+
+/**
+ * Syntax inspection only: no application imports, evaluation, or package lifecycle.
+ * Setup later executes this module, so it is an allowlist of exactly four statements.
+ */
 export function inspectExpressSource(source: string): ApplicationSyntax {
   const fail = () => new Error("Unsupported or ambiguous Express source/telemetry ownership");
   const program = parse(source, { sourceType: "module", plugins: ["typescript"] }).program;
   const body = program.body as unknown as Node[];
-  if (program.interpreter || program.directives.length) throw fail();
-  const constructors = body.filter((item) => {
-    if (item.type !== "VariableDeclaration") return false;
-    const declarations = nodes(item.declarations);
-    const call = node(declarations[0]?.init);
-    return (
-      declarations.length === 1 &&
-      identifier(declarations[0]?.id, "app") &&
-      call?.type === "CallExpression" &&
-      identifier(call.callee, "express") &&
-      nodes(call.arguments).length === 0
-    );
-  });
-  if (constructors.length !== 1 || constructors[0]!.end === undefined) throw fail();
-  const imports = body.filter((item) => item.type === "ImportDeclaration");
+  if (program.interpreter || program.directives.length || body.length !== 4) throw fail();
+  const [imported, constructor, route, listener] = body as [Node, Node, Node, Node];
+  const specifiers = nodes(imported.specifiers);
+  const declarations = nodes(constructor.declarations);
+  const call = node(declarations[0]?.init);
   if (
-    !imports.some(
-      (item) =>
-        node(item.source)?.value === "express" &&
-        nodes(item.specifiers).some(
-          (specifier) =>
-            specifier.type === "ImportDefaultSpecifier" && identifier(specifier.local, "express"),
-        ),
-    )
+    imported.type !== "ImportDeclaration" ||
+    imported.importKind !== "value" ||
+    imported.phase ||
+    nodes(imported.attributes).length ||
+    node(imported.source)?.value !== "express" ||
+    specifiers.length !== 1 ||
+    specifiers[0]!.type !== "ImportDefaultSpecifier" ||
+    !identifier(specifiers[0]!.local, "express") ||
+    constructor.type !== "VariableDeclaration" ||
+    constructor.declare ||
+    declarations.length !== 1 ||
+    !identifier(declarations[0]!.id, "app") ||
+    call?.type !== "CallExpression" ||
+    !identifier(call.callee, "express") ||
+    nodes(call.arguments).length !== 0 ||
+    constructor.end === undefined
   )
     throw fail();
-  for (const item of imports) {
-    const source = node(item.source)?.value;
-    if (
-      source === "@opentelemetry/api" &&
-      nodes(item.specifiers).some(
-        (specifier) =>
-          specifier.type !== "ImportSpecifier" ||
-          !["trace", "SpanKind"].some((name) => identifier(specifier.imported, name)),
-      )
-    )
-      throw fail();
-    // Unknown bootstraps/import graphs could initialize a competing context manager.
-    if (
-      typeof source !== "string" ||
-      !(
-        source === "express" ||
-        source === "@opentelemetry/api" ||
-        ["node:fs", "node:fs/promises", "node:timers/promises", "node:stream"].includes(source)
-      )
-    )
-      throw fail();
-  }
-  let routeCalls = 0;
-  let listenerCalls = 0;
-  walk(program, (item, parent) => {
-    // The one setup request traverses a private local proxy. Apps inspecting
-    // socket identity need manual integration so setup cannot alter their input.
-    if (
-      ["MemberExpression", "OptionalMemberExpression", "ObjectProperty"].includes(item.type) &&
-      ["socket", "connection"].some(
-        (name) =>
-          identifier(item.property ?? item.key, name) ||
-          node(item.property ?? item.key)?.value === name,
-      )
-    )
-      throw fail();
-    if (
-      ["process", "Number"].some((name) => identifier(item, name)) &&
-      ((parent?.type === "VariableDeclarator" && parent.id === item) ||
-        ((parent?.type === "FunctionDeclaration" || parent?.type === "ClassDeclaration") &&
-          parent.id === item) ||
-        (Array.isArray(parent?.params) && parent.params.includes(item)) ||
-        (parent?.type.endsWith("Specifier") && parent.local === item) ||
-        (parent?.type === "ObjectProperty" && parent.value === item) ||
-        parent?.type === "ArrayPattern" ||
-        parent?.type === "RestElement" ||
-        (parent?.type === "AssignmentPattern" && parent.left === item) ||
-        (parent?.type === "AssignmentExpression" && parent.left === item) ||
-        (parent?.type === "UpdateExpression" && parent.argument === item))
-    )
-      throw fail();
-    if (
-      identifier(item, "app") &&
-      !(
-        (parent?.type === "VariableDeclarator" &&
-          parent.id === item &&
-          node(parent.init)?.type === "CallExpression" &&
-          identifier(node(parent.init)?.callee, "express")) ||
-        (parent?.type === "MemberExpression" && parent.object === item)
-      )
-    )
-      throw fail();
-    if (
-      item.type === "MemberExpression" &&
-      identifier(item.object, "app") &&
-      !(
-        parent?.type === "CallExpression" &&
-        parent.callee === item &&
-        ["get", "listen"].some((name) => member(item, "app", name))
-      )
-    )
-      throw fail();
-    if (
-      item.type === "ExportAllDeclaration" ||
-      (item.type === "ExportNamedDeclaration" && item.source) ||
-      item.type === "TSImportEqualsDeclaration"
-    )
-      throw fail();
-    if (
-      (item.type === "AssignmentExpression" && identifier(item.left, "app")) ||
-      (item.type === "UpdateExpression" && identifier(item.argument, "app"))
-    )
-      throw fail();
-    if (
-      item.type === "CallExpression" &&
-      node(item.callee)?.type === "MemberExpression" &&
-      identifier(node(item.callee)?.object, "app") &&
-      !["get", "listen"].some((name) => member(item.callee, "app", name))
-    )
-      throw fail();
-    if (item.type === "CallExpression" && member(item.callee, "app", "get")) routeCalls++;
-    if (item.type === "CallExpression" && member(item.callee, "app", "listen")) listenerCalls++;
-    if (
-      item.type === "ImportExpression" ||
-      (item.type === "CallExpression" &&
-        (node(item.callee)?.type === "Import" ||
-          identifier(item.callee, "require") ||
-          identifier(item.callee, "eval")))
-    )
-      throw fail();
-    if (
-      item.type === "MemberExpression" &&
-      ["setGlobalContextManager", "disable", "register"].some((name) =>
-        identifier(item.property, name),
-      )
-    )
-      throw fail();
-  });
-  const routes = body
-    .filter((item) => item.type === "ExpressionStatement")
-    .map((item) => node(item.expression))
-    .filter(
-      (item) => item?.type === "CallExpression" && member(item.callee, "app", "get"),
-    ) as Node[];
-  if (routes.length !== 1 || routeCalls !== 1 || routes[0]!.start! <= constructors[0]!.end!)
-    throw fail();
-  const arguments_ = nodes(routes[0]!.arguments);
+  const routeCall = node(route.expression);
+  const arguments_ = nodes(routeCall?.arguments);
   if (
+    route.type !== "ExpressionStatement" ||
+    routeCall?.type !== "CallExpression" ||
+    !member(routeCall.callee, "app", "get") ||
     arguments_.length !== 2 ||
     arguments_[0]!.type !== "StringLiteral" ||
-    typeof arguments_[0]!.value !== "string"
+    typeof arguments_[0]!.value !== "string" ||
+    !fixedResponseHandler(arguments_[1])
   )
     throw fail();
   const raw = (arguments_[0]!.extra as { raw?: string } | undefined)?.raw;
   if (raw !== JSON.stringify(arguments_[0]!.value) && raw !== `'${arguments_[0]!.value as string}'`)
     throw fail();
-  const handler = arguments_[1]!;
+  const listenCall = node(listener.expression);
   if (
-    !["FunctionExpression", "ArrowFunctionExpression"].includes(handler.type) &&
-    !(
-      handler.type === "Identifier" &&
-      body.some(
-        (item) => item.type === "FunctionDeclaration" && identifier(item.id, String(handler.name)),
-      )
-    )
+    listener.type !== "ExpressionStatement" ||
+    listenCall?.type !== "CallExpression" ||
+    !member(listenCall.callee, "app", "listen")
   )
     throw fail();
-  const listeners = body
-    .filter((item) => item.type === "ExpressionStatement")
-    .map((item) => node(item.expression))
-    .filter((item) => item?.type === "CallExpression" && member(item.callee, "app", "listen"));
-  if (listeners.length !== 1 || listenerCalls !== 1 || listeners[0]!.start! <= routes[0]!.end!)
-    throw fail();
-  const listenerArguments = nodes(listeners[0]!.arguments);
+  const listenerArguments = nodes(listenCall.arguments);
   const portArgument = listenerArguments[0];
   const port =
     portArgument?.type === "CallExpression" && identifier(portArgument.callee, "Number")
@@ -230,7 +142,7 @@ export function inspectExpressSource(source: string): ApplicationSyntax {
   )
     throw fail();
   return {
-    constructorEnd: constructors[0]!.end!,
+    constructorEnd: constructor.end,
     importOffset: 0,
     requestPath: arguments_[0]!.value as string,
   };
@@ -241,7 +153,6 @@ import ast, json, sys
 source = sys.stdin.read()
 tree = ast.parse(source)
 compile(source, '<setup-static-inspection>', 'exec')
-parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
 lines = source.splitlines(keepends=True)
 def endline(item):
     return sum(len(line.encode('utf-8')) for line in lines[:item.end_lineno])
@@ -249,48 +160,34 @@ def name(item, value):
     return isinstance(item, ast.Name) and item.id == value
 def member(item, owner, attr):
     return isinstance(item, ast.Attribute) and name(item.value, owner) and item.attr == attr
-constructors = [item for item in tree.body if isinstance(item, ast.Assign) and len(item.targets) == 1 and name(item.targets[0], 'app') and isinstance(item.value, ast.Call) and name(item.value.func, 'Flask') and len(item.value.args) == 1 and name(item.value.args[0], '__name__') and not item.value.keywords]
-assert len(constructors) == 1
-for item in ast.walk(tree):
-    parent = parents.get(item)
-    if isinstance(item, ast.Attribute) and item.attr in ('socket', 'connection'):
-        raise AssertionError('Socket-aware applications require manual integration')
-    if isinstance(item, ast.Constant) and item.value == 'werkzeug.socket':
-        raise AssertionError('Socket-aware applications require manual integration')
-    if isinstance(item, ast.Name) and item.id in ('int', 'os') and isinstance(item.ctx, ast.Store):
-        raise AssertionError('Custom port conversion requires manual integration')
-    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and item.name in ('int', 'os'):
-        raise AssertionError('Custom port conversion requires manual integration')
-    if isinstance(item, ast.arg) and item.arg in ('int', 'os'):
-        raise AssertionError('Custom port conversion requires manual integration')
-    if isinstance(item, ast.alias):
-        bound = item.asname or item.name.split('.')[0]
-        if bound == 'int' or (bound == 'os' and not (isinstance(parent, ast.Import) and item.name == 'os')):
-            raise AssertionError('Custom port conversion requires manual integration')
-    if name(item, 'app'):
-        assert (parent is constructors[0] and item in parent.targets) or (isinstance(parent, ast.Attribute) and parent.value is item)
-    if isinstance(item, ast.Attribute) and name(item.value, 'app'):
-        assert isinstance(parent, ast.Call) and parent.func is item and item.attr in ('get', 'run')
+def text(item):
+    return isinstance(item, ast.Constant) and type(item.value) is str
+def same(item, statement):
+    return ast.dump(item) == ast.dump(ast.parse(statement).body[0])
 # Insertion after a statement's line must not cross another semicolon statement.
 assert all(left.end_lineno < right.lineno for left, right in zip(tree.body, tree.body[1:]))
-assert any(isinstance(item, ast.ImportFrom) and item.module == 'flask' and any(alias.name == 'Flask' and alias.asname in (None, 'Flask') for alias in item.names) for item in tree.body)
-routes = [(item, decorator) for item in tree.body if isinstance(item, ast.FunctionDef) for decorator in item.decorator_list if isinstance(decorator, ast.Call) and member(decorator.func, 'app', 'get')]
-all_routes = [item for item in ast.walk(tree) if isinstance(item, ast.Call) and member(item.func, 'app', 'get')]
-assert len(routes) == len(all_routes) == 1
-handler, route = routes[0]
-assert handler.decorator_list == [route]
-assert handler.lineno > constructors[0].end_lineno and len(route.args) == 1 and not route.keywords and isinstance(route.args[0], ast.Constant) and isinstance(route.args[0].value, str)
+index = 0
+if tree.body and isinstance(tree.body[0], ast.Expr) and text(tree.body[0].value): index = 1
+while index < len(tree.body) and isinstance(tree.body[index], ast.ImportFrom) and tree.body[index].module == '__future__': index += 1
+# Setup later executes this module: after the prologue only these five statements are allowed.
+statements = tree.body[index:]
+assert len(statements) == 5
+first, second, constructor, handler, statement = statements
+assert (same(first, 'import os') and same(second, 'from flask import Flask')) or (same(first, 'from flask import Flask') and same(second, 'import os'))
+assert same(constructor, 'app = Flask(__name__)')
+assert isinstance(handler, ast.FunctionDef) and ast.dump(handler.args) == ast.dump(ast.parse('def f(): pass').body[0].args) and handler.returns is None and not getattr(handler, 'type_params', None)
+assert len(handler.body) == 1 and isinstance(handler.body[0], ast.Return) and text(handler.body[0].value)
+assert len(handler.decorator_list) == 1
+route = handler.decorator_list[0]
+assert isinstance(route, ast.Call) and member(route.func, 'app', 'get') and len(route.args) == 1 and not route.keywords and text(route.args[0])
 assert ast.get_source_segment(source, route.args[0]) in (json.dumps(route.args[0].value), "'" + route.args[0].value + "'")
-listeners = [item for item in ast.walk(tree) if isinstance(item, ast.Call) and member(item.func, 'app', 'run')]
-assert len(listeners) == 1
-listener = listeners[0]
-statement = parents.get(listener)
-assert isinstance(statement, ast.Expr) and statement.value is listener and statement.lineno > handler.end_lineno
-owner = parents.get(statement)
-if owner is not tree:
-    assert isinstance(owner, ast.If) and parents.get(owner) is tree and owner.body == [statement] and not owner.orelse
-    condition = owner.test
+if isinstance(statement, ast.If):
+    assert len(statement.body) == 1 and not statement.orelse
+    condition = statement.test
     assert isinstance(condition, ast.Compare) and name(condition.left, '__name__') and len(condition.ops) == 1 and isinstance(condition.ops[0], ast.Eq) and len(condition.comparators) == 1 and isinstance(condition.comparators[0], ast.Constant) and condition.comparators[0].value == '__main__'
+    statement = statement.body[0]
+assert isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call) and member(statement.value.func, 'app', 'run')
+listener = statement.value
 assert not listener.args and all(keyword.arg in ('host', 'port') for keyword in listener.keywords)
 keywords = {keyword.arg: keyword.value for keyword in listener.keywords}
 assert len(keywords) == len(listener.keywords) and 'port' in keywords
@@ -300,12 +197,8 @@ port = keywords['port']
 assert isinstance(port, ast.Call) and name(port.func, 'int') and len(port.args) == 1 and not port.keywords
 value = port.args[0]
 assert isinstance(value, ast.Subscript) and member(value.value, 'os', 'environ') and isinstance(value.slice, ast.Constant) and value.slice.value == 'PORT'
-assert any(isinstance(item, ast.Import) and any(alias.name == 'os' and alias.asname in (None, 'os') for alias in item.names) for item in tree.body)
-index = 0
-if tree.body and isinstance(tree.body[0], ast.Expr) and isinstance(tree.body[0].value, ast.Constant) and isinstance(tree.body[0].value.value, str): index = 1
-while index < len(tree.body) and isinstance(tree.body[index], ast.ImportFrom) and tree.body[index].module == '__future__': index += 1
 offset = endline(tree.body[index - 1]) if index else sum(len(line.encode('utf-8')) for line in lines[:tree.body[0].lineno - 1])
-print(json.dumps(dict(constructorEnd=endline(constructors[0]), importOffset=offset, requestPath=route.args[0].value)))
+print(json.dumps(dict(constructorEnd=endline(constructor), importOffset=offset, requestPath=route.args[0].value)))
 `;
 
 /** An isolated stdlib parser never imports/executes the customer's Python module. */
