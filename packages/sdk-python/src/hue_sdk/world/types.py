@@ -201,6 +201,12 @@ class WorldMcpConfig(TypedDict):
     mcpServers: dict[str, WorldMcpServer]
 
 
+class NativeApp(TypedDict):
+    appKey: str
+    providerId: str
+    state: Literal["preparing", "ready", "failed", "closed"]
+
+
 class _WorldFields(TypedDict, total=False):
     """World API fields, present only for a world the simulation gateway serves."""
 
@@ -213,6 +219,7 @@ class _WorldFields(TypedDict, total=False):
     surfaces: list[WorldSurface]
     env: dict[str, str]
     mcpConfig: WorldMcpConfig
+    nativeApps: list[NativeApp]
     connection: None
 
 

@@ -37,6 +37,8 @@ export interface EnvironmentClientOptions {
   apiKey: string;
   /** Hue origin; defaults to `https://app.hue.run`. */
   baseUrl?: string;
+  /** Select a project explicitly instead of using the key's default project. */
+  projectId?: string;
   /** Per-request deadline in milliseconds. */
   timeoutMillis?: number;
   /** Attempts for idempotent run mutations, 1–10; defaults to 4. */
@@ -112,11 +114,32 @@ const REQUEST_BOUNDS: JsonBounds = { ...valueBounds, bytes: 1024 * 1024 };
  */
 const ENVIRONMENT_PUBLICATION_BOUNDS = aggregateBounds(240_000 + 32);
 
+type RunRequestOptions = {
+  signal?: AbortSignal;
+  onPreparing?: (error: HueEnvironmentError) => void;
+  nativeConnections?: boolean;
+};
+
+function verifiedPostgresUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return (
+      ["postgres:", "postgresql:"].includes(url.protocol) &&
+      Boolean(url.hostname && url.username && url.password && url.pathname.length > 1) &&
+      url.searchParams.get("sslmode") === "verify-full"
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Typed client for authored Worlds, isolated World instances and immutable journals. */
 export class WorldClient {
   /** Validated Hue origin. */
   readonly baseUrl: string;
   readonly #apiKey: string;
+  readonly #projectId?: string;
   private readonly timeoutMillis: number;
   private readonly maxAttempts: number;
   constructor(options: EnvironmentClientOptions) {
@@ -127,6 +150,7 @@ export class WorldClient {
     });
     this.baseUrl = validated.baseUrl;
     this.#apiKey = validated.apiKey;
+    if (options.projectId !== undefined) this.#projectId = uuid(options.projectId);
     this.timeoutMillis = validated.timeoutMillis;
     const attempts = options.maxAttempts ?? 4;
     if (!Number.isInteger(attempts) || attempts < 1 || attempts > 10)
@@ -146,7 +170,7 @@ export class WorldClient {
     method: string,
     path: string,
     payload?: string,
-    options: { signal?: AbortSignal } = {},
+    options: RunRequestOptions = {},
   ): Promise<T> {
     let response: Response;
     try {
@@ -155,6 +179,8 @@ export class WorldClient {
         method,
         headers: {
           Authorization: `Bearer ${this.#apiKey}`,
+          ...(this.#projectId ? { "X-Hue-Project": this.#projectId } : {}),
+          ...(options.nativeConnections ? { "X-Hue-Native-Connections": "1" } : {}),
           ...(payload ? { "Content-Type": "application/json" } : {}),
         },
         body: payload,
@@ -202,7 +228,7 @@ export class WorldClient {
     method: string,
     path: string,
     body?: unknown,
-    options: { signal?: AbortSignal; onPreparing?: (error: HueEnvironmentError) => void } = {},
+    options: RunRequestOptions = {},
     waitForWorld = false,
   ): Promise<T> {
     // Serialize once: a body this client cannot encode is a caller error that no retry fixes.
@@ -226,7 +252,7 @@ export class WorldClient {
     for (;;) {
       if (signal?.aborted) throw preparing ?? new HueEnvironmentError();
       try {
-        return await this.send<T>(method, path, payload, { signal });
+        return await this.send<T>(method, path, payload, options);
       } catch (error) {
         if (!(error instanceof HueEnvironmentError)) throw error;
         if (signal?.aborted) throw preparing ?? error;
@@ -293,9 +319,61 @@ export class WorldClient {
   }
 
   /** Creates an isolated instance from an immutable World version. */
-  createInstance(input: CreateInstanceInput, options: { signal?: AbortSignal } = {}) {
+  createInstance(input: CreateInstanceInput, options: RunRequestOptions = {}) {
     const { worldVersionId, ...runInput } = input;
     return this.createRun({ ...runInput, environmentVersionId: worldVersionId }, options);
+  }
+  /** Starts an instance and hands its verified Postgres URL only to the callback. */
+  async withPostgres<Result>(
+    input: CreateInstanceInput,
+    use: (url: string, instance: EnvironmentRun) => Promise<Result>,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<Result> {
+    if (options.signal?.aborted) throw new HueEnvironmentError();
+    const instance = await this.createInstance(input, {
+      signal: AbortSignal.timeout(60_000),
+      nativeConnections: true,
+    });
+    const deadline = AbortSignal.timeout(60_000);
+    const signal = options.signal ? AbortSignal.any([deadline, options.signal]) : deadline;
+    const idempotencyKey = crypto.randomUUID();
+    let result: Result;
+    try {
+      const url = await this.waitForPostgres(instance, signal);
+      if (signal.aborted) throw new HueEnvironmentError();
+      result = await use(url, instance);
+      if (options.signal?.aborted) throw new HueEnvironmentError();
+    } catch (error) {
+      try {
+        await this.finishInstance(instance.id, { idempotencyKey, status: "abandoned" });
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "Postgres handoff and finish failed");
+      }
+      throw error;
+    }
+    await this.finishInstance(instance.id, { idempotencyKey, status: "completed" });
+    return result;
+  }
+
+  private async waitForPostgres(instance: EnvironmentRun, signal: AbortSignal): Promise<string> {
+    const app = Array.isArray(instance.nativeApps)
+      ? instance.nativeApps.find((entry) => entry?.providerId === "postgres")
+      : undefined;
+    if (typeof app?.appKey !== "string" || !app.appKey || app.appKey.length > 128)
+      throw new Error("World instance has no Postgres app");
+    const path = `/environment-runs/${uuid(instance.id)}/native-connection`;
+    for (;;) {
+      const connection = await this.request<{ state?: string; url?: unknown } | null>(
+        "POST",
+        path,
+        { appKey: app.appKey },
+        { signal },
+      );
+      if (connection?.state === "ready" && verifiedPostgresUrl(connection.url))
+        return connection.url;
+      if (connection?.state !== "preparing") throw new Error("Postgres connection is unavailable");
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    }
   }
   /** Reads current or sealed instance state. */
   getInstance(instanceId: string, options: { signal?: AbortSignal } = {}) {
@@ -345,10 +423,7 @@ export class WorldClient {
     return this.request<WorldVersion>("GET", `/environment-versions/${uuid(id)}`);
   }
   /** Creates or recovers one fresh isolated world using a stable idempotency key. */
-  createRun(
-    input: CreateRunInput,
-    options: { signal?: AbortSignal; onPreparing?: (error: HueEnvironmentError) => void } = {},
-  ) {
+  createRun(input: CreateRunInput, options: RunRequestOptions = {}) {
     if (
       input.maxSteps !== undefined &&
       (!Number.isInteger(input.maxSteps) || input.maxSteps < 1 || input.maxSteps > 500)

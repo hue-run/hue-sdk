@@ -533,6 +533,12 @@ export interface EnvironmentRun {
   env?: Record<string, string>;
   /** MCP configuration. */
   mcpConfig?: WorldMcpConfig;
+  /** Native app selection and readiness, without credentials. */
+  nativeApps?: readonly {
+    appKey: string;
+    providerId: string;
+    state: "preparing" | "ready" | "failed" | "closed";
+  }[];
   /** Reserved for connection keys; null today. */
   connection?: null;
 }

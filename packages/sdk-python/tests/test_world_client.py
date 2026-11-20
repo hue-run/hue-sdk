@@ -1,12 +1,87 @@
 """Canonical instance routing preserves compatibility and runtime identity."""
 
 import json
+import os
+from threading import Event
 from uuid import uuid4
 
 import pytest
 
 from hue_sdk.environment import EnvironmentClient, HueEnvironmentError
 from hue_sdk.world import HueWorldError, WorldClient, world_handoff
+
+
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("finish_status", [200, 403])
+def test_postgres_handoff_uses_same_key_and_project_and_finishes(receiver, fail, finish_status):
+    project_id, version_id, instance_id = (str(uuid4()) for _ in range(3))
+    url = "postgresql://user:synthetic-password@localhost/db?sslmode=verify-full"
+    for body in (
+        {
+            "id": instance_id,
+            "nativeApps": [
+                {"appKey": "selected-pg", "providerId": "postgres", "state": "preparing"}
+            ],
+        },
+        {"state": "preparing"},
+        {"state": "ready", "url": url},
+    ):
+        receiver.reply(200, json.dumps(body).encode(), **{"Content-Type": "application/json"})
+    receiver.reply(finish_status, b"{}", **{"Content-Type": "application/json"})
+    client = WorldClient(
+        api_key="synthetic-world-key", base_url=receiver.url, project_id=project_id
+    )
+    parent = os.environ.get("WORLD_DATABASE_URL")
+
+    def run():
+        with client.with_postgres(idempotency_key=str(uuid4()), world_version_id=version_id) as (
+            dsn,
+            instance,
+        ):
+            assert dsn == url and instance["id"] == instance_id
+            assert "url" not in instance["nativeApps"][0]
+            assert os.environ.get("WORLD_DATABASE_URL") == parent
+            if fail:
+                raise ValueError("synthetic client failure")
+
+    if fail:
+        with pytest.raises(ValueError, match="synthetic client failure") as caught:
+            run()
+        if finish_status != 200:
+            assert isinstance(caught.value.__cause__, HueEnvironmentError)
+    elif finish_status != 200:
+        with pytest.raises(HueEnvironmentError):
+            run()
+    else:
+        run()
+    for _, headers, _ in receiver.requests:
+        assert headers["Authorization"] == "Bearer synthetic-world-key"
+        assert headers["X-Hue-Project"] == project_id
+    assert receiver.requests[0][1]["X-Hue-Native-Connections"] == "1"
+    assert json.loads(receiver.requests[1][2]) == {"appKey": "selected-pg"}
+    assert json.loads(receiver.requests[-1][2])["status"] == ("abandoned" if fail else "completed")
+
+
+def test_postgres_handoff_cancellation_abandons_the_instance(receiver):
+    event = Event()
+    for body in (
+        {
+            "id": str(uuid4()),
+            "nativeApps": [{"appKey": "postgres", "providerId": "postgres", "state": "ready"}],
+        },
+        {"state": "ready", "url": "postgresql://user:synthetic@localhost/db?sslmode=verify-full"},
+        {},
+    ):
+        receiver.reply(200, json.dumps(body).encode(), **{"Content-Type": "application/json"})
+    world = WorldClient(api_key="synthetic-world-key", base_url=receiver.url)
+    with (
+        pytest.raises(HueEnvironmentError),
+        world.with_postgres(
+            idempotency_key=str(uuid4()), world_version_id=str(uuid4()), cancel_event=event
+        ),
+    ):
+        event.set()
+    assert json.loads(receiver.requests[-1][2])["status"] == "abandoned"
 
 
 def test_world_and_compatibility_routes_keep_runtime_identity(receiver):

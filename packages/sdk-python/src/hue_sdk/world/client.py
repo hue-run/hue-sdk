@@ -7,9 +7,12 @@ import re
 import socket
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, cast
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
+from uuid import uuid4
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -47,6 +50,20 @@ SEAL_POLL_SECONDS = 0.25
 # Version 00 reserves the high six trace-flags bits; only the low two are currently defined.
 _TRACEPARENT = re.compile(r"^00-(?!0{32}-)[0-9a-f]{32}-(?!0{16}-)[0-9a-f]{16}-0[0-3]$")
 _EVIDENCE_SECTIONS = ("all", "start", "end", "diff", "ledger")
+
+
+def _verified_postgres_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        url = urlsplit(value)
+        return (
+            url.scheme in ("postgres", "postgresql")
+            and bool(url.hostname and url.username and url.password and len(url.path) > 1)
+            and parse_qs(url.query).get("sslmode") == ["verify-full"]
+        )
+    except ValueError:
+        return False
 
 
 class HueEnvironmentError(RuntimeError):
@@ -235,6 +252,7 @@ class WorldClient:
         base_url: str = DEFAULT_BASE_URL,
         api_key: str | None = None,
         *,
+        project_id: str | None = None,
         timeout_seconds: float = 10,
         max_attempts: int = 4,
     ) -> None:
@@ -251,6 +269,8 @@ class WorldClient:
         if type(max_attempts) is not int or not 1 <= max_attempts <= 10:
             raise ValueError("max_attempts must be 1–10.")
         self._headers = {"Authorization": f"Bearer {api_key}"}
+        if project_id is not None:
+            self._headers["X-Hue-Project"] = uuid(project_id)
         self._timeout = timeout_seconds
         self._max_attempts = max_attempts
 
@@ -269,6 +289,7 @@ class WorldClient:
         traceparent: str | None = None,
         agent_revision: str | None = None,
         cancel_event: threading.Event | None = None,
+        native_connections: bool = False,
     ) -> EnvironmentRun:
         """Start an isolated instance from an immutable World version."""
         return self.create_run(
@@ -281,7 +302,90 @@ class WorldClient:
             traceparent=traceparent,
             agent_revision=agent_revision,
             cancel_event=cancel_event,
+            native_connections=native_connections,
         )
+
+    @contextmanager
+    def with_postgres(
+        self,
+        *,
+        idempotency_key: str,
+        world_version_id: str,
+        ttl_seconds: int | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> Iterator[tuple[str, EnvironmentRun]]:
+        """Pass one instance's verified Postgres URL to your client and finish on exit."""
+        if cancel_event is not None and not isinstance(cancel_event, threading.Event):
+            raise TypeError("cancel_event must be a threading.Event.")
+        if cancel_event is not None and cancel_event.is_set():
+            raise HueEnvironmentError()
+        instance = self.create_instance(
+            idempotency_key=idempotency_key,
+            world_version_id=world_version_id,
+            ttl_seconds=ttl_seconds,
+            native_connections=True,
+        )
+        instance_id = instance["id"]
+        status: FinishStatus = "abandoned"
+        failure: BaseException | None = None
+        try:
+            apps = instance.get("nativeApps")
+            app_key = (
+                next(
+                    (
+                        app.get("appKey")
+                        for app in apps
+                        if isinstance(app, dict) and app.get("providerId") == "postgres"
+                    ),
+                    None,
+                )
+                if isinstance(apps, list)
+                else None
+            )
+            if not isinstance(app_key, str) or not 1 <= len(app_key) <= 128:
+                raise ValueError("World instance has no Postgres app.")
+            deadline = time.monotonic() + 60
+            payload = encode({"appKey": app_key})
+            path = f"/environment-runs/{uuid(instance_id)}/native-connection"
+            while (remaining := deadline - time.monotonic()) > 0:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise HueEnvironmentError()
+                connection = self._send(
+                    "POST",
+                    path,
+                    payload,
+                    timeout_seconds=min(self._timeout, remaining),
+                    cancel_event=cancel_event,
+                )
+                if not isinstance(connection, dict):
+                    break
+                url = connection.get("url")
+                if connection.get("state") == "ready" and _verified_postgres_url(url):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise HueEnvironmentError()
+                    yield cast(str, url), instance
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise HueEnvironmentError()
+                    status = "completed"
+                    return
+                if connection.get("state") != "preparing":
+                    break
+                wait = min(0.5, max(0, deadline - time.monotonic()))
+                if cancel_event is None:
+                    time.sleep(wait)
+                elif cancel_event.wait(wait):
+                    raise HueEnvironmentError()
+            raise HueEnvironmentError()
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            try:
+                self.finish_instance(instance_id, idempotency_key=str(uuid4()), status=status)
+            except HueEnvironmentError as cleanup_error:
+                if failure is None:
+                    raise
+                raise failure from cleanup_error
 
     def get_instance(self, instance_id: str) -> RunState:
         """Read current or sealed instance state."""
@@ -317,6 +421,7 @@ class WorldClient:
         *,
         timeout_seconds: float | None = None,
         cancel_event: threading.Event | None = None,
+        native_connections: bool = False,
     ) -> Any:
         # A bounded read's window starts before the request and covers the whole exchange.
         deadline = (
@@ -335,6 +440,7 @@ class WorldClient:
                     data=payload,
                     headers={
                         **self._headers,
+                        **({"X-Hue-Native-Connections": "1"} if native_connections else {}),
                         **({"Content-Type": "application/json"} if payload is not None else {}),
                     },
                     timeout=self._timeout if timeout_seconds is None else timeout_seconds,
@@ -401,6 +507,7 @@ class WorldClient:
         *,
         wait_for_world: bool = False,
         cancel_event: threading.Event | None = None,
+        native_connections: bool = False,
     ) -> Any:
         if cancel_event is not None and not isinstance(cancel_event, threading.Event):
             raise TypeError("cancel_event must be a threading.Event.")
@@ -426,6 +533,7 @@ class WorldClient:
                     if wait_for_world
                     else None,
                     cancel_event=cancel_event,
+                    native_connections=native_connections,
                 )
             except HueEnvironmentError as error:
                 if cancel_event is not None and cancel_event.is_set():
@@ -477,6 +585,7 @@ class WorldClient:
         traceparent: str | None = None,
         agent_revision: str | None = None,
         cancel_event: threading.Event | None = None,
+        native_connections: bool = False,
     ) -> EnvironmentRun:
         """Create or replay a world. `traceparent` is the case span's W3C context; its trace ID
         must equal the trace the execution declared. `agent_revision` (1–256 characters) joins
@@ -505,6 +614,7 @@ class WorldClient:
                 },
                 wait_for_world=True,
                 cancel_event=cancel_event,
+                native_connections=native_connections,
             )
         except HueEnvironmentError as error:
             raise WorldCreationError(

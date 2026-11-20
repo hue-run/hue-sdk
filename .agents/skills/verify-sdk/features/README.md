@@ -39,3 +39,9 @@ World preparation uses an explicit server diagnostic and a two-minute deadline. 
 ordinary error limits, cancellation during sleep and active HTTP reads, and fresh materialization
 identities. The installed-package verifier and Python wheel test run these same loopback checks
 against the packed code. These checks do not establish hosted reconstruction or release status.
+
+Postgres handoff uses `withPostgres` in TypeScript and `with_postgres` in Python. Run the
+Postgres tests in `packages/sdk-typescript/tests/world-client.test.ts` and
+`packages/sdk-python/tests/test_world_client.py`. Verify that start, reveal, and finish use the
+same project and key; parallel instances keep their URLs separate; and failure or cancellation
+still finishes an acknowledged instance. These loopback checks do not open a SQL session.
