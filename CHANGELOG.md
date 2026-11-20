@@ -8,6 +8,14 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Security
+
+- `hue mcp install` creates its temporary file in the `.cursor` or `.vscode` directory it read the
+  config from, held while the file is created, so a directory swapped for a link during the command
+  no longer receives the merged config with other servers' tokens.
+
 ### [0.30.2] - 2026-11-13
 
 #### Added
