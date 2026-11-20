@@ -337,6 +337,7 @@ export class WorldClient {
       signal: AbortSignal.timeout(60_000),
       nativeConnections: true,
     });
+    const instanceId = instance.id;
     const deadline = AbortSignal.timeout(60_000);
     const signal = options.signal ? AbortSignal.any([deadline, options.signal]) : deadline;
     const idempotencyKey = crypto.randomUUID();
@@ -348,13 +349,13 @@ export class WorldClient {
       if (options.signal?.aborted) throw new HueEnvironmentError();
     } catch (error) {
       try {
-        await this.finishInstance(instance.id, { idempotencyKey, status: "abandoned" });
+        await this.finishInstance(instanceId, { idempotencyKey, status: "abandoned" });
       } catch (cleanupError) {
         throw new AggregateError([error, cleanupError], "Postgres handoff and finish failed");
       }
       throw error;
     }
-    await this.finishInstance(instance.id, { idempotencyKey, status: "completed" });
+    await this.finishInstance(instanceId, { idempotencyKey, status: "completed" });
     return result;
   }
 

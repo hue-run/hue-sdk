@@ -59,8 +59,9 @@ test("Postgres handoff uses the issuing project and key and finishes concurrent 
           expect(instance.id).toBe(idempotencyKey);
           expect(new URL(url).password).toBe(`synthetic-${idempotencyKey}`);
           expect(process.env.WORLD_DATABASE_URL).toBe(sentinel);
+          instance.id = randomUUID();
           if (index === 1) throw failed;
-          return instance.id;
+          return idempotencyKey;
         }),
       ),
     );
@@ -70,6 +71,65 @@ test("Postgres handoff uses the issuing project and key and finishes concurrent 
     ]);
     expect(finished.get(instanceIds[0]!)).toBe("completed");
     expect(finished.get(instanceIds[1]!)).toBe("abandoned");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test.each(["completed", "abandoned"])("Postgres surfaces a refused %s finish", async (status) => {
+  const instanceId = randomUUID();
+  const workError = new Error("synthetic work failure");
+  const finishes: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/v1/instances") {
+        return Response.json({
+          id: instanceId,
+          nativeApps: [{ appKey: "postgres", providerId: "postgres", state: "ready" }],
+        });
+      }
+      if (path === `/api/v1/instances/${instanceId}/native-connection`) {
+        return Response.json({
+          state: "ready",
+          url: "postgresql://user:synthetic@localhost/db?sslmode=verify-full",
+        });
+      }
+      expect(path).toBe(`/api/v1/instances/${instanceId}/finish`);
+      const { status: finishStatus } = await request.json();
+      finishes.push(finishStatus);
+      return new Response("synthetic response body", { status: 403 });
+    },
+  });
+  try {
+    const world = createWorldClient({
+      apiKey: "synthetic-world-key",
+      baseUrl: server.url.origin,
+    });
+    const [result] = await Promise.allSettled([
+      world.withPostgres(
+        { idempotencyKey: randomUUID(), worldVersionId: randomUUID() },
+        async () => {
+          if (status === "abandoned") throw workError;
+        },
+      ),
+    ]);
+    expect(finishes).toEqual([status]);
+    if (result?.status !== "rejected") throw new Error("A refused finish must reject");
+    const rejection: unknown = result.reason;
+    let finishError = rejection;
+    if (status === "abandoned") {
+      if (!(rejection instanceof AggregateError)) throw new Error("Expected both errors");
+      const { errors } = rejection;
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toBe(workError);
+      finishError = errors[1];
+    }
+    expect(finishError).toBeInstanceOf(HueWorldError);
+    expect(finishError).toMatchObject({ status: 403 });
+    expect(String(finishError)).not.toContain("synthetic response body");
   } finally {
     server.stop(true);
   }
