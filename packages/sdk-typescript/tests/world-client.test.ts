@@ -79,7 +79,7 @@ test("Postgres handoff uses the issuing project and key and finishes concurrent 
 test.each(["completed", "abandoned"])("Postgres surfaces a refused %s finish", async (status) => {
   const instanceId = randomUUID();
   const workError = new Error("synthetic work failure");
-  const finishes: string[] = [];
+  const finishes: unknown[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -98,8 +98,7 @@ test.each(["completed", "abandoned"])("Postgres surfaces a refused %s finish", a
         });
       }
       expect(path).toBe(`/api/v1/instances/${instanceId}/finish`);
-      const { status: finishStatus } = await request.json();
-      finishes.push(finishStatus);
+      finishes.push(await request.json());
       return new Response("synthetic response body", { status: 403 });
     },
   });
@@ -116,7 +115,7 @@ test.each(["completed", "abandoned"])("Postgres surfaces a refused %s finish", a
         },
       ),
     ]);
-    expect(finishes).toEqual([status]);
+    expect(finishes).toEqual([{ idempotencyKey: expect.any(String), status }]);
     if (result?.status !== "rejected") throw new Error("A refused finish must reject");
     const rejection: unknown = result.reason;
     let finishError = rejection;
