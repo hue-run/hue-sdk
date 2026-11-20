@@ -319,7 +319,10 @@ export class WorldClient {
   }
 
   /** Creates an isolated instance from an immutable World version. */
-  createInstance(input: CreateInstanceInput, options: RunRequestOptions = {}) {
+  createInstance(
+    input: CreateInstanceInput,
+    options: { signal?: AbortSignal; nativeConnections?: boolean } = {},
+  ) {
     const { worldVersionId, ...runInput } = input;
     return this.createRun({ ...runInput, environmentVersionId: worldVersionId }, options);
   }
@@ -423,7 +426,14 @@ export class WorldClient {
     return this.request<WorldVersion>("GET", `/environment-versions/${uuid(id)}`);
   }
   /** Creates or recovers one fresh isolated world using a stable idempotency key. */
-  createRun(input: CreateRunInput, options: RunRequestOptions = {}) {
+  createRun(
+    input: CreateRunInput,
+    options: {
+      signal?: AbortSignal;
+      onPreparing?: (error: HueEnvironmentError) => void;
+      nativeConnections?: boolean;
+    } = {},
+  ) {
     if (
       input.maxSteps !== undefined &&
       (!Number.isInteger(input.maxSteps) || input.maxSteps < 1 || input.maxSteps > 500)

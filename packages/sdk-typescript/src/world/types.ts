@@ -535,8 +535,11 @@ export interface EnvironmentRun {
   mcpConfig?: WorldMcpConfig;
   /** Native app selection and readiness, without credentials. */
   nativeApps?: readonly {
+    /** Instance-specific app key used to request the connection. */
     appKey: string;
+    /** Provider identifier, such as `postgres`. */
     providerId: string;
+    /** Provisioning state when the instance was returned. */
     state: "preparing" | "ready" | "failed" | "closed";
   }[];
   /** Reserved for connection keys; null today. */
