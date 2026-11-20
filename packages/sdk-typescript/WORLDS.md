@@ -141,3 +141,14 @@ configuration and supported dialects.
 The [compatible client guide](ENVIRONMENTS.md) covers authored definitions, action catalogs,
 instance journals and simulation runners. Its examples use the retained environment client;
 the canonical client uses the same request bodies through World and instance routes.
+
+## Postgres handoff (unreleased)
+
+Use `WorldClient.withPostgres` in TypeScript or `WorldClient.with_postgres` in Python. Set
+`projectId` or `project_id` on the client if the key's default project is not the target. The
+helper uses that project and the same key for start, reveal, and finish. Pass the URL directly
+to your driver, or set it only in a child process's environment. Keep hostname verification on.
+
+Close the driver before your callback or `with` block exits. The SDK finishes the instance on
+exit and reports finish errors. If a start never returns an instance ID, retry the same start
+with its original idempotency key; expiry is the fallback if an acknowledgement never arrives.

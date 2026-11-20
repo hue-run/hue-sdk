@@ -3,6 +3,178 @@ import { randomUUID } from "node:crypto";
 import { createEnvironmentClient, HueEnvironmentError } from "../src/environment.js";
 import { createWorldClient, HueWorldError, worldHandoff } from "../src/world.js";
 
+test("Postgres handoff uses the issuing project and key and finishes concurrent instances", async () => {
+  const projectId = randomUUID();
+  const versionId = randomUUID();
+  const instanceIds: string[] = [randomUUID(), randomUUID()];
+  const finished = new Map<string, string>();
+  const reveals = new Set<string>();
+  const sentinel = process.env.WORLD_DATABASE_URL;
+  const failed = new Error("synthetic client failure");
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      const body = (await request.json()) as Record<string, string>;
+      expect(request.headers.get("X-Hue-Project")).toBe(projectId);
+      expect(request.headers.get("Authorization")).toBe("Bearer synthetic-world-key");
+      if (path === "/api/v1/instances") {
+        expect(request.headers.get("X-Hue-Native-Connections")).toBe("1");
+        expect(body.environmentVersionId).toBe(versionId);
+        return Response.json({
+          id: body.idempotencyKey,
+          nativeApps: [{ appKey: "selected-postgres", providerId: "postgres", state: "preparing" }],
+        });
+      }
+      const [, , , , instanceId, operation] = path.split("/");
+      expect(instanceIds).toContain(instanceId);
+      expect(request.headers.get("X-Hue-Native-Connections")).toBeNull();
+      if (operation === "finish") {
+        expect(body.idempotencyKey).toBeString();
+        finished.set(instanceId!, body.status!);
+        return Response.json({});
+      }
+      expect(operation).toBe("native-connection");
+      expect(body).toEqual({ appKey: "selected-postgres" });
+      if (!reveals.has(instanceId!)) {
+        reveals.add(instanceId!);
+        return Response.json({ state: "preparing" });
+      }
+      return Response.json({
+        state: "ready",
+        url: `postgresql://user:synthetic-${instanceId}@localhost/db?sslmode=verify-full`,
+      });
+    },
+  });
+  try {
+    const world = createWorldClient({
+      apiKey: "synthetic-world-key",
+      baseUrl: server.url.origin,
+      projectId,
+    });
+    const result = await Promise.allSettled(
+      instanceIds.map((idempotencyKey, index) =>
+        world.withPostgres({ idempotencyKey, worldVersionId: versionId }, async (url, instance) => {
+          expect(instance.id).toBe(idempotencyKey);
+          expect(new URL(url).password).toBe(`synthetic-${idempotencyKey}`);
+          expect(process.env.WORLD_DATABASE_URL).toBe(sentinel);
+          instance.id = randomUUID();
+          if (index === 1) throw failed;
+          return idempotencyKey;
+        }),
+      ),
+    );
+    expect(result).toEqual([
+      { status: "fulfilled", value: instanceIds[0] },
+      { status: "rejected", reason: failed },
+    ]);
+    expect(finished.get(instanceIds[0]!)).toBe("completed");
+    expect(finished.get(instanceIds[1]!)).toBe("abandoned");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test.each(["completed", "abandoned"])("Postgres surfaces a refused %s finish", async (status) => {
+  const instanceId = randomUUID();
+  const workError = new Error("synthetic work failure");
+  const finishes: unknown[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/v1/instances") {
+        return Response.json({
+          id: instanceId,
+          nativeApps: [{ appKey: "postgres", providerId: "postgres", state: "ready" }],
+        });
+      }
+      if (path === `/api/v1/instances/${instanceId}/native-connection`) {
+        return Response.json({
+          state: "ready",
+          url: "postgresql://user:synthetic@localhost/db?sslmode=verify-full",
+        });
+      }
+      expect(path).toBe(`/api/v1/instances/${instanceId}/finish`);
+      finishes.push(await request.json());
+      return new Response("synthetic response body", { status: 403 });
+    },
+  });
+  try {
+    const world = createWorldClient({
+      apiKey: "synthetic-world-key",
+      baseUrl: server.url.origin,
+    });
+    const [result] = await Promise.allSettled([
+      world.withPostgres(
+        { idempotencyKey: randomUUID(), worldVersionId: randomUUID() },
+        async () => {
+          if (status === "abandoned") throw workError;
+        },
+      ),
+    ]);
+    expect(finishes).toEqual([{ idempotencyKey: expect.any(String), status }]);
+    if (result?.status !== "rejected") throw new Error("A refused finish must reject");
+    const rejection: unknown = result.reason;
+    let finishError = rejection;
+    if (status === "abandoned") {
+      if (!(rejection instanceof AggregateError)) throw new Error("Expected both errors");
+      const { errors } = rejection;
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toBe(workError);
+      finishError = errors[1];
+    }
+    expect(finishError).toBeInstanceOf(HueWorldError);
+    expect(finishError).toMatchObject({ status: 403 });
+    expect(String(finishError)).not.toContain("synthetic response body");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("Postgres cancellation during start finishes after the acknowledgement", async () => {
+  const controller = new AbortController();
+  const instanceId = randomUUID();
+  let finishStatus: string | undefined;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/v1/instances") {
+        controller.abort();
+        return Response.json({
+          id: instanceId,
+          nativeApps: [{ appKey: "postgres", providerId: "postgres", state: "preparing" }],
+        });
+      }
+      expect(path).toBe(`/api/v1/instances/${instanceId}/finish`);
+      finishStatus = ((await request.json()) as { status: string }).status;
+      return Response.json({});
+    },
+  });
+  try {
+    const world = createWorldClient({
+      apiKey: "synthetic-world-key",
+      baseUrl: server.url.origin,
+    });
+    await expect(
+      world.withPostgres(
+        { idempotencyKey: randomUUID(), worldVersionId: randomUUID() },
+        async () => {
+          throw new Error("A cancelled handoff must not start work");
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBeInstanceOf(HueWorldError);
+    expect(finishStatus).toBe("abandoned");
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("World registry aliases preserve payloads, pagination and compatibility routing", async () => {
   const worldId = randomUUID();
   const requests: { method: string; path: string; body: unknown }[] = [];
