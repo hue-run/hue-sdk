@@ -916,8 +916,10 @@ Captured behavior headers are `notion-version`, `slack-api-version`, `stripe-ver
 `http.request.header.content_type` and `http.response.header.content_type`. `input.mime_type`
 and `output.mime_type` are `application/json` because captured values, including text, are
 JSON-encoded. Authorization and cookie headers are never recorded. HTTP content filters
-authorization, cookies, API keys, exact token fields and secret/password fields, while keeping
-pagination fields such as `nextPageToken`.
+authorization, cookies, API keys, fields ending in `token`, `secret`, `password`, `signature` or
+`assertion`, `code_verifier`, `device_code`, `sig`, `session` and `sid`, and `code` in an object
+that also has `grant_type` or `code_verifier`, while keeping pagination fields such as
+`nextPageToken`.
 
 Recorded URLs also redact recognized credential path segments, including credential-labeled
 slots such as `/token/<value>`, bot-token segments and Slack incoming-webhook secrets. Ordinary
