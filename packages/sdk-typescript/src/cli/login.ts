@@ -100,6 +100,7 @@ export function invalidKeyReason(value: string): string | null {
   if (!value) return "No key was entered.";
   if (/\s/u.test(value)) return "A key cannot contain whitespace.";
   if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(value)) return "That looks like a URL, not a key.";
+  if (/['\\]/u.test(value)) return "A key cannot contain a quote or a backslash.";
   if (value.length > MAX_KEY_LENGTH || value.includes("\u0000"))
     return "That does not look like a Hue key.";
   return null;
@@ -464,9 +465,20 @@ export function readEnvValue(text: string, variable: string): string | undefined
   return found;
 }
 
+/** Single quotes keep a value literal when the file is sourced by a shell or read by dotenv. */
+function quoteEnvValue(value: string): string {
+  // Neither shells nor dotenv parsers can escape a quote inside single quotes; python-dotenv
+  // also unescapes backslashes there.
+  if (/['\\\r\n]/u.test(value))
+    throw new EnvFileError("A stored value cannot contain a quote, a backslash or a line break.");
+  return `'${value}'`;
+}
+
 /** Replaces or appends the given assignments while preserving every other line. */
 export function mergeEnvText(text: string, entries: Record<string, string>): string {
-  const pending = new Map(Object.entries(entries));
+  const pending = new Map(
+    Object.entries(entries).map(([name, value]) => [name, quoteEnvValue(value)]),
+  );
   const lines = text === "" ? [] : text.split("\n");
   if (text.endsWith("\n")) lines.pop();
   const output: string[] = [];
@@ -475,8 +487,9 @@ export function mergeEnvText(text: string, entries: Record<string, string>): str
     const variable = match?.[2];
     if (variable !== undefined && Object.hasOwn(entries, variable)) {
       // The first assignment is rewritten in place; later duplicates of a managed variable are dropped.
-      if (pending.has(variable)) {
-        output.push(`${match?.[1] ?? ""}${variable}=${entries[variable]}`);
+      const value = pending.get(variable);
+      if (value !== undefined) {
+        output.push(`${match?.[1] ?? ""}${variable}=${value}`);
         pending.delete(variable);
       }
       continue;
