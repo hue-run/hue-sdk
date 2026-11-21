@@ -14,6 +14,8 @@ import hashlib
 import json
 import random
 import re
+import socket
+import sys
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -23,7 +25,10 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import requests
+import requests.adapters
 import urllib3
+import urllib3.connection
+import urllib3.util.connection
 
 from .._inline_files import loads_message
 from .._otel_compat import suppress_instrumentation
@@ -143,6 +148,7 @@ _MAX_ANSWER_BYTES = 64 * 1024
 _PREFIX_BYTES = 16 * 1024
 # Nesting a value is walked to; deeper parts stay as they are.
 _MAX_DEPTH = 128
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 def _no_auth(request: Any) -> Any:
@@ -186,8 +192,9 @@ def _route(
     return f"/traces/{trace_id.lower()}/blobs/{digest}{query}", digest
 
 
-def _link(value: object) -> str | None:
-    """A download link Hue issued: HTTPS, or HTTP to loopback, without credentials or a fragment."""
+def _link(value: object, origin: str) -> str | None:
+    """A download link Hue issued on its own origin (the scheme, host and port of ``origin``):
+    HTTPS, or HTTP to loopback, without credentials or a fragment."""
     if (
         not isinstance(value, str)
         or len(value) > 8192
@@ -196,13 +203,74 @@ def _link(value: object) -> str | None:
         return None
     try:
         url = urlsplit(value)
+        hue = urlsplit(origin)
         loopback = url.hostname in ("localhost", "127.0.0.1", "::1")
         allowed = url.scheme == "https" or (url.scheme == "http" and loopback)
         if not url.hostname or not allowed or url.username or url.password or url.fragment:
             return None
+        if (url.scheme, url.hostname, url.port or _DEFAULT_PORTS[url.scheme]) != (
+            hue.scheme,
+            hue.hostname,
+            hue.port or _DEFAULT_PORTS[hue.scheme],
+        ):
+            return None
     except ValueError:
         return None
     return value
+
+
+def _pinned_adapter() -> requests.adapters.HTTPAdapter:
+    """An adapter whose first connection resolves its host and whose later ones connect to the
+    address that first one reached, whatever a later lookup of the name answers: a download goes
+    to the server that issued its link. Through a proxy, the proxy resolves the host."""
+    reached: list[str] = []
+
+    def connect(
+        connection: urllib3.connection.HTTPConnection, resolve: Callable[[], socket.socket]
+    ) -> socket.socket:
+        if not reached:
+            sock = resolve()
+            reached.append(sock.getpeername()[0])
+            return sock
+        try:
+            sock = urllib3.util.connection.create_connection(
+                (reached[0], connection.port),
+                connection.timeout,
+                source_address=connection.source_address,
+                socket_options=connection.socket_options,
+            )
+        except OSError as error:
+            raise urllib3.exceptions.NewConnectionError(
+                connection, f"Failed to establish a new connection: {error}"
+            ) from error
+        sys.audit("http.client.connect", connection, connection.host, connection.port)
+        return sock
+
+    class Connection(urllib3.connection.HTTPConnection):
+        def _new_conn(self) -> socket.socket:
+            return connect(self, super()._new_conn)
+
+    class TLSConnection(urllib3.connection.HTTPSConnection):
+        def _new_conn(self) -> socket.socket:
+            return connect(self, super()._new_conn)
+
+    class Pool(urllib3.HTTPConnectionPool):
+        ConnectionCls = Connection
+
+    class TLSPool(urllib3.HTTPSConnectionPool):
+        ConnectionCls = TLSConnection
+
+    adapter = requests.adapters.HTTPAdapter()
+    adapter.poolmanager.pool_classes_by_scheme = {"http": Pool, "https": TLSPool}
+    return adapter
+
+
+def _session(adapter: requests.adapters.HTTPAdapter) -> requests.Session:
+    """A session of its own, so no cookie passes between requests, sending through ``adapter``."""
+    session = requests.Session()
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
 
 
 def _retry_after(response: requests.Response) -> int | None:
@@ -246,9 +314,9 @@ class _Grant:
     file_name: str | None
 
 
-def _grant(answer: Any, sha256: str) -> _Grant:
+def _grant(answer: Any, sha256: str, origin: str) -> _Grant:
     fields = answer if isinstance(answer, dict) else None
-    url = _link(fields.get("url")) if fields else None
+    url = _link(fields.get("url"), origin) if fields else None
     size = fields.get("size") if fields else None
     if (
         fields is None
@@ -314,10 +382,14 @@ class MediaClient:
         """
         path, digest = _route(sha256, trace_id, span_id, snapshot_id)
         limit = _max_bytes(max_bytes)
-        grant = self._grant(path, digest)
-        if grant.size > limit:
-            raise MediaFetchError("too_large")
-        data = self._download(grant, digest)
+        adapter = _pinned_adapter()
+        try:
+            grant = self._grant(path, digest, adapter)
+            if grant.size > limit:
+                raise MediaFetchError("too_large")
+            data = self._download(grant, digest, adapter)
+        finally:
+            adapter.close()
         return MediaFile(data, digest, len(data), grant.content_type, grant.file_name)
 
     def resolve(
@@ -404,13 +476,13 @@ class MediaClient:
         return resolved
 
     @suppress_instrumentation()
-    def _grant(self, path: str, sha256: str) -> _Grant:
+    def _grant(self, path: str, sha256: str, adapter: requests.adapters.HTTPAdapter) -> _Grant:
         """The download link of one file, asked once more after an unavailable answer or a lost
         connection."""
         attempt = 0
         while True:
             try:
-                with requests.get(
+                with _session(adapter).get(
                     f"{self._base_url}/api/v1{path}",
                     headers=self._headers,
                     timeout=self._timeout,
@@ -434,7 +506,7 @@ class MediaClient:
                     elif not 200 <= status < 300:
                         raise MediaFetchError("failed", status)
                     else:
-                        return _grant(_answer(response), sha256)
+                        return _grant(_answer(response), sha256, self._base_url)
             except requests.RequestException:
                 if attempt > 0:
                     raise MediaFetchError("failed") from None
@@ -443,14 +515,17 @@ class MediaClient:
             attempt += 1
 
     @suppress_instrumentation()
-    def _download(self, grant: _Grant, sha256: str) -> bytes:
-        """The bytes behind a link, fetched without the key, stopped past the reported size and
-        checked against the digest. The download ends once no byte has arrived for the client's
-        timeout, at least two minutes; a large file that keeps arriving is never cut off."""
+    def _download(
+        self, grant: _Grant, sha256: str, adapter: requests.adapters.HTTPAdapter
+    ) -> bytes:
+        """The bytes behind a link, fetched without the key from the address that issued it,
+        stopped past the reported size and checked against the digest. The download ends once no
+        byte has arrived for the client's timeout, at least two minutes; a large file that keeps
+        arriving is never cut off."""
         hasher = hashlib.sha256()
         data = bytearray()
         try:
-            with requests.get(
+            with _session(adapter).get(
                 grant.url,
                 auth=_no_auth,
                 # A read timeout bounds each wait for bytes, not the whole download.
