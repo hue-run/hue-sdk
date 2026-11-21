@@ -12,10 +12,20 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { chownSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chownSync,
+  mkdtempSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import * as syncFilesystem from "node:fs";
 import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Writable } from "node:stream";
 import {
   DEFAULT_MCP_URL,
@@ -33,19 +43,24 @@ import {
   toolsetsMcpUrl,
 } from "../src/cli/mcp.js";
 
-// `mkdir` and `open` pass through, after `before` when a test sets it, so a test can change the tree
-// as the command prepares its write or creates its temporary file.
+// `mkdir` and `openSync` pass through, after `before` or `beforeOpenSync` when a test sets it, so a
+// test can change the tree as the command prepares its write or creates its temporary file.
 const realFilesystem = { ...filesystem };
-let before: ((call: "mkdir" | "open", path: string) => Promise<void>) | undefined;
+let before: ((call: "mkdir", path: string) => Promise<void>) | undefined;
 void mock.module("node:fs/promises", () => ({
   ...realFilesystem,
   mkdir: async (...args: Parameters<typeof filesystem.mkdir>) => {
     await before?.("mkdir", String(args[0]));
     return realFilesystem.mkdir(...args);
   },
-  open: async (...args: Parameters<typeof filesystem.open>) => {
-    await before?.("open", String(args[0]));
-    return realFilesystem.open(...args);
+}));
+const realSyncFilesystem = { ...syncFilesystem };
+let beforeOpenSync: ((path: string) => void) | undefined;
+void mock.module("node:fs", () => ({
+  ...realSyncFilesystem,
+  openSync: (...args: Parameters<typeof syncFilesystem.openSync>) => {
+    beforeOpenSync?.(String(args[0]));
+    return realSyncFilesystem.openSync(...args);
   },
 }));
 
@@ -555,22 +570,22 @@ describe("hue mcp install", () => {
     expect(await readFile(join(outside, "mcp.json"), "utf8")).toBe(elsewhere);
     expect(await readdir(outside)).toEqual(["mcp.json"]);
 
-    // A link swapped in after the read, before the temporary file is created, is refused before the
-    // rename, so the file outside is not replaced.
+    // A link swapped in as the temporary file is created does not receive it: the file is created in
+    // the directory the command holds, and the rename is refused, so the file outside is not replaced.
     await rm(join(root, ".cursor"));
     await mkdir(join(root, ".cursor"));
-    before = async (call, path) => {
-      if (call !== "open" || !path.startsWith(join(root, ".cursor", "."))) return;
-      before = undefined;
-      await rm(join(root, ".cursor"), { recursive: true });
-      await symlink(outside, join(root, ".cursor"));
+    beforeOpenSync = (path) => {
+      if (!basename(path).startsWith(".mcp.json.")) return;
+      beforeOpenSync = undefined;
+      renameSync(join(root, ".cursor"), join(root, "cursor-held"));
+      symlinkSync(outside, join(root, ".cursor"));
     };
     try {
       const swapped = await mcp(["install", "--client", "cursor"], { cwd: root });
       expect(swapped.code).toBe(1);
       expect(swapped.stderr).toContain(".cursor is a symbolic link");
     } finally {
-      before = undefined;
+      beforeOpenSync = undefined;
     }
     expect(await readFile(join(outside, "mcp.json"), "utf8")).toBe(elsewhere);
     expect(await readdir(outside)).toEqual(["mcp.json"]);

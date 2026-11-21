@@ -1,7 +1,19 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants, type Stats } from "node:fs";
-import { access, lstat, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import {
+  closeSync,
+  constants,
+  fchmodSync,
+  fchownSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  openSync,
+  statSync,
+  type Stats,
+  writeFileSync,
+} from "node:fs";
+import { access, lstat, mkdir, readFile, rename, stat, unlink } from "node:fs/promises";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { isLoopbackHost } from "../config.js";
@@ -402,18 +414,23 @@ async function readJsonConfig(
  * Refuses a symbolic link, or anything but a directory, between the working directory and the file
  * (`.cursor` or `.vscode`), as the file itself is refused. The working directory and its ancestors
  * are not checked: on macOS `/tmp` and `/var` are links, and a home directory can be one. This runs
- * before the file is read and again before the rename. Node has no `openat`, so it cannot pin the
- * directory against an account that can write the project and swaps a link in after the last check.
+ * before the file is read and again before the rename. Returns the status of the file's directory
+ * (the working directory's when the file is in it), or undefined when it does not exist yet; the
+ * temporary file is created in that directory only (`createTemporary`).
  */
-async function rejectLinkedParents(cwd: string, path: string, display: string): Promise<void> {
+async function rejectLinkedParents(
+  cwd: string,
+  path: string,
+  display: string,
+): Promise<Stats | undefined> {
   let current = cwd;
+  let info: Stats | undefined;
   for (const part of relative(cwd, dirname(path)).split(sep).filter(Boolean)) {
     current = join(current, part);
-    let info;
     try {
       info = await lstat(current);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
     }
     const shown = displayPath(cwd, current);
@@ -422,6 +439,7 @@ async function rejectLinkedParents(cwd: string, path: string, display: string): 
     if (!info.isDirectory())
       throw new ConfigError(`Refusing to use ${display}: ${shown} is not a directory.`);
   }
+  return info ?? (await stat(cwd));
 }
 
 /** The file's status, or undefined when there is none; a symbolic link is refused. */
@@ -438,6 +456,64 @@ async function rejectSymlink(path: string, display: string): Promise<Stats | und
   return info;
 }
 
+function sameFile(a: Stats | undefined, b: Stats | undefined): boolean {
+  return a?.dev === b?.dev && a?.ino === b?.ino;
+}
+
+/** libuv's exclusive sharing mode on Windows (`uv/win.h`); Node does not export it. */
+const UV_FS_O_EXLOCK = 0x10000000;
+
+/**
+ * Creates the temporary file in `directory`, the directory checked before the read, after checking
+ * it still holds the file that was read. A file created in a directory swapped in meanwhile would
+ * take that directory's inherited access list, so the directory is held, not looked up again. Node
+ * has no `openat`. On POSIX the process changes into the directory: a relative path resolves from
+ * the working directory itself, wherever its name points later. On Windows a handle that does not
+ * share delete access keeps the directory from being renamed, so its name keeps pointing at it.
+ * Synchronous, so no other code runs while the working directory is changed.
+ */
+function createTemporary(
+  cwd: string,
+  path: string,
+  name: string,
+  directory: Stats,
+  read: Stats | undefined,
+  display: string,
+): { descriptor: number; existing: Stats | undefined } {
+  const changed = `Refusing to write ${display}: it changed while the command ran.`;
+  const windows = process.platform === "win32";
+  const previous = windows ? undefined : process.cwd();
+  let base = dirname(path);
+  let lock: number | undefined;
+  try {
+    if (windows) {
+      lock = openSync(base, constants.O_RDONLY | UV_FS_O_EXLOCK);
+      if (!sameFile(fstatSync(lock), directory)) throw new ConfigError(changed);
+      // The working directory may be reached through a link (`rejectLinkedParents`).
+      const named = relative(cwd, base) ? lstatSync(base) : directory;
+      if (named.isSymbolicLink() || !sameFile(named, directory)) throw new ConfigError(changed);
+    } else {
+      process.chdir(base);
+      base = ".";
+      if (!sameFile(statSync(base), directory)) throw new ConfigError(changed);
+    }
+    const existing = lstatSync(join(base, basename(path)), { throwIfNoEntry: false });
+    if (existing?.isSymbolicLink())
+      throw new ConfigError(`Refusing to write ${display}: it is a symbolic link.`);
+    // The file replaced must be the one read: the content merged it, and its mode and group are kept.
+    if (!sameFile(existing, read)) throw new ConfigError(changed);
+    const descriptor = openSync(
+      join(base, name),
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    return { descriptor, existing };
+  } finally {
+    if (lock !== undefined) closeSync(lock);
+    if (previous !== undefined) process.chdir(previous);
+  }
+}
+
 /**
  * Atomic write: temporary file, fsync, rename. A file it replaces keeps its permission bits, so one
  * kept at 0600 because it holds other servers' tokens is never widened, except that other accounts
@@ -452,46 +528,43 @@ async function writeConfigFile(
   text: string,
   display: string,
   read: Stats | undefined,
+  directory: Stats | undefined,
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const existing = await rejectSymlink(path, display);
-  // The file replaced must be the one read: the content merged it, and its mode and group are kept.
-  // Another file in its place, such as one in a directory swapped in meanwhile, is refused.
-  if (existing?.dev !== read?.dev || existing?.ino !== read?.ino)
+  // A directory that did not exist at the read has nothing read from it; it is held from here.
+  const held = directory ?? (await rejectLinkedParents(cwd, path, display));
+  if (!held)
     throw new ConfigError(`Refusing to write ${display}: it changed while the command ran.`);
-  const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+  const name = `.${basename(path)}.${randomUUID()}.tmp`;
+  const temporary = join(dirname(path), name);
   try {
-    const handle = await open(
-      temporary,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o600,
-    );
+    const { descriptor, existing } = createTemporary(cwd, path, name, held, read, display);
     try {
-      await handle.writeFile(text, "utf8");
+      writeFileSync(descriptor, text, "utf8");
       if (existing) {
         // Other accounts never keep write access: they could add a server command to run.
         let mode = existing.mode & 0o775;
         // The new file has the process's group (the directory's on macOS), which may differ. When
         // the group cannot be kept, its members and everyone else get only what both had.
-        const created = await handle.stat();
+        const created = fstatSync(descriptor);
         if (created.gid !== existing.gid) {
           try {
-            await handle.chown(-1, existing.gid);
+            fchownSync(descriptor, -1, existing.gid);
           } catch {
             const shared = (mode >> 3) & mode & 0o007;
             mode = (mode & 0o700) | (shared << 3) | shared;
           }
         }
-        await handle.chmod(mode);
+        fchmodSync(descriptor, mode);
         // Root also gives the file back to its owner, last: changing the mode of another account's
         // file would need CAP_FOWNER. If it cannot, the write fails and the old file stays in place,
         // rather than leaving one its owner cannot read.
         if (process.geteuid?.() === 0 && created.uid !== existing.uid)
-          await handle.chown(existing.uid, -1);
+          fchownSync(descriptor, existing.uid, -1);
       }
-      await handle.sync();
+      fsyncSync(descriptor);
     } finally {
-      await handle.close();
+      closeSync(descriptor);
     }
     await rejectLinkedParents(cwd, path, display);
     await rejectSymlink(path, display);
@@ -1327,8 +1400,9 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   let merged: Record<string, unknown>;
   let content: string;
   let read: Stats | undefined;
+  let directory: Stats | undefined;
   try {
-    await rejectLinkedParents(cwd, path, display);
+    directory = await rejectLinkedParents(cwd, path, display);
     const existing = await readJsonConfig(path, display);
     read = existing.file;
     merged = mergeServerEntry(existing.config, plan.key, plan.entry, display, serverName);
@@ -1351,7 +1425,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     return 0;
   }
   try {
-    await writeConfigFile(cwd, path, content, display, read);
+    await writeConfigFile(cwd, path, content, display, read, directory);
   } catch (error) {
     return fail(`Could not write ${display}: ${(error as Error).message}`);
   }
