@@ -34,9 +34,11 @@ import {
 } from "../src/cli/mcp.js";
 
 // `mkdir` and `open` pass through, after `before` when a test sets it, so a test can change the tree
-// as the command prepares its write or creates its temporary file.
+// as the command prepares its write or creates its temporary file. `noteOpen` runs after that open
+// and again after the handle writes, so a test sees a file created in the swapped directory.
 const realFilesystem = { ...filesystem };
 let before: ((call: "mkdir" | "open", path: string) => Promise<void>) | undefined;
+let noteOpen: ((path: string) => Promise<void>) | undefined;
 void mock.module("node:fs/promises", () => ({
   ...realFilesystem,
   mkdir: async (...args: Parameters<typeof filesystem.mkdir>) => {
@@ -44,8 +46,19 @@ void mock.module("node:fs/promises", () => ({
     return realFilesystem.mkdir(...args);
   },
   open: async (...args: Parameters<typeof filesystem.open>) => {
-    await before?.("open", String(args[0]));
-    return realFilesystem.open(...args);
+    const path = String(args[0]);
+    await before?.("open", path);
+    const handle = await realFilesystem.open(...args);
+    if (noteOpen) {
+      const writeFile = handle.writeFile.bind(handle);
+      handle.writeFile = async (...writeArgs: Parameters<typeof handle.writeFile>) => {
+        const result = await writeFile(...writeArgs);
+        await noteOpen?.(path);
+        return result;
+      };
+      await noteOpen(path);
+    }
+    return handle;
   },
 }));
 
@@ -612,6 +625,46 @@ describe("hue mcp install", () => {
     const viaLink = await mcp(["install", "--client", "vscode"], { cwd: join(outside, "project") });
     expect(viaLink.code).toBe(0);
     expect(await readFile(join(root, ".vscode", "mcp.json"), "utf8")).toBe(VSCODE_JSON);
+  });
+
+  test("a config directory replaced as the temporary file opens does not receive the merged config", async () => {
+    const marker = "placeholder-for-other-server-credential";
+    const leaked: Record<string, string[]> = {};
+    for (const client of ["cursor", "vscode"] as const) {
+      const root = await temporaryRoot();
+      const outside = await temporaryRoot();
+      const directory = client === "cursor" ? ".cursor" : ".vscode";
+      const existing =
+        client === "cursor"
+          ? { mcpServers: { other: { headers: { Authorization: marker } } } }
+          : { servers: { other: { headers: { Authorization: marker } } } };
+      await mkdir(join(root, directory));
+      const file = join(root, directory, "mcp.json");
+      await writeFile(file, JSON.stringify(existing), { mode: 0o600 });
+      await chmod(file, 0o600);
+      const seen: string[] = [];
+      // The swap runs inside open, after the command's identity check. A second path lookup
+      // before this open still loses, because the directory changes before the file is created.
+      before = async (call, path) => {
+        if (call !== "open" || !path.startsWith(join(root, directory, "."))) return;
+        before = undefined;
+        await rm(join(root, directory), { recursive: true });
+        await symlink(outside, join(root, directory));
+      };
+      noteOpen = async () => {
+        for (const name of await readdir(outside))
+          seen.push(await readFile(join(outside, name), "utf8"));
+      };
+      try {
+        await mcp(["install", "--client", client], { cwd: root });
+      } finally {
+        before = undefined;
+        noteOpen = undefined;
+      }
+      leaked[client] = seen;
+      expect(await readdir(outside)).toEqual([]);
+    }
+    expect(leaked).toEqual({ cursor: [], vscode: [] });
   });
 
   test("--dry-run redacts literal credentials and keeps references and Hue's entry", async () => {
