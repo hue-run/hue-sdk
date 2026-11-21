@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1879,4 +1879,147 @@ describe("hue world create --export-from through a Pipedream Connect account", (
       expect(result.stderr).toContain(message);
     }
   });
+});
+
+function textIfPresent(path: string): string | null {
+  return existsSync(path) ? readFileSync(path, "utf8") : null;
+}
+
+function readAgentEnv(path: string): Record<string, string> {
+  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error("agent env dump is not an object");
+  const seen: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parsed)) {
+    if (typeof value !== "string") throw new Error(`${name} in the agent env dump is not a string`);
+    seen[name] = value;
+  }
+  return seen;
+}
+
+describe("a project env file cannot reach the world command", () => {
+  test.each([
+    { label: "hue world loads ./.env.hue", file: ".env.hue", flag: undefined },
+    { label: "hue world loads --env-path", file: "supplied.env", flag: "--env-path" },
+  ])(
+    "$label without applying its loader variables to the command",
+    async ({ file, flag }) => {
+      const agentNode = spawnSync("node", ["-p", "process.execPath"], { encoding: "utf8" });
+      expect(agentNode.status).toBe(0);
+      const nodePath = agentNode.stdout.trim();
+      const stand = hue();
+      const cwd = await scratch();
+      const library = join(cwd, "loader.so");
+      const preload = join(cwd, "node-options.cjs");
+      const script = join(cwd, "agent.mjs");
+      const started = join(cwd, "started");
+      const dump = join(cwd, "env.json");
+      const loaderMarker = join(cwd, "ld-preload");
+      const nodeMarker = join(cwd, "node-options");
+      const compiled = spawnSync("gcc", ["-shared", "-fPIC", "-o", library, "-x", "c", "-"], {
+        input: `#include <stdio.h>
+#include <stdlib.h>
+__attribute__((constructor)) static void init(void) {
+  const char *path = getenv("HUE_LD_PRELOAD_MARKER");
+  FILE *file = path ? fopen(path, "w") : 0;
+  if (!file) return;
+  const char *canary = getenv("PARENT_CANARY");
+  fputs(canary ? canary : "", file);
+  fclose(file);
+}
+`,
+      });
+      expect(compiled.status).toBe(0);
+      await writeFile(
+        preload,
+        `const fs = require("node:fs");
+const target = process.env.HUE_NODE_OPTIONS_MARKER;
+if (target) fs.writeFileSync(target, process.env.PARENT_CANARY ?? "");
+`,
+      );
+      await writeFile(
+        script,
+        `import { writeFileSync } from "node:fs";
+const names = ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "NODE_OPTIONS", "INJECTED_FROM_DOTENV", "PARENT_CANARY"];
+const seen = {};
+for (const name of names) {
+  const value = process.env[name];
+  if (value !== undefined) seen[name] = value;
+}
+writeFileSync(process.env.HUE_AGENT_ENV, JSON.stringify(seen));
+writeFileSync(process.env.HUE_AGENT_STARTED, "started");
+`,
+      );
+      await writeFile(
+        join(cwd, file),
+        [
+          `HUE_API_KEY=${KEY}`,
+          `HUE_BASE_URL=${stand.origin}`,
+          `LD_PRELOAD=${library}`,
+          `DYLD_INSERT_LIBRARIES=${library}`,
+          `NODE_OPTIONS=--require ${preload}`,
+          "INJECTED_FROM_DOTENV=from-file",
+          "PARENT_CANARY=from-file",
+          "",
+        ].join("\n"),
+      );
+      const entry = process.env.HUE_TEST_CLI ?? cli;
+      const runtime = process.env.HUE_TEST_RUNTIME ?? process.execPath;
+      const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
+        (resolve, reject) => {
+          const child = spawn(
+            runtime,
+            [entry, "world", "run", VERSION, ...(flag ? [flag, file] : []), "--", nodePath, script],
+            {
+              cwd,
+              env: {
+                PATH: process.env.PATH ?? "",
+                HOME: process.env.HOME ?? "",
+                TMPDIR: process.env.TMPDIR ?? tmpdir(),
+                PARENT_CANARY: "parent-canary",
+                HUE_AGENT_STARTED: started,
+                HUE_AGENT_ENV: dump,
+                HUE_LD_PRELOAD_MARKER: loaderMarker,
+                HUE_NODE_OPTIONS_MARKER: nodeMarker,
+              },
+              stdio: ["ignore", "pipe", "pipe"],
+            },
+          );
+          let stdout = "";
+          let stderr = "";
+          child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+            stdout += chunk;
+          });
+          child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+            stderr += chunk;
+          });
+          const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+          child.on("error", (error) => {
+            clearTimeout(timer);
+            reject(error);
+          });
+          child.on("close", (status) => {
+            clearTimeout(timer);
+            resolve({ status, stdout, stderr });
+          });
+        },
+      );
+      if (!existsSync(started))
+        throw new Error(
+          `command did not start (status ${result.status})\n${result.stderr}\n${result.stdout}`,
+        );
+      expect({
+        loader: textIfPresent(loaderMarker),
+        nodeOptions: textIfPresent(nodeMarker),
+        env: readAgentEnv(dump),
+        contactedHue: stand.requests.some((line) => line.startsWith("POST /api/v1/instances")),
+      }).toEqual({
+        loader: null,
+        nodeOptions: null,
+        env: { PARENT_CANARY: "parent-canary" },
+        contactedHue: true,
+      });
+    },
+    60_000,
+  );
 });
