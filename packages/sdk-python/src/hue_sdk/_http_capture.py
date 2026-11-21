@@ -61,6 +61,23 @@ _CONTINUATION_KEYS = frozenset(
         "cursortoken",
     }
 )
+# Besides the shared credential names: session headers, and the OAuth codes, PKCE verifiers, client
+# assertions and presigned-URL signatures that redeem or replay a grant.
+_GRANT_KEYS = frozenset(
+    {
+        "cookie",
+        "setcookie",
+        "proxyauthorization",
+        "code",
+        "authcode",
+        "authorizationcode",
+        "devicecode",
+        "sig",
+        "hmac",
+        "samlresponse",
+    }
+)
+_GRANT_SUFFIXES = ("verifier", "signature", "assertion")
 _TARGETS = {
     "requests.adapters": [("HTTPAdapter", "send", "requests", False)],
     "httpx._client": [
@@ -180,7 +197,9 @@ def _credential_key(key: str) -> bool:
     normalized = key.lower().replace("-", "").replace("_", "")
     if normalized == "headers" or normalized in _CONTINUATION_KEYS:
         return False
-    return normalized in {"cookie", "setcookie", "proxyauthorization"} or _is_credential_key(key)
+    return (
+        normalized in _GRANT_KEYS or normalized.endswith(_GRANT_SUFFIXES) or _is_credential_key(key)
+    )
 
 
 @dataclass
