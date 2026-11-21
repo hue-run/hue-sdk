@@ -63,7 +63,7 @@ compatibility = [
     "aiohttp==3.14.5",
     "google-api-python-client==2.201.0",
     "google-auth==2.62.0",
-    "httplib2==0.32.0",
+    "httplib2==0.32.1",
     "httpx==0.28.1",
     "httpx2==2.14.0",
     "openai==3.37.0",
