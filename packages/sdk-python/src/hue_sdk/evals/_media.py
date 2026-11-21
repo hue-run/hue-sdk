@@ -139,6 +139,11 @@ _MIN_DOWNLOAD_IDLE_SECONDS: float = 120
 _MAX_RETRY_AFTER_SECONDS = 10
 # Bytes of a JSON answer read: a link answer or an error body.
 _MAX_ANSWER_BYTES = 64 * 1024
+# Nesting a JSON answer may have: json.loads recurses once per level, and 64 KiB of brackets
+# nest past the interpreter's recursion limit.
+_MAX_ANSWER_DEPTH = 32
+_ESCAPED = re.compile(r"\\.", re.DOTALL)
+_NESTING = re.compile(r'["\[\]{}]')
 # What the SDKs keep of text media over 64 KiB in its content field: its first 16 KiB.
 _PREFIX_BYTES = 16 * 1024
 # Nesting a value is walked to; deeper parts stay as they are.
@@ -212,11 +217,32 @@ def _retry_after(response: requests.Response) -> int | None:
     return min(int(header), 86_400)
 
 
+def _nested_too_deep(text: str) -> bool:
+    """Whether arrays and objects outside strings nest past ``_MAX_ANSWER_DEPTH``. Escapes are
+    dropped first, so each remaining quote opens or closes a string as the JSON grammar reads
+    it."""
+    depth = 0
+    quoted = False
+    for match in _NESTING.finditer(_ESCAPED.sub("", text)):
+        token = match.group()
+        if token == '"':
+            quoted = not quoted
+        elif quoted:
+            continue
+        elif token in "[{":
+            depth += 1
+            if depth > _MAX_ANSWER_DEPTH:
+                return True
+        else:
+            depth -= 1
+    return False
+
+
 def _answer(response: requests.Response) -> Any:
-    """A JSON answer read to a bound; None when it is larger or not JSON. A connection that fails
-    while the answer is read raises ``requests.RequestException``, as one that fails before it
-    does: the caller asks once more. An answer past the bound is refused even when its connection
-    then fails, as the TypeScript SDK refuses it."""
+    """A JSON answer read to a bound; None when it is larger, nested too deep or not JSON. A
+    connection that fails while the answer is read raises ``requests.RequestException``, as one
+    that fails before it does: the caller asks once more. An answer past the bound is refused even
+    when its connection then fails, as the TypeScript SDK refuses it."""
     chunks: list[bytes] = []
     size = 0
     try:
@@ -233,8 +259,9 @@ def _answer(response: requests.Response) -> Any:
     except urllib3.exceptions.HTTPError as error:
         raise requests.ConnectionError(error) from None
     try:
-        return json.loads(b"".join(chunks).decode("utf-8"))
-    except (ValueError, UnicodeError):
+        text = b"".join(chunks).decode("utf-8")
+        return None if _nested_too_deep(text) else json.loads(text)
+    except (ValueError, UnicodeError, RecursionError):
         return None
 
 
@@ -498,7 +525,7 @@ def _blob_refs(listed: object) -> list[_BlobRef]:
     if isinstance(entries, str):
         try:
             entries = loads_message(entries)
-        except ValueError:
+        except (ValueError, RecursionError):
             return []
     if not isinstance(entries, (list, tuple)):
         return []
@@ -511,7 +538,7 @@ def _blob_refs(listed: object) -> list[_BlobRef]:
                 continue
             try:
                 entry = loads_message(entry)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
         if not isinstance(entry, Mapping):
             continue
