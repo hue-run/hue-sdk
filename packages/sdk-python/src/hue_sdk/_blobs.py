@@ -1475,7 +1475,7 @@ def _backoff(attempt: int, reply: _Reply | None) -> float:
 def _json(body: bytes) -> Any:
     try:
         return json.loads(body.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None
 
 

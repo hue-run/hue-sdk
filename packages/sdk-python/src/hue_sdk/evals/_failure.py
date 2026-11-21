@@ -201,7 +201,7 @@ def _body_diagnostic(body: object) -> str | None:
             return None
         try:
             return _body_diagnostic(json.loads(body[start:]))
-        except ValueError:
+        except (ValueError, RecursionError):
             return None
     if isinstance(body, dict):
         # Hue's REST refusal names it at the top; its MCP refusal, a JSON-RPC error, in

@@ -115,6 +115,8 @@ _MISSING = object()
 _FILE_ROLES = frozenset({"input", "attachment", "output"})
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_FILE_DATA_BYTES = 25 * 1024 * 1024
+# The most of a project response read, as the TypeScript SDK's project check reads.
+_MAX_PROJECT_BYTES = 65_536
 # Attributes, events and links one span of a client's own tracer provider keeps, and attributes per
 # event and link. OpenTelemetry's default of 128 silently dropped the rest of a long conversation's
 # flattened messages; Hue's receiver counts none of them.
@@ -1489,24 +1491,32 @@ class Hue:
     def validate_project(self) -> Project:
         self._ensure_open()
         try:
-            with SafeSession() as session:
-                response = session.get(
+            with (
+                SafeSession() as session,
+                session.get(
                     f"{self.base_url}/api/v1/projects/current",
                     headers=self._headers,
                     timeout=self._timeout,
-                )
-            if response.status_code != 200:
-                raise ProjectValidationError(
-                    f"Hue project validation failed (HTTP {response.status_code})."
-                )
-            data = response.json()
+                    stream=True,
+                ) as response,
+            ):
+                if response.status_code != 200:
+                    raise ProjectValidationError(
+                        f"Hue project validation failed (HTTP {response.status_code})."
+                    )
+                body = bytearray()
+                for chunk in response.iter_content(chunk_size=4096):
+                    body.extend(chunk)
+                    if len(body) > _MAX_PROJECT_BYTES:
+                        raise ProjectValidationError("Hue returned an invalid project response.")
+            data = json.loads(body)
             if not isinstance(data, dict) or any(
                 not isinstance(data.get(field), str) or not data[field]
                 for field in ("id", "name", "slug", "organizationId")
             ):
                 raise ProjectValidationError("Hue returned an invalid project response.")
             return Project(data["id"], data["name"], data["slug"], data["organizationId"])
-        except (requests.RequestException, ValueError):
+        except (requests.RequestException, ValueError, RecursionError):
             raise ProjectValidationError("Hue project validation request failed.") from None
 
     def export_issues(self) -> tuple[ExportIssue, ...]:
