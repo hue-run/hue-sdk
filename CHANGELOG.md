@@ -8,6 +8,17 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Security
+
+- `hue eval` and `hue eval --ci` take only `HUE_API_KEY` and `HUE_BASE_URL` from `./.env.hue` or
+  `--env-file`/`--env-path`, where they used to apply every variable in the file to the process
+  and the agent command. A planted `.env.hue` could set `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES` or
+  `NODE_OPTIONS` and run code in the agent child. `hue world` and `hue import langfuse` read only
+  those two names from an automatically loaded `./.env.hue`, and `hue world run` no longer passes
+  `--env-path` variables to its command.
+
 ### [0.30.2] - 2026-11-13
 
 #### Added

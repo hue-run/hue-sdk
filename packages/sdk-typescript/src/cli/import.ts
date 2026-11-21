@@ -10,7 +10,7 @@ import { isLoopbackHost } from "../config.js";
 import { suppressHttpCapture } from "../http-capture.js";
 import { HueExportError } from "../transport.js";
 import { sdkVersion } from "../version.js";
-import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
+import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions, hueSettings } from "./env-file.js";
 import {
   hueTraceId,
   ImportStopped,
@@ -222,6 +222,7 @@ async function withEnvFile(
   env: NodeJS.ProcessEnv,
   cwd: string,
   file: string,
+  parse: (content: string) => NodeJS.Dict<string> = parseEnv,
 ): Promise<NodeJS.ProcessEnv> {
   let content: string;
   try {
@@ -231,12 +232,13 @@ async function withEnvFile(
       `Unable to load ${file}: ${(error as NodeJS.ErrnoException).code ?? "unreadable"}`,
     );
   }
-  return { ...parseEnv(content), ...env };
+  return { ...parse(content), ...env };
 }
 
 /** The environment with the named env file loaded, then, when the Hue key is needed and neither
- * set `HUE_API_KEY`, `./.env.hue` (where `hue login` stores it): the Langfuse keys can sit in a
- * file of their own. A dry run needs no Hue key and reads no `./.env.hue` beside a named file. */
+ * set `HUE_API_KEY`, the Hue settings of `./.env.hue` (where `hue login` stores the key): the
+ * Langfuse keys can sit in a file of their own. A dry run needs no Hue key and reads no
+ * `./.env.hue` beside a named file. */
 async function loadEnv(
   env: NodeJS.ProcessEnv,
   cwd: string,
@@ -250,7 +252,7 @@ async function loadEnv(
     !existsSync(resolve(cwd, DEFAULT_ENV_FILE))
   )
     return named;
-  return withEnvFile(named, cwd, DEFAULT_ENV_FILE);
+  return withEnvFile(named, cwd, DEFAULT_ENV_FILE, hueSettings);
 }
 
 function defaultOnInterrupt(listener: () => void): () => void {

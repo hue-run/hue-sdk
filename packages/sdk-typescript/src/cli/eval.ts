@@ -72,7 +72,7 @@ import {
   type VerdictComparison,
 } from "../evals/verdicts.js";
 import type { JsonValue } from "../types.js";
-import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
+import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions, loadHueSettings } from "./env-file.js";
 import { runCiEvalCommand, type ExecuteCiRun } from "./eval-ci.js";
 import { closedMessage, RunCloser } from "./eval-interrupt.js";
 import {
@@ -2989,7 +2989,7 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       envFile = DEFAULT_ENV_FILE;
     if (envFile) {
       try {
-        process.loadEnvFile(resolve(envFile));
+        loadHueSettings(resolve(envFile));
       } catch (error) {
         throw new UsageError(
           `Unable to load ${envFile}: ${error instanceof Error ? error.message : String(error)}`,
