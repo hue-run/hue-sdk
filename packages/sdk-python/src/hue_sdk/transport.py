@@ -42,6 +42,7 @@ from ._blobs import (
     UploadGroup,
     Uploads,
     _blob_entry,
+    _no_auth,
     held_of,
     place_logs,
     place_spans,
@@ -200,6 +201,9 @@ class SafeSession(requests.Session):
         limits: AdvertisedLimits | None = None,
     ) -> None:
         super().__init__()
+        # requests replaces the caller's Authorization with a matching .netrc login unless an
+        # auth is set; proxy and CA settings from the environment still apply.
+        self.auth = _no_auth
         self.signal = signal
         self._request_lock = Lock()
         self.placeholders = 0

@@ -449,6 +449,7 @@ class EvaluationClient:
                         **self._headers,
                         **({"Content-Type": "application/json"} if payload is not None else {}),
                     },
+                    auth=_no_auth,
                     timeout=self._timeout,
                     allow_redirects=False,
                     stream=True,
@@ -1153,6 +1154,7 @@ class EvaluationClient:
                 with requests.get(
                     f"{self.base_url}/api/v1/artifacts/{uuid(artifact_id)}/download",
                     headers=self._headers,
+                    auth=_no_auth,
                     timeout=max(self._timeout, 120),
                     allow_redirects=False,
                     stream=True,

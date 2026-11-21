@@ -18,6 +18,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.connectionpool import ConnectionPool
 
+from .._blobs import _no_auth
 from .._otel_compat import suppress_instrumentation
 from ..evals._json import MISSING, encode, json_value, uuid
 from ..transport import DEFAULT_BASE_URL, normalize_base_url, reject_positional_api_key
@@ -443,6 +444,7 @@ class WorldClient:
                         **({"X-Hue-Native-Connections": "1"} if native_connections else {}),
                         **({"Content-Type": "application/json"} if payload is not None else {}),
                     },
+                    auth=_no_auth,
                     timeout=self._timeout if timeout_seconds is None else timeout_seconds,
                     allow_redirects=False,
                     stream=True,
