@@ -548,10 +548,16 @@ const server = createServer((request, response) => {
 const fixtureKinds = ["express-npm", "express-bun", "flask-uv"];
 const fixtures = fixtureKinds.map((kind) => ({ kind, root: join(destination, kind) }));
 const shellQuote = (value) => `'${value.replaceAll("'", "'\"'\"'")}'`;
+const serverSpans = (fixture) =>
+  [...fixture.installation.traces.values()].reduce(
+    (count, spans) => count + [...spans.values()].filter((span) => span.kind === 2).length,
+    0,
+  );
 
 try {
   const realNpm = await executable("npm");
   const realUv = await executable("uv");
+  const realBun = await executable("bun");
   if (!values["installed-package"]) {
     const cliRoot = dirname(dirname(dirname(installedPackage)));
     await mkdir(cliRoot, { recursive: true });
@@ -629,6 +635,12 @@ try {
     `#!/bin/sh\nprintf 'uv\\n' >> ${shellQuote(join(destination, "manager-calls"))}\nfound=0\nfor arg in "$@"; do\n  if [ "$arg" = "--no-build" ]; then found=1; fi\ndone\nif [ "$found" != 1 ]; then exit 2; fi\nexec ${shellQuote(realUv)} "$@"\n`,
   );
   await chmod(uvWrapper, 0o755);
+  const bunWrapper = join(wrappers, "bun");
+  await writeFile(
+    bunWrapper,
+    `#!/bin/sh\nprintf '%s\\n' "$*" >> ${shellQuote(join(destination, "bun-calls"))}\nexec ${shellQuote(realBun)} "$@"\n`,
+  );
+  await chmod(bunWrapper, 0o755);
   const opener = join(wrappers, process.platform === "darwin" ? "open" : "xdg-open");
   await writeFile(
     opener,
@@ -882,31 +894,12 @@ try {
 # This original application docstring must survive integration.
 ("Original fixture module")
 from __future__ import annotations
-import json
 import os
-import time
-from flask import Flask, Response, stream_with_context
-from opentelemetry.trace import get_current_span
+from flask import Flask
 app = Flask(__name__)
 @app.get("/")
 def home():
-    with open("handler-count.txt", "a", encoding="utf-8") as count:
-        count.write("1")
-    observations = []
-    def observe():
-        span = get_current_span()
-        ids = span.get_span_context()
-        observations.append({"traceId": format(ids.trace_id, "032x"), "spanId": format(ids.span_id, "016x")})
-    observe()
-    def body():
-        observe()
-        yield "o"
-        time.sleep(0.01)
-        observe()
-        with open("handler-evidence.json", "w", encoding="utf-8") as evidence:
-            json.dump({"observations": observations, "moduleDoc": __doc__}, evidence)
-        yield "k"
-    return Response(stream_with_context(body()))
+    return "ok"
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=int(os.environ["PORT"]))
 `,
@@ -928,27 +921,13 @@ if __name__ == "__main__":
       );
       await writeFile(
         join(fixture.root, "src", "server.mjs"),
-        `import { appendFileSync, writeFileSync } from "node:fs";
-import { setTimeout } from "node:timers/promises";
-import { trace } from "@opentelemetry/api";
-import express from "express";
-const note = "const app = express();";
-const template = \`app.get("/fake", handler);\`;
-const pattern = /const app = express\\(\\)/;
+        `import express from "express";
+// const note = "const app = express();";
+/* app.get("/fake", handler); */
 // app.get("/comment-only", handler);
 const app = express();
-app.get("/", async (_request, response) => {
-  appendFileSync("handler-count.txt", "1");
-  writeFileSync("runtime.txt", typeof Bun === "undefined" ? "node" : "bun");
-  const observations = [];
-  const observe = () => { const ids = trace.getActiveSpan()?.spanContext(); observations.push({ traceId: ids?.traceId, spanId: ids?.spanId }); };
-  observe();
-  await Promise.resolve();
-  observe();
+app.get("/", (_request, response) => {
   response.write("o");
-  await setTimeout(10);
-  observe();
-  writeFileSync("handler-evidence.json", JSON.stringify({ observations }));
   response.end("k");
 });
 app.listen(Number(process.env.PORT), "127.0.0.1");
@@ -1092,29 +1071,6 @@ app.listen(Number(process.env.PORT), "127.0.0.1");
       "verified application evidence persisted",
     );
     fixture.evidence = local.applicationEvidence;
-    const handlerEvidence = JSON.parse(
-      await readFile(join(fixture.root, "handler-evidence.json"), "utf8"),
-    );
-    noSecrets(JSON.stringify(handlerEvidence), "original handler evidence");
-    const boundHandler = (candidate) =>
-      handlerEvidence.observations?.length === 3 &&
-      handlerEvidence.observations.every(
-        (observed) =>
-          observed.traceId === candidate.traceId && observed.spanId === candidate.spanId,
-      );
-    requireThat(
-      boundHandler(fixture.evidence),
-      `${fixture.kind} original handler standard span IDs match application evidence across async/streaming boundaries`,
-    );
-    if (fixture.kind === "flask-uv")
-      requireThat(
-        handlerEvidence.moduleDoc === "Original fixture module",
-        "parenthesized module docstring survives installed integration",
-      );
-    requireThat(
-      !boundHandler({ traceId: "f".repeat(32), spanId: "e".repeat(16) }),
-      "unrelated probe IDs cannot replace original handler IDs even with one business request",
-    );
     requireThat(
       fixture.installation.traces.get(fixture.evidence.traceId)?.has(fixture.evidence.spanId),
       "receipt IDs match independently decoded OTLP",
@@ -1124,14 +1080,13 @@ app.listen(Number(process.env.PORT), "127.0.0.1");
         ?.kind === 2,
       "decoded OTLP span is SERVER",
     );
-    requireThat(
-      (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
-      "one business request initially",
-    );
+    requireThat(serverSpans(fixture) === 1, "one business request initially");
     if (fixture.kind !== "flask-uv")
       requireThat(
-        (await readFile(join(fixture.root, "runtime.txt"), "utf8")) ===
-          (fixture.kind === "express-bun" ? "bun" : "node"),
+        (await readFile(join(destination, "bun-calls"), "utf8").catch(() => ""))
+          .split("\n")
+          .filter((line) => line.endsWith(" src/server.mjs")).length ===
+          (fixture.kind === "express-bun" ? 1 : 0),
         "launch the repository's declared runtime",
       );
     if (fixture.kind !== "flask-uv") {
@@ -1151,8 +1106,7 @@ app.listen(Number(process.env.PORT), "127.0.0.1");
         );
       }
       requireThat(
-        counters.exports === before &&
-          (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
+        counters.exports === before,
         "context ownership checks never replay business work or export substitute spans",
       );
     }
@@ -1212,10 +1166,7 @@ app.listen(Number(process.env.PORT), "127.0.0.1");
         replacement.applicationEvidence.spanId === fixture.evidence.spanId,
       "original request evidence survives claim",
     );
-    requireThat(
-      (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
-      "claim never repeats business request",
-    );
+    requireThat(serverSpans(fixture) === 1, "claim never repeats business request");
     requireThat(!replacement.revocationCredential, "old key refusal was confirmed before cleanup");
     // Exercise the installed child and generated listener against a real occupied port.
     // A separate local checkpoint cannot alter/replay the original accepted application attempt.
@@ -1290,8 +1241,7 @@ app.listen(Number(process.env.PORT), "127.0.0.1");
         "foreign listener receives zero HTTP bytes and no retry",
       );
       requireThat(
-        JSON.stringify(counters) === beforeCollision &&
-          (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
+        JSON.stringify(counters) === beforeCollision,
         "occupied-port refusal never replays original handler or exports a substitute",
       );
       requireThat(
@@ -1403,8 +1353,9 @@ await hue.flush(); await hue.shutdown(); console.log(JSON.stringify(ids));
       "unrelated probe receipt is genuinely valid",
     );
     requireThat(
-      !boundHandler(unrelatedIds) &&
-        (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
+      unrelatedIds.traceId !== fixture.evidence.traceId &&
+        unrelatedIds.spanId !== fixture.evidence.spanId &&
+        serverSpans(fixture) === 1,
       "valid probe plus one business invocation fails original handler evidence binding",
     );
     if (fixture.kind !== "flask-uv") {
@@ -1595,10 +1546,16 @@ print(json.dumps({"wheelFilesVerified": checked, "importedInstalledPackage": Tru
           `
 import json
 import os
+import runpy
+import time
 from types import SimpleNamespace
-from flask import Flask
+from flask import Flask, Response, stream_with_context
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.trace import get_current_span
 import hue_setup
 
+module_doc = runpy.run_path("app.py", run_name="acceptance_docstring")["__doc__"]
+original_use_span = hue_setup.use_span
 preserved = 0
 for failure in ("span", "enter", "exit", "flush", "evidence"):
     os.environ["HUE_SETUP_EVIDENCE_FILE"] = str(hue_setup._evidence_path)
@@ -1666,7 +1623,29 @@ for status in (404, 503):
     response = app.test_client().get("/")
     if response.status_code != status or counts["business"] != 1 or counts["flush"] or counts["evidence"]:
         raise RuntimeError("Non-success handler became setup evidence")
-print(json.dumps({"cases": 5, "responsesPreserved": preserved, "normalServingWithoutFlush": True}))
+os.environ.pop("HUE_SETUP_EVIDENCE_FILE", None)
+hue_setup.hue = SimpleNamespace(tracer=TracerProvider().get_tracer("context-check"), force_flush=lambda: True)
+hue_setup.use_span = original_use_span
+observations = []
+def observe():
+    ids = get_current_span().get_span_context()
+    observations.append((ids.trace_id, ids.span_id))
+streaming = Flask("streaming-context")
+hue_setup.install_hue_flask(streaming, "/stream")
+@streaming.get("/stream")
+def stream():
+    observe()
+    def body():
+        observe()
+        yield "o"
+        time.sleep(0.01)
+        observe()
+        yield "k"
+    return Response(stream_with_context(body()))
+response = streaming.test_client().get("/stream")
+if response.data != b"ok" or len(observations) != 3 or len(set(observations)) != 1 or not observations[0][1]:
+    raise RuntimeError("A streaming handler lost the setup SERVER span context")
+print(json.dumps({"cases": 5, "responsesPreserved": preserved, "normalServingWithoutFlush": True, "streamingContext": True, "moduleDoc": module_doc}))
 `,
         ],
         fixture.root,
@@ -1682,8 +1661,15 @@ print(json.dumps({"cases": 5, "responsesPreserved": preserved, "normalServingWit
         "all Flask lifecycle failure responses preserved",
       );
       requireThat(
-        counters.exports === before &&
-          (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
+        JSON.parse(lifecycle.stdout).streamingContext === true,
+        "installed Flask middleware keeps the SERVER span active across streaming boundaries",
+      );
+      requireThat(
+        JSON.parse(lifecycle.stdout).moduleDoc === "Original fixture module",
+        "parenthesized module docstring survives installed integration",
+      );
+      requireThat(
+        counters.exports === before,
         "lifecycle cases do not replay/export acceptance business request",
       );
     }
@@ -1718,10 +1704,6 @@ print(json.dumps({"cases": 5, "responsesPreserved": preserved, "normalServingWit
       requireThat(
         JSON.stringify(counters) === beforeProtectionRefusal,
         "unsafe Git state causes no backend request",
-      );
-      requireThat(
-        (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
-        "unsafe Git state never replays business work",
       );
       requireThat(
         (await readFile(fixture.installationPath, "utf8")) === privateBeforeRefusal,

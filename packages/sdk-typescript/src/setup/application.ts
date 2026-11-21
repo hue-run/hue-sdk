@@ -24,6 +24,18 @@ const EXPRESS_RUNTIME_DEPENDENCIES = {
   "@opentelemetry/context-async-hooks": "2.11.0",
 } as const;
 const MAX_SOURCE_BYTES = 1024 * 1024;
+// `-I` keeps the project directory off sys.path, so project files cannot shadow flask, hue_sdk
+// or stdlib imports. The managed hue_setup.py is compiled from source, never from __pycache__.
+const PYTHON_LAUNCH = String.raw`
+import os, runpy, sys
+if os.path.exists("hue_setup.py"):
+    module = type(sys)("hue_setup")
+    module.__file__ = os.path.abspath("hue_setup.py")
+    sys.modules["hue_setup"] = module
+    with open(module.__file__, encoding="utf-8") as source:
+        exec(compile(source.read(), module.__file__, "exec"), module.__dict__)
+runpy.run_path("app.py", run_name="__main__")
+`;
 const START_MARKER = "Hue setup instrumentation (managed; do not edit)";
 const END_MARKER = "End Hue setup instrumentation";
 
@@ -77,6 +89,27 @@ async function bunConfiguration(root: string): Promise<string> {
   )
     throw refuse();
   return join(root, "bunfig.toml");
+}
+
+/** Bun remaps bare imports through the nearest tsconfig/jsconfig, which would load project files. */
+async function rejectBunPathMapping(root: string, entrypoint: string): Promise<void> {
+  for (let directory = dirname(resolve(root, entrypoint)); ; directory = dirname(directory)) {
+    for (const name of ["tsconfig.json", "jsconfig.json"]) {
+      let source: string;
+      try {
+        source = await safeRead(directory, name);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      if (/paths|baseurl|extends|\\/iu.test(source))
+        throw new SetupApplicationActionRequired(
+          "custom-instrumentation",
+          "Review tsconfig/jsconfig module path mapping before automatic Bun setup; remapped imports are unsupported.",
+        );
+    }
+    if (directory === root || !inside(root, directory)) break;
+  }
 }
 
 /** Closed automatic application matrix; other projects require an explicit agent-owned integration. */
@@ -452,6 +485,12 @@ export async function planSetupApplication(
     >;
     typescriptRuntimeDeclared(manifest);
     await rejectNodeWorkspaceAncestors(project.root);
+    // A package named like an import resolves that import to its own files (self-reference).
+    if (["express", ...Object.keys(EXPRESS_RUNTIME_DEPENDENCIES)].includes(String(manifest.name)))
+      throw new SetupApplicationActionRequired(
+        "ambiguous-project",
+        "The package name matches a runtime dependency. Rename the package or integrate Hue manually.",
+      );
     if (manifest.workspaces !== undefined)
       throw new SetupApplicationActionRequired(
         "ambiguous-project",
@@ -487,6 +526,7 @@ export async function planSetupApplication(
     const source = unmanagedApplicationSource(original, plan);
     plan.requestPath = syntax(source, "typescript").requestPath;
     if (plan.manager === "bun" || plan.runtime === "bun") await bunConfiguration(project.root);
+    if (plan.runtime === "bun") await rejectBunPathMapping(project.root, entrypoint);
     // Inspect only the selected runtime, never import the app or a user bootstrap.
     // Fixed argv + bounded output; unsupported runtimes fail before installation/provisioning.
     const runtime = spawnSync(
@@ -886,6 +926,8 @@ export async function exerciseSetupApplication(
   await safeRead(store.projectRoot, plan.entrypoint);
   if (plan.language === "typescript" && (plan.runtime === "bun" || plan.manager === "bun"))
     await bunConfiguration(store.projectRoot);
+  if (plan.language === "typescript" && plan.runtime === "bun")
+    await rejectBunPathMapping(store.projectRoot, plan.entrypoint);
   if (plan.language === "python") await flaskConfiguration(store.projectRoot);
   if (record.applicationAttempt)
     throw new SetupApplicationActionRequired(
@@ -917,11 +959,15 @@ export async function exerciseSetupApplication(
           ...(plan.sourceMaps ? ["--enable-source-maps"] : []),
           plan.entrypoint,
         ]
-      : ["run", "--frozen", "--no-build", "--no-sync", "python", plan.entrypoint];
+      : ["run", "--frozen", "--no-build", "--no-sync", "python", "-I", "-c", PYTHON_LAUNCH];
   const child = spawn(command, args, {
     cwd: store.projectRoot,
+    // The parent environment can hold unrelated credentials; PATH only locates the runtime.
     env: {
-      ...process.env,
+      ...(process.env.PATH === undefined ? {} : { PATH: process.env.PATH }),
+      ...(process.platform === "win32" && process.env.SYSTEMROOT
+        ? { SYSTEMROOT: process.env.SYSTEMROOT }
+        : {}),
       PORT: String(port),
       HUE_SETUP_EVIDENCE_FILE: store.applicationEvidencePath,
       HUE_SETUP_SOCKET_PROOF: socketProof,

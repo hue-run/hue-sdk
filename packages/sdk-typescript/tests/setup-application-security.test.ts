@@ -209,11 +209,20 @@ describe("application source preservation", () => {
     const root = await expressProject();
     const path = join(root, "src", "server.mjs");
     const decoys = [
-      'const note = "const app = express();";\n',
       '// const app = express(); app.get("/fake", handler);\n',
+      '/* const note = "const app = express();"; */\n',
+      '/** app.get("/fake", handler); */\n',
+    ];
+    for (const statement of [
+      'const note = "const app = express();";\n',
       'const note = `const app = express(); app.get("/fake", handler);`;\n',
       "const pattern = /const app = express\\(\\); app.get/;\n",
-    ];
+    ]) {
+      await writeFile(path, statement + expressSource());
+      await expect(planSetupApplication(await detectSetupProject(root))).rejects.toMatchObject({
+        code: "ambiguous-entrypoint",
+      });
+    }
     for (const decoy of decoys) {
       const original = decoy + expressSource();
       await writeFile(path, original);
@@ -380,22 +389,27 @@ describe("application source preservation", () => {
 
 describe("runtime installation and invocation", () => {
   test("Node compile-only preflight rejects enum and invalid runtime syntax without executing source", async () => {
-    for (const [extension, declaration] of [
-      ["ts", "enum Color { Red }"],
-      ["mjs", "const value: string = 'x';"],
-    ]) {
+    for (const [extension, source, code] of [
+      [
+        "ts",
+        `import { writeFileSync } from "node:fs";\nenum Color { Red }\nwriteFileSync("should-not-run", "1");\n${expressSource()}`,
+        "ambiguous-entrypoint",
+      ],
+      [
+        "mjs",
+        expressSource().replace("(_request, response)", "(_request: unknown, response)"),
+        "custom-instrumentation",
+      ],
+    ] as const) {
       const root = await expressProject();
       const manifestPath = join(root, "package.json");
       const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
       manifest.scripts.start = `node src/server.${extension}`;
       await writeFile(manifestPath, JSON.stringify(manifest));
       const entrypoint = join(root, "src", `server.${extension}`);
-      const source =
-        `import { writeFileSync } from "node:fs";\n${declaration}\nwriteFileSync("should-not-run", "1");\n` +
-        expressSource();
       await writeFile(entrypoint, source);
       await expect(planSetupApplication(await detectSetupProject(root))).rejects.toMatchObject({
-        code: "custom-instrumentation",
+        code,
       });
       expect(await readFile(entrypoint, "utf8")).toBe(source);
       await expect(lstat(join(root, "should-not-run"))).rejects.toMatchObject({ code: "ENOENT" });
