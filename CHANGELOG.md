@@ -8,6 +8,18 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Fixed
+
+- **Wire** Hue's export copy sanitizes HTTP URLs on spans of every kind, not only CLIENT spans.
+  Server, internal, producer and consumer spans on a shared tracer provider, such as an
+  application's HTTP server spans, were exported with their request URL unchanged, including
+  userinfo, the query string and credential path segments. Their `url.full`, `http.url`,
+  `http.target` and `url.path` are now filtered like a CLIENT span's, `url.query` is removed, a URL
+  that cannot be sanitized is omitted and an HTTP URL in the span name is scrubbed. Other exporters
+  keep the original span. A `tool()` span's endpoint evidence is unchanged.
+
 ### [0.30.2] - 2026-11-13
 
 #### Added
@@ -2197,6 +2209,17 @@ No registry release is claimed until publication and registry acceptance complet
 - `agent_environment` sets `HUE_WORLD_EXPIRES_AT` to the world's `expiresAt` (RFC 3339), until
   when the world token is valid, unless the world's `env` names it. A value inherited from the
   parent is replaced like the other `HUE_WORLD_*` variables.
+
+#### Fixed
+
+- **Wire** Hue's export copy and live placeholders sanitize HTTP URLs on spans of every kind, not
+  only CLIENT spans. Server, internal, producer and consumer spans on a borrowed tracer provider,
+  such as an application's HTTP server spans, were exported with their request URL unchanged,
+  including userinfo, the query string and credential path segments. Their `url.full`, `http.url`,
+  `http.target` and `url.path` are now filtered like a CLIENT span's, `url.query` is removed, a URL
+  that cannot be sanitized is omitted, and the copy is named by its recorded HTTP method, or `HTTP`
+  when its name holds a URL. Other exporters keep the original span. A `tool()` span's endpoint
+  evidence is unchanged.
 
 ### [0.15.1] - 2026-11-08
 

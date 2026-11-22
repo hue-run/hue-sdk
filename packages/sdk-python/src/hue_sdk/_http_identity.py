@@ -9,7 +9,6 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan
-from opentelemetry.trace import SpanKind
 
 from ._http_bounds import SpanBounds, limits_for
 from ._records import replace_span
@@ -192,7 +191,8 @@ def safe_http_resource(
 def safe_http_span(
     span: ReadableSpan, redact: Callable[[str, str], str | None] | None = None
 ) -> ReadableSpan:
-    """Sanitize HTTP identity in Hue's copy, including both URL conventions and span names."""
+    """Sanitize HTTP identity in Hue's copy of a span of any kind, including both URL conventions
+    and span names."""
     attributes = span.attributes or {}
     bounds = limits_for(span)
     resource = safe_http_resource(span.resource, redact)
@@ -200,12 +200,15 @@ def safe_http_span(
     if resource is not span.resource or safe_attributes is not attributes:
         span = replace_span(span, resource=resource, attributes=safe_attributes)
         attributes = span.attributes or {}
+    if isinstance(attributes.get("hue.tool.endpoint.source"), str) and not any(
+        key in attributes for key in _URI_KEYS if key != "url.full"
+    ):
+        # tool() filtered and redacted this url.full when it was recorded; it is not a request URL.
+        return span
     method = attributes.get("http.request.method", attributes.get("http.method"))
     keys = [key for key in _URL_KEYS if key in attributes]
     paths = [key for key in _PATH_KEYS if key in attributes]
     url_in_name = bool(_HTTP_URL_NAME.search(span.name))
-    if span.kind != SpanKind.CLIENT:
-        return span
     valid_method = _METHOD.fullmatch(method) if isinstance(method, str) else None
     name = (
         method.upper()
