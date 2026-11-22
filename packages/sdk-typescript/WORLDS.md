@@ -148,6 +148,8 @@ Use `WorldClient.withPostgres` in TypeScript or `WorldClient.with_postgres` in P
 `projectId` or `project_id` on the client if the key's default project is not the target. The
 helper uses that project and the same key for start, reveal, and finish. Pass the URL directly
 to your driver, or set it only in a child process's environment. Keep hostname verification on.
+The helper refuses a URL with more than one host or with any query parameter other than a single
+`sslmode=verify-full`, and hands over a copy rebuilt from the checked parts.
 
 Close the driver before your callback or `with` block exits. The SDK finishes the instance on
 exit and reports finish errors. If a start never returns an instance ID, retry the same start

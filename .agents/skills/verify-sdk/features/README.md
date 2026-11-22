@@ -44,4 +44,6 @@ Postgres handoff uses `withPostgres` in TypeScript and `with_postgres` in Python
 Postgres tests in `packages/sdk-typescript/tests/world-client.test.ts` and
 `packages/sdk-python/tests/test_world_client.py`. Verify that start, reveal, and finish use the
 same project and key; parallel instances keep their URLs separate; and failure or cancellation
-still finishes an acknowledged instance. These loopback checks do not open a SQL session.
+still finishes an acknowledged instance. Also verify that a URL with any query parameter besides one
+`sslmode=verify-full`, or with more than one host, is refused and never reaches the callback.
+These loopback checks do not open a SQL session.
