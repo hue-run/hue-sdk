@@ -200,6 +200,78 @@ def test_account_tokens_are_preserved_and_inherited_tokens_are_removed():
     assert child["HUE_MCP_TOKEN"] == "synthetic-work-token"
 
 
+def _libpq_sslmode(connection_url: str) -> str | None:
+    """Last assignment wins, matching libpq ``conninfo_storeval``."""
+    if "?" not in connection_url:
+        return None
+    sslmode = None
+    for pair in connection_url.split("?", 1)[1].split("&"):
+        if "=" not in pair:
+            continue
+        keyword, value = pair.split("=", 1)
+        keyword, value = _libpq_decode(keyword), _libpq_decode(value)
+        if keyword == "ssl" and value == "true":
+            sslmode = "require"
+        elif keyword == "requiressl":
+            sslmode = "require" if value.startswith("1") else "prefer"
+        elif keyword == "sslmode":
+            sslmode = value
+    return sslmode
+
+
+def _libpq_decode(text: str) -> str:
+    out = []
+    index = 0
+    while index < len(text):
+        if text[index] != "%":
+            out.append(text[index])
+            index += 1
+            continue
+        code = int(text[index + 1 : index + 3], 16)
+        if code == 0:
+            raise ValueError("forbidden percent-encoding")
+        out.append(chr(code))
+        index += 3
+    return "".join(out)
+
+
+@pytest.mark.parametrize(
+    "offered",
+    [
+        "postgresql://user:synthetic@127.0.0.1/db?sslmode=verify-full&sslmode=disable",
+        "postgres://user:synthetic@10.0.0.8/db?sslmode=verify-full&sslmode=disable",
+        "postgresql://user:synthetic@127.0.0.1/db?sslmode=verify-full&sslmode=disa%62le",
+        "postgresql://user:synthetic@127.0.0.1/db?sslmode=verify-full&ssl=true",
+        "postgresql://user:synthetic@127.0.0.1/db?sslmode=verify-full&requiressl=0",
+    ],
+)
+@pytest.mark.parametrize("client_type", [WorldClient, EnvironmentClient])
+def test_postgres_handoff_keeps_verify_full(receiver, offered, client_type):
+    instance_id = str(uuid4())
+    for body in (
+        {
+            "id": instance_id,
+            "nativeApps": [{"appKey": "postgres", "providerId": "postgres", "state": "ready"}],
+        },
+        {"state": "ready", "url": offered},
+        {},
+    ):
+        receiver.reply(200, json.dumps(body).encode(), **{"Content-Type": "application/json"})
+    client = client_type(api_key="synthetic-world-key", base_url=receiver.url)
+    handed = None
+    try:
+        with client.with_postgres(idempotency_key=str(uuid4()), world_version_id=str(uuid4())) as (
+            dsn,
+            _instance,
+        ):
+            handed = dsn
+    except HueEnvironmentError:
+        assert handed is None
+        return
+    assert handed is not None and handed != offered
+    assert _libpq_sslmode(handed) == "verify-full"
+
+
 def test_model_cursors_are_opaque_and_cannot_add_query_parameters(receiver):
     from urllib.parse import parse_qs, urlsplit
 
