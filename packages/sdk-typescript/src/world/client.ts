@@ -120,18 +120,19 @@ type RunRequestOptions = {
   nativeConnections?: boolean;
 };
 
-function verifiedPostgresUrl(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  try {
-    const url = new URL(value);
-    return (
-      ["postgres:", "postgresql:"].includes(url.protocol) &&
-      Boolean(url.hostname && url.username && url.password && url.pathname.length > 1) &&
-      url.searchParams.get("sslmode") === "verify-full"
-    );
-  } catch {
-    return false;
-  }
+const URL_PART = String.raw`(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})+`;
+// libpq applies the last sslmode and every other query option, so only this closed shape passes:
+// one DNS or IP host, credentials, a database and sslmode=verify-full as the only parameter.
+const POSTGRES_URL = new RegExp(
+  `^(postgres(?:ql)?)://(${URL_PART}):(${URL_PART})@([A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?/(${URL_PART})\\?sslmode=verify-full$`,
+);
+
+/** The URL rebuilt from its checked parts, or undefined when it is not exactly that shape. */
+function verifiedPostgresUrl(value: unknown): string | undefined {
+  const match = typeof value === "string" ? POSTGRES_URL.exec(value) : null;
+  if (!match) return undefined;
+  const [, scheme, user, password, host, port = "", database] = match;
+  return `${scheme}://${user}:${password}@${host}${port}/${database}?sslmode=verify-full`;
 }
 
 /** Typed client for authored Worlds, isolated World instances and immutable journals. */
@@ -373,8 +374,8 @@ export class WorldClient {
         { appKey: app.appKey },
         { signal },
       );
-      if (connection?.state === "ready" && verifiedPostgresUrl(connection.url))
-        return connection.url;
+      const url = connection?.state === "ready" ? verifiedPostgresUrl(connection.url) : undefined;
+      if (url) return url;
       if (connection?.state !== "preparing") throw new Error("Postgres connection is unavailable");
       await new Promise<void>((resolve) => setTimeout(resolve, 500));
     }

@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, cast
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import urlencode
 from uuid import uuid4
 
 import requests
@@ -52,18 +52,23 @@ _TRACEPARENT = re.compile(r"^00-(?!0{32}-)[0-9a-f]{32}-(?!0{16}-)[0-9a-f]{16}-0[
 _EVIDENCE_SECTIONS = ("all", "start", "end", "diff", "ledger")
 
 
-def _verified_postgres_url(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    try:
-        url = urlsplit(value)
-        return (
-            url.scheme in ("postgres", "postgresql")
-            and bool(url.hostname and url.username and url.password and len(url.path) > 1)
-            and parse_qs(url.query).get("sslmode") == ["verify-full"]
-        )
-    except ValueError:
-        return False
+_URL_PART = r"(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})+"
+# libpq applies the last sslmode and every other query option, so only this closed shape passes:
+# one DNS or IP host, credentials, a database and sslmode=verify-full as the only parameter.
+_POSTGRES_URL = re.compile(
+    rf"(postgres(?:ql)?)://({_URL_PART}):({_URL_PART})@"
+    r"([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?"
+    rf"/({_URL_PART})\?sslmode=verify-full"
+)
+
+
+def _verified_postgres_url(value: Any) -> str | None:
+    """The URL rebuilt from its checked parts, or None when it is not exactly that shape."""
+    match = _POSTGRES_URL.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        return None
+    scheme, user, password, host, port, database = match.groups()
+    return f"{scheme}://{user}:{password}@{host}{port or ''}/{database}?sslmode=verify-full"
 
 
 class HueEnvironmentError(RuntimeError):
@@ -359,11 +364,15 @@ class WorldClient:
                 )
                 if not isinstance(connection, dict):
                     break
-                url = connection.get("url")
-                if connection.get("state") == "ready" and _verified_postgres_url(url):
+                url = (
+                    _verified_postgres_url(connection.get("url"))
+                    if connection.get("state") == "ready"
+                    else None
+                )
+                if url is not None:
                     if cancel_event is not None and cancel_event.is_set():
                         raise HueEnvironmentError()
-                    yield cast(str, url), instance
+                    yield url, instance
                     if cancel_event is not None and cancel_event.is_set():
                         raise HueEnvironmentError()
                     status = "completed"
