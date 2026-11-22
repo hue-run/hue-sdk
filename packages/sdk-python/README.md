@@ -383,8 +383,10 @@ business identifiers and unchanged encoded path segments retain their spelling. 
 Present `http.url`, `http.target` and `url.path` hooks follow in that order. Path hooks receive the
 pathname. Hue sanitizes each answer and omits all URI attributes if an answer is invalid or fails.
 In Hue's export copy, full URL aliases share the final URL, path aliases share its pathname and
-`url.query` is removed. The copy's name is the HTTP method. Other exporters retain their original
-span, including when Hue borrows their provider.
+`url.query` is removed. The copy's name is the HTTP method. Spans of every other kind, including a
+shared provider's SERVER spans, get the same URL filtering in Hue's copy and keep their name with
+any HTTP URL in it filtered; a tool span's endpoint `url.full` keeps its allowed query names. Other
+exporters retain their original span, including when Hue borrows their provider.
 
 HTTP URL-valued `resource.name` metadata is filtered independently through `url.full` and
 `resource.name` hooks, on spans, logs and their resources, including parent spans and live
