@@ -184,7 +184,8 @@ existing `traceparent`, must reach the server unchanged.
 
 Verify URL/name/legacy-alias and HTTP URL-valued `resource.name` sanitization on Hue's
 borrowed-span export snapshot in both content modes, including live placeholders. Also check
-unmatched CLIENT names containing HTTP URLs. Recognized credential path segments are redacted
+unmatched names containing HTTP URLs, and URL aliases and `url.query` on SERVER, INTERNAL,
+PRODUCER and CONSUMER spans from a shared provider. Recognized credential path segments are redacted
 while ordinary resource IDs retain their spelling. Canonical URL redaction hooks must run,
 their answers must be sanitized again, and invalid or receiver-over-limit answers must omit
 URI fields and report an instrumentation failure, including Unicode answers whose serialized

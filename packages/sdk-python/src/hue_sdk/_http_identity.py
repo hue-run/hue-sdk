@@ -35,6 +35,7 @@ _HOOK_ID = re.compile(r"B[A-Za-z0-9]+\Z", re.ASCII)
 _OPAQUE_CAPABILITY = re.compile(r"[A-Za-z0-9_-]+\Z", re.ASCII)
 _METHOD = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,32}\Z", re.ASCII)
 _HTTP_URL_NAME = re.compile(r"https?://", re.IGNORECASE | re.ASCII)
+_HTTP_URL_IN_NAME = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE | re.ASCII)
 _URL_KEYS = ("url.full", "http.url")
 _PATH_KEYS = ("http.target", "url.path")
 _URI_KEYS = (*_URL_KEYS, *_PATH_KEYS, "url.query")
@@ -121,6 +122,13 @@ def sanitize_http_url(raw: str) -> str:
     return urlunsplit((parsed.scheme, netloc, _safe_path(parsed.path or "/"), "", ""))
 
 
+def _safe_name_url(match: re.Match[str]) -> str:
+    try:
+        return sanitize_http_url(match.group(0))
+    except ValueError:
+        return REDACTED
+
+
 def _path_answer(raw: str, canonical: str | None) -> tuple[str | None, str]:
     """A path hook can replace its path or explicitly supply another absolute HTTP URL."""
     if not isinstance(raw, str) or re.search(r"[\x00-\x20\x7f\\]", raw):
@@ -201,21 +209,26 @@ def safe_http_span(
         span = replace_span(span, resource=resource, attributes=safe_attributes)
         attributes = span.attributes or {}
     method = attributes.get("http.request.method", attributes.get("http.method"))
-    keys = [key for key in _URL_KEYS if key in attributes]
+    # Tool endpoint evidence already kept only the query names the application allowed.
+    tool_endpoint = isinstance(attributes.get("hue.tool.endpoint.source"), str)
+    keys = [
+        key for key in _URL_KEYS if key in attributes and not (tool_endpoint and key == "url.full")
+    ]
     paths = [key for key in _PATH_KEYS if key in attributes]
     url_in_name = bool(_HTTP_URL_NAME.search(span.name))
-    if span.kind != SpanKind.CLIENT:
-        return span
+    client = span.kind == SpanKind.CLIENT
     valid_method = _METHOD.fullmatch(method) if isinstance(method, str) else None
     name = (
         method.upper()
-        if isinstance(method, str) and valid_method
+        if client and isinstance(method, str) and valid_method
         else "HTTP"
-        if url_in_name
-        else span.name
+        if client and url_in_name
+        else _HTTP_URL_IN_NAME.sub(_safe_name_url, span.name)
     )
+    # Every span kind: a shared provider's server spans record incoming URLs with their queries.
     if not keys and not paths and "url.query" not in attributes:
-        return replace_span(span, name=name) if valid_method or url_in_name else span
+        renamed = name != span.name or (client and valid_method)
+        return replace_span(span, name=name) if renamed else span
     copied = dict(attributes)
     copied.pop("url.query", None)
     url_length = _accepted_length(attributes, keys, bounds)

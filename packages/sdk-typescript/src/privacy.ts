@@ -1,4 +1,4 @@
-import { SpanKind, SpanStatusCode, type Attributes } from "@opentelemetry/api";
+import { SpanStatusCode, type Attributes } from "@opentelemetry/api";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import type { ReadableLogRecord } from "@opentelemetry/sdk-logs";
 import { resourceFromAttributes, type Resource } from "@opentelemetry/resources";
@@ -524,23 +524,19 @@ export function redactSpan(
   };
   // A provider can clip URL attributes before correlation. Sanitize only the surviving copy;
   // never reconstruct identity or grow a replacement beyond the provider-accepted value.
+  // Every span kind: a shared provider's server spans record incoming URLs with their queries.
   const unmatchedUris = new Map<string, number>();
-  if (span.kind === SpanKind.CLIENT && !limits.httpIdentity) {
-    const http =
-      typeof source["http.request.method"] === "string" ||
-      typeof source["http.method"] === "string" ||
-      ["url.full", "http.url", "resource.name"].some(
-        (key) => typeof source[key] === "string" && /^https?:/i.test(source[key]),
-      );
-    if (http) {
-      for (const key of ["url.full", "http.url", "http.target", "url.path", "resource.name"])
-        if (
-          typeof source[key] === "string" &&
-          (key !== "resource.name" || /^https?:/i.test(source[key]))
-        )
-          unmatchedUris.set(key, source[key].length);
-      delete source["url.query"];
-    }
+  if (!limits.httpIdentity) {
+    // Tool endpoint evidence already kept only the query names the application allowed.
+    const toolEndpoint = typeof source["hue.tool.endpoint.source"] === "string";
+    for (const key of ["url.full", "http.url", "http.target", "url.path", "resource.name"])
+      if (
+        typeof source[key] === "string" &&
+        (key !== "resource.name" || /^https?:/i.test(source[key])) &&
+        !(toolEndpoint && key === "url.full")
+      )
+        unmatchedUris.set(key, source[key].length);
+    delete source["url.query"];
   }
   const scrubUnmatchedUris = (values: Attributes): void => {
     for (const [key, cap] of unmatchedUris) {
@@ -753,9 +749,7 @@ export function redactSpan(
     }
   }
   return {
-    name:
-      limits.httpIdentity?.method ??
-      (span.kind === SpanKind.CLIENT ? scrubHttpSpanName(span.name) : span.name),
+    name: limits.httpIdentity?.method ?? scrubHttpSpanName(span.name),
     kind: span.kind,
     spanContext: () => span.spanContext(),
     parentSpanContext: span.parentSpanContext,
