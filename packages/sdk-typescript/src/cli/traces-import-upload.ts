@@ -4,6 +4,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { sdkVersion } from "../version.js";
 import {
   manifestTotals,
+  MAX_BATCH_DECODED_BYTES,
   sha256Hex,
   validateManifest,
   type TraceImportManifest,
@@ -653,17 +654,40 @@ export async function uploadTraceBundle(
     throw new UploadStop(`The upload URL of value ${blob.sha256} expired twice`, "upload_failed");
   };
 
-  const sendBatch = async (
-    traceId: string,
-    batch: { sha256: string; bytes: number },
-    state: TraceProgress,
-  ) => {
+  /** A batch's body and the span ids it holds, read once: the bytes posted are the bytes read
+   * back, and a body that inflates past the batch bound is refused before anything is sent. */
+  const readBatch = async (traceId: string, batch: { sha256: string; bytes: number }) => {
     const body = await readFile(join(options.directory, `${traceId}.${batch.sha256}.json.gz`));
     if (sha256Hex(body) !== batch.sha256 || body.byteLength !== batch.bytes)
       throw new UploadStop(
         `Batch ${batch.sha256} of trace ${traceId} was altered after preparation`,
         "bundle_invalid",
       );
+    let decoded: { resourceSpans?: { scopeSpans?: { spans?: { spanId?: unknown }[] }[] }[] };
+    try {
+      decoded = JSON.parse(
+        gunzipSync(body, { maxOutputLength: MAX_BATCH_DECODED_BYTES }).toString("utf8"),
+      ) as typeof decoded;
+    } catch {
+      throw new UploadStop(
+        `Batch ${batch.sha256} of trace ${traceId} is not gzip JSON of at most ${MAX_BATCH_DECODED_BYTES} bytes`,
+        "bundle_invalid",
+      );
+    }
+    const spanIds: string[] = [];
+    for (const group of decoded.resourceSpans ?? [])
+      for (const scope of group.scopeSpans ?? [])
+        for (const span of scope.spans ?? [])
+          if (typeof span.spanId === "string") spanIds.push(span.spanId);
+    return { body, spanIds };
+  };
+
+  const sendBatch = async (
+    traceId: string,
+    batch: { sha256: string; bytes: number },
+    body: Buffer,
+    state: TraceProgress,
+  ) => {
     const reply = await request("POST", `${base}/batches`, {
       headers: {
         "content-type": "application/json",
@@ -700,20 +724,6 @@ export async function uploadTraceBundle(
       return false;
     }
     return true;
-  };
-
-  /** The span ids a batch holds, read back from its body. */
-  const spanIdsOf = async (traceId: string, sha256: string): Promise<string[]> => {
-    const body = await readFile(join(options.directory, `${traceId}.${sha256}.json.gz`));
-    const decoded = JSON.parse(gunzipSync(body).toString("utf8")) as {
-      resourceSpans?: { scopeSpans?: { spans?: { spanId?: unknown }[] }[] }[];
-    };
-    const ids: string[] = [];
-    for (const group of decoded.resourceSpans ?? [])
-      for (const scope of group.scopeSpans ?? [])
-        for (const span of scope.spans ?? [])
-          if (typeof span.spanId === "string") ids.push(span.spanId);
-    return ids;
   };
 
   const confirmReceipt = async (traceId: string, spanIds: string[]): Promise<number> => {
@@ -784,13 +794,14 @@ export async function uploadTraceBundle(
     const spanIds: string[] = [];
     for (const batch of trace.batches) {
       if (refusedBefore(batch.sha256)) return conflict();
+      const read = await readBatch(trace.trace_id, batch);
       if (!state.batches.includes(batch.sha256)) {
-        const landed = await sendBatch(trace.trace_id, batch, state);
+        const landed = await sendBatch(trace.trace_id, batch, read.body, state);
         if (landed) state.batches.push(batch.sha256);
         await checkpoint.changed();
         if (!landed) return conflict();
       }
-      spanIds.push(...(await spanIdsOf(trace.trace_id, batch.sha256)));
+      spanIds.push(...read.spanIds);
     }
     const missing = await confirmReceipt(trace.trace_id, spanIds);
     if (missing) {
