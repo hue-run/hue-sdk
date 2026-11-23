@@ -1,6 +1,6 @@
 import { constants, type Stats } from "node:fs";
 import { link, lstat, open, readdir, realpath, rename, unlink } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { SetupProjectDetection } from "./types.js";
 import {
@@ -28,7 +28,7 @@ async function cleanupTemporary(path: string): Promise<void> {
 
 function inside(parent: string, child: string): boolean {
   const path = relative(parent, child);
-  return path === "" || (!path.startsWith("..") && !path.startsWith("/"));
+  return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 
 async function safeDirectory(path: string): Promise<void> {
