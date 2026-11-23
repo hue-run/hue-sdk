@@ -70,7 +70,9 @@ At most one file can be primary. Files are limited to 16, 25 MiB each and 64 MiB
 total; input/output JSON and HTTP envelopes also have bounded sizes. Error text
 is caller-owned public content: never return raw provider exceptions or secrets.
 
-Signed file PUTs make one attempt and never follow redirects. If their acknowledgement
+Signed file PUTs make one attempt and never follow redirects. Unless `baseUrl` is a
+loopback origin, an upload URL must use HTTPS on a host whose every address is public,
+and the PUT connects only to an address that check admitted. If their acknowledgement
 is lost, Hue's completion callback verifies the stored bytes before accepting the file.
 Only identical idempotent reservation/completion/checkpoint/telemetry callbacks retry,
 at most once within the finalization deadline. The helper never retries the agent, automatically

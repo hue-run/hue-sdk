@@ -1,6 +1,8 @@
 import { readFile, rename, stat, writeFile } from "node:fs/promises";
+import type { LookupFunction } from "node:net";
 import { join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
+import { pinnedFetch, uploadLookup } from "../upload-destination.js";
 import { sdkVersion } from "../version.js";
 import {
   manifestTotals,
@@ -404,6 +406,8 @@ export async function uploadTraceBundle(
       body?: Uint8Array | string;
       authorized?: boolean;
       timeoutMs?: number;
+      /** Connects the request through this lookup instead of `fetcher`. */
+      lookup?: LookupFunction;
     } = {},
   ): Promise<Reply> => {
     const headers: Record<string, string> = { "user-agent": userAgent, ...init.headers };
@@ -414,7 +418,7 @@ export async function uploadTraceBundle(
       let response: Response | undefined;
       let retryAfter: number | undefined;
       try {
-        response = await fetcher(url, {
+        response = await (init.lookup ? pinnedFetch(init.lookup) : fetcher)(url, {
           method,
           headers,
           ...(init.body !== undefined ? { body: init.body as RequestInit["body"] } : {}),
@@ -603,6 +607,15 @@ export async function uploadTraceBundle(
             "Hue answered a value reservation with an insecure upload URL",
             "protocol",
           );
+        let lookup: LookupFunction | undefined;
+        try {
+          lookup = uploadLookup(target, importUrl.origin);
+        } catch {
+          throw new UploadStop(
+            "Hue answered a value reservation with an upload URL on a private network",
+            "protocol",
+          );
+        }
         const headers: Record<string, string> = {};
         for (const [name, value] of Object.entries(answer.headers))
           if (typeof value === "string" && name.toLowerCase() !== "content-length")
@@ -615,6 +628,7 @@ export async function uploadTraceBundle(
             body: bytes,
             authorized: false,
             timeoutMs: BLOB_TIMEOUT_MS,
+            ...(lookup ? { lookup } : {}),
           },
         );
         // 412: the object exists already (another upload of the same value won).
