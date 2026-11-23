@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { isLoopbackHost } from "../config.js";
+import { isInternalAddress, pinnedDownload, resolvedAddresses } from "../pinned-download.js";
 import { uuid } from "./json.js";
 
 /**
@@ -284,11 +286,12 @@ function routeOf(target: MediaFetchTarget): { path: string; sha256: string } {
 const WRITTEN_HTTP_HOST = /^http:\/\/(?:[^/?#]*@)?(\[[^\]/?#]*\]|[^/?#:@]*)/i;
 
 /**
- * A download link Hue issued: HTTPS, or HTTP to a loopback host written `localhost`, `127.0.0.1`
- * or `[::1]`, without credentials or a fragment. A host the URL parser rewrites to one of those
- * (`127.1`, `0x7f.0.0.1`, `[0::1]`) is refused, as the Python SDK refuses it.
+ * A download link Hue issued: HTTPS, or, from a loopback Hue origin, HTTP to a loopback host
+ * written `localhost`, `127.0.0.1` or `[::1]`, without credentials or a fragment. A host the URL
+ * parser rewrites to one of those (`127.1`, `0x7f.0.0.1`, `[0::1]`) is refused, as the Python SDK
+ * refuses it.
  */
-function linkOf(value: unknown): string | undefined {
+function linkOf(value: unknown, loopbackOrigin: boolean): string | undefined {
   // eslint-disable-next-line no-control-regex -- control characters are refused
   if (typeof value !== "string" || value.length > 8192 || /[\x00-\x20\x7f]/u.test(value))
     return undefined;
@@ -296,7 +299,8 @@ function linkOf(value: unknown): string | undefined {
     const url = new URL(value);
     const allowed =
       url.protocol === "https:" ||
-      (url.protocol === "http:" &&
+      (loopbackOrigin &&
+        url.protocol === "http:" &&
         isLoopbackHost(url.hostname) &&
         WRITTEN_HTTP_HOST.exec(value)?.[1]?.toLowerCase() === url.hostname);
     return allowed && !url.username && !url.password && !url.hash ? value : undefined;
@@ -365,12 +369,12 @@ interface Grant {
   fileName?: string;
 }
 
-function grantOf(answer: unknown, sha256: string): Grant {
+function grantOf(answer: unknown, sha256: string, loopbackOrigin: boolean): Grant {
   const fields =
     answer !== null && typeof answer === "object" && !Array.isArray(answer)
       ? (answer as Record<string, unknown>)
       : undefined;
-  const url = linkOf(fields?.url);
+  const url = linkOf(fields?.url, loopbackOrigin);
   const size = fields?.size;
   if (
     !fields ||
@@ -403,19 +407,39 @@ function grantOf(answer: unknown, sha256: string): Grant {
 }
 
 /**
+ * Where a link from a remote Hue origin may be downloaded from: undefined for a public IP literal,
+ * which is where the connection goes already, else the address its name resolves to, looked up
+ * once and connected to, since a second lookup could answer a private one (DNS rebinding). A host
+ * on this machine or a private network, or any address of a name there, is refused before any
+ * request is sent.
+ */
+async function pinnedAddress(url: URL, signal: AbortSignal): Promise<string | undefined> {
+  const host = url.hostname.replace(/^\[|\]$/gu, "");
+  if (host === "localhost" || host.endsWith(".localhost")) throw new MediaFetchError("failed");
+  const literal = isIP(host) !== 0;
+  const addresses = literal ? [host] : await resolvedAddresses(host, signal);
+  if (addresses.length === 0 || addresses.some(isInternalAddress))
+    throw new MediaFetchError("failed");
+  return literal ? undefined : addresses[0];
+}
+
+/**
  * Hue's media reads, `client.media`: one recorded file by digest (`fetch`), and every digest part
  * of a recorded value written back with its bytes (`resolve`). The project key is sent to Hue
- * only; the file itself comes from a short-lived link fetched without it.
+ * only; the file itself comes from a short-lived link fetched without it. Unless Hue's origin is
+ * loopback, that link must be HTTPS to a host whose every address is public.
  */
 export class MediaClient {
   readonly #baseUrl: string;
   readonly #apiKey: string;
   readonly #timeoutMillis: number;
+  readonly #loopbackOrigin: boolean;
   /** @internal Created by the evaluation client as its `media`. */
   constructor(options: { baseUrl: string; apiKey: string; timeoutMillis: number }) {
     this.#baseUrl = options.baseUrl;
     this.#apiKey = options.apiKey;
     this.#timeoutMillis = options.timeoutMillis;
+    this.#loopbackOrigin = isLoopbackHost(new URL(options.baseUrl).hostname);
   }
 
   /**
@@ -572,7 +596,7 @@ export class MediaClient {
         await response.body?.cancel().catch(() => undefined);
         throw new MediaFetchError("failed", status);
       }
-      return grantOf(answer, sha256);
+      return grantOf(answer, sha256, this.#loopbackOrigin);
     }
   }
 
@@ -595,11 +619,15 @@ export class MediaClient {
     try {
       let response: Response;
       try {
-        response = await fetch(grant.url, {
-          redirect: "manual",
-          signal: AbortSignal.any([idle.signal, ...(signal ? [signal] : [])]),
-        });
+        const stop = AbortSignal.any([idle.signal, ...(signal ? [signal] : [])]);
+        const url = new URL(grant.url);
+        const address = this.#loopbackOrigin ? undefined : await pinnedAddress(url, stop);
+        response =
+          address === undefined
+            ? await fetch(grant.url, { redirect: "manual", signal: stop })
+            : await pinnedDownload(url, { headers: {}, signal: stop }, address);
       } catch (error) {
+        if (error instanceof MediaFetchError) throw error;
         throw new MediaFetchError("failed", undefined, undefined, { cause: error });
       }
       if (!response.ok) {
