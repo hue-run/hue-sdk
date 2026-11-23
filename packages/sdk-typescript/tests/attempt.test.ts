@@ -121,7 +121,7 @@ function fixture() {
     }),
     evidenceSource: "caller_supplied" as const,
   };
-  const bundle = (generation: number, bearer: string): AttemptConnectionBundleV2 =>
+  const bundle = (generation: number, bearer: string, host: string): AttemptConnectionBundleV2 =>
     attemptConnectionBundleV2.parse({
       schemaVersion: 2,
       bindingId,
@@ -134,7 +134,7 @@ function fixture() {
           ...provider,
           surfaces: provider.surfaces.map((surface) => ({
             ...surface,
-            endpoint: `https://simulation.invalid/api/v1/provider-facades/${bindingId}/${randomUUID()}`,
+            endpoint: `https://${host}/api/v1/provider-facades/${bindingId}/${randomUUID()}`,
             bearer,
           })),
         },
@@ -167,7 +167,7 @@ describe("attempt connection client", () => {
       hostname: "127.0.0.1",
       port: 0,
       async fetch(request) {
-        const path = new URL(request.url).pathname;
+        const { host, pathname: path } = new URL(request.url);
         const body = request.method === "GET" ? undefined : await request.json();
         requests.push({ method: request.method, path, ...(body === undefined ? {} : { body }) });
         if (path.endsWith("/prepare-attempt"))
@@ -179,10 +179,10 @@ describe("attempt connection client", () => {
               evidenceSource: "caller_supplied",
               findings: [],
             },
-            bundle: data.bundle(0, "a".repeat(48)),
+            bundle: data.bundle(0, "a".repeat(48), host),
           });
         if (path.endsWith("/refresh")) {
-          const bundle = data.bundle(1, "b".repeat(48));
+          const bundle = data.bundle(1, "b".repeat(48), host);
           if (drift)
             bundle.providers[0]!.surfaces[0]!.helperConfigurationDigest =
               digest("untrusted-change");

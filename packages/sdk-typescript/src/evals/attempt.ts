@@ -1159,11 +1159,35 @@ function requireFresh(bundle: AttemptConnectionBundleV2): AttemptConnectionBundl
   return bundle;
 }
 
+function effectivePort(url: URL): string {
+  return url.port || (url.protocol === "https:" ? "443" : "80");
+}
+
+/** Every surface's bearer is presented at its endpoint, so each endpoint must be the Hue origin. */
+function requireHueOrigin(
+  bundle: AttemptConnectionBundleV2,
+  origin: string,
+): AttemptConnectionBundleV2 {
+  const hue = new URL(origin);
+  for (const provider of bundle.providers)
+    for (const surface of provider.surfaces) {
+      const url = new URL(surface.endpoint);
+      // Only the canonical spelling is accepted, so no other URL parser can read another host.
+      if (
+        url.href !== surface.endpoint ||
+        url.hostname !== hue.hostname ||
+        effectivePort(url) !== effectivePort(hue)
+      )
+        throw new TypeError("Attempt endpoint is not on the Hue origin");
+    }
+  return bundle;
+}
+
 export function validateAttemptConnectionBundleV2(
   value: unknown,
-  options: { requireFresh?: boolean } = {},
+  options: { origin: string; requireFresh?: boolean },
 ): AttemptConnectionBundleV2 {
-  const bundle = attemptConnectionBundleV2.parse(value);
+  const bundle = requireHueOrigin(attemptConnectionBundleV2.parse(value), options.origin);
   return options.requireFresh ? requireFresh(bundle) : bundle;
 }
 
@@ -1177,6 +1201,7 @@ function selectedProviders(bundle: AttemptConnectionBundleV2) {
 export function parsePrepareAttemptResultV2(
   value: unknown,
   expected: PrepareAttemptInputV2,
+  origin: string,
 ): PrepareAttemptResultV2 {
   if (
     value &&
@@ -1231,7 +1256,7 @@ export function parsePrepareAttemptResultV2(
     .parse(value);
   if (result.preflightReport.status !== "ready")
     throw new TypeError("Invalid attempt preflight result");
-  const bundle = requireFresh(result.bundle);
+  const bundle = requireFresh(requireHueOrigin(result.bundle, origin));
   if (
     bundle.executionId !== expected.executionId ||
     bundle.environmentRunId !== expected.environmentRunId ||
@@ -1261,6 +1286,7 @@ function stableBundleEvidence(bundle: AttemptConnectionBundleV2) {
 export function parseRefreshedAttemptResultV2(
   value: unknown,
   previous: AttemptConnectionBundleV2,
+  origin: string,
 ): RefreshAttemptResultV2 {
   const trustedPrevious = attemptConnectionBundleV2.parse(previous);
   const result = z
@@ -1270,7 +1296,7 @@ export function parseRefreshedAttemptResultV2(
       bundle: attemptConnectionBundleV2,
     })
     .parse(value);
-  const bundle = requireFresh(result.bundle);
+  const bundle = requireFresh(requireHueOrigin(result.bundle, origin));
   if (
     result.preflightReport.status !== "ready" ||
     bundle.credentialGeneration !== trustedPrevious.credentialGeneration + 1 ||
