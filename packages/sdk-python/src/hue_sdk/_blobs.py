@@ -73,6 +73,7 @@ from ._limits import TRUNCATED_KEY, cut_utf8, over_utf8
 from ._otel_compat import export_context
 from ._records import truncated_marker, with_truncated_keys
 from ._tool_definitions import scrub_tool_credentials
+from ._upload_target import DIRECT, pinned, upload_address
 
 # The span attribute listing the values the SDK uploaded apart from the span: one compact JSON
 # object per value, ``{"key", "sha256", "size", "content_type"}``, with an optional ``name``.
@@ -1200,6 +1201,8 @@ class BlobUploader:
         body: Any,
         deadline: float,
         limit: int,
+        *,
+        address: str | None = None,
     ) -> _Reply | None:
         remaining = deadline - monotonic()
         if remaining <= 0 or self._closed:
@@ -1209,18 +1212,20 @@ class BlobUploader:
             # Uploads are the SDK's own export traffic: an instrumentation must not trace them.
             token = attach(export_context())
             with requests.Session() as session:
-                # The environment's proxy and CA settings apply, as to the OTLP requests; an
-                # explicit no-op auth keeps .netrc credentials off every request, the store's
-                # included, whose signature is in its URL.
+                # The environment's proxy and CA settings apply, as to the OTLP requests, except
+                # the proxy to a pinned address; an explicit no-op auth keeps .netrc credentials
+                # off every request, the store's included, whose signature is in its URL.
+                target, host = pinned(session, url, address)
                 response = session.request(
                     method,
-                    url,
-                    headers=dict(headers),
+                    target,
+                    headers={**headers, **host},
                     data=body,
                     auth=_no_auth,
                     timeout=(min(remaining, self._timeout), min(remaining, self._timeout)),
                     allow_redirects=False,
                     stream=True,
+                    proxies=DIRECT if address else None,
                 )
                 return _Reply(response, limit, deadline)
         except Exception:
@@ -1399,10 +1404,21 @@ class BlobUploader:
         longer holds its bytes (a file changed since it was recorded) ends the request before its
         body is complete, and fails the value without a retry."""
         deadline = monotonic() + put_seconds(size, self._timeout)
+        try:
+            # The presigned store is on a host of its own, so only its addresses are checked.
+            address = upload_address(grant["url"], self._base_url, any_host=True)
+        except ValueError:
+            return "failed", None
         body = _Body(value, size, deadline, lambda: self._closed)
         try:
             reply = self._request(
-                "PUT", grant["url"], grant["headers"], body, deadline, _MAX_ERROR_RESPONSE_BYTES
+                "PUT",
+                grant["url"],
+                grant["headers"],
+                body,
+                deadline,
+                _MAX_ERROR_RESPONSE_BYTES,
+                **({} if address is None else {"address": address}),
             )
         finally:
             complete = body.complete

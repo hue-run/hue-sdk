@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from contextvars import copy_context
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from queue import Empty, Queue
 from threading import Event, Thread
 from time import monotonic, sleep, time
@@ -23,6 +24,7 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 
 from ._inline_files import is_media_content_type
 from ._otel_compat import suppress_instrumentation
+from ._upload_target import pinned, upload_address
 from .evals._json import MISSING, encode, json_value, uuid
 from .transport import DEFAULT_BASE_URL, normalize_base_url
 
@@ -298,7 +300,9 @@ class ManagedTargetHandler:
                 )
                 artifact_id = uuid(reserved["artifactId"])
                 if reserved.get("state") != "ready":
-                    upload_url = _upload_url(reserved["uploadUrl"])
+                    upload_url, address = _within(
+                        partial(_upload_url, reserved["uploadUrl"], self._base_url), final_end
+                    )
                     upload_headers = _upload_headers(reserved.get("headers"), file.content_type)
                     try:
                         api.request(
@@ -310,6 +314,7 @@ class ManagedTargetHandler:
                             retry=False,
                             upload=True,
                             upload_headers=upload_headers,
+                            upload_address=address,
                         )
                     except Exception:
                         # Never replay a signed write. Completion verifies the
@@ -396,6 +401,7 @@ class _InvocationApi:
         content_type: str | None = None,
         upload: bool = False,
         upload_headers: dict[str, str] | None = None,
+        upload_address: str | None = None,
     ) -> bytes:
         @suppress_instrumentation()
         def send() -> bytes:
@@ -405,14 +411,18 @@ class _InvocationApi:
             # No netrc/proxy credentials, automatic retries or redirected bearer tokens.
             with requests.Session() as session:
                 session.trust_env = False
+                url, host = (
+                    pinned(session, path, upload_address) if upload else (self._url + path, {})
+                )
                 with session.request(
                     method,
-                    path if upload else self._url + path,
+                    url,
                     data=data,
                     headers={
                         **({} if upload else {"Authorization": f"Bearer {self._token}"}),
                         **({"Content-Type": content_type} if content_type else {}),
                         **(upload_headers or {}),
+                        **host,
                     },
                     timeout=remaining,
                     allow_redirects=False,
@@ -605,7 +615,8 @@ def _result(value: ManagedTargetResult) -> None:
         raise ValueError()
 
 
-def _upload_url(value: Any) -> str:
+def _upload_url(value: Any, origin: str) -> tuple[str, str | None]:
+    """The upload URL and the address its PUT connects to (``upload_address``)."""
     if not isinstance(value, str) or len(value) > 8192:
         raise ValueError()
     url = urlsplit(value)
@@ -618,7 +629,7 @@ def _upload_url(value: Any) -> str:
         or url.fragment
     ):
         raise ValueError()
-    return value
+    return value, upload_address(value, origin)
 
 
 def _upload_headers(value: Any, content_type: str) -> dict[str, str]:
