@@ -1,6 +1,7 @@
 import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
+import { pinnedFetch, uploadRoute, type UploadRoute } from "../upload-target.js";
 import { sdkVersion } from "../version.js";
 import {
   manifestTotals,
@@ -39,7 +40,8 @@ const IMPORT_PATH =
 const DEFAULT_CHECKPOINT_INTERVAL_MS = 250;
 
 export interface UploadIo {
-  /** The HTTP seam; `globalThis.fetch` by default. */
+  /** The HTTP seam; `globalThis.fetch` by default. A value upload a remote Hue names connects to
+   * its checked addresses instead (`pinnedFetch`). */
   fetch?: (input: string, init: RequestInit) => Promise<Response>;
   /** Waits `ms`, resolving early when `signal` aborts. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -404,6 +406,8 @@ export async function uploadTraceBundle(
       body?: Uint8Array | string;
       authorized?: boolean;
       timeoutMs?: number;
+      /** The connection for a pinned upload route, in place of {@link UploadIo.fetch}. */
+      fetch?: (input: string, init: RequestInit) => Promise<Response>;
     } = {},
   ): Promise<Reply> => {
     const headers: Record<string, string> = { "user-agent": userAgent, ...init.headers };
@@ -414,7 +418,7 @@ export async function uploadTraceBundle(
       let response: Response | undefined;
       let retryAfter: number | undefined;
       try {
-        response = await fetcher(url, {
+        response = await (init.fetch ?? fetcher)(url, {
           method,
           headers,
           ...(init.body !== undefined ? { body: init.body as RequestInit["body"] } : {}),
@@ -595,28 +599,36 @@ export async function uploadTraceBundle(
             "protocol",
           );
         }
-        if (
-          target.protocol !== "https:" &&
-          !(target.protocol === "http:" && isLoopback(target.hostname))
-        )
+        if (answer.method !== undefined && answer.method !== "PUT")
           throw new UploadStop(
-            "Hue answered a value reservation with an insecure upload URL",
+            "Hue answered a value reservation with a method other than PUT",
+            "protocol",
+          );
+        let route: UploadRoute | undefined;
+        try {
+          route = await uploadRoute(target, importUrl.origin);
+        } catch {
+          throw new UploadStop(
+            `The store for value ${blob.sha256} could not be resolved at ${target.hostname}`,
+            "unreachable",
+          );
+        }
+        if (!route)
+          throw new UploadStop(
+            "Hue answered a value reservation with an upload URL that is not https on a public address",
             "protocol",
           );
         const headers: Record<string, string> = {};
         for (const [name, value] of Object.entries(answer.headers))
           if (typeof value === "string" && name.toLowerCase() !== "content-length")
             headers[name] = value;
-        const put = await request(
-          typeof answer.method === "string" ? answer.method : "PUT",
-          target.href,
-          {
-            headers,
-            body: bytes,
-            authorized: false,
-            timeoutMs: BLOB_TIMEOUT_MS,
-          },
-        );
+        const put = await request("PUT", target.href, {
+          headers,
+          body: bytes,
+          authorized: false,
+          timeoutMs: BLOB_TIMEOUT_MS,
+          ...(route.addresses ? { fetch: pinnedFetch(route.addresses) } : {}),
+        });
         // 412: the object exists already (another upload of the same value won).
         const storedNow = (put.status >= 200 && put.status < 300) || put.status === 412;
         if (!storedNow) {

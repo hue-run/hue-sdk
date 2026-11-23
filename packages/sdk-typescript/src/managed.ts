@@ -6,6 +6,7 @@ import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { validateOptions } from "./config.js";
 import { json, uuid } from "./evals/json.js";
 import type { JsonValue } from "./types.js";
+import { pinnedTo, uploadRoute } from "./upload-target.js";
 
 const MIB = 1024 * 1024;
 const MAX_FILE = 25 * MIB;
@@ -415,6 +416,9 @@ class InvocationApi {
     );
   }
   async upload(url: string, data: Uint8Array, headers: Record<string, string>, deadline: number) {
+    const target = new URL(url);
+    const route = await uploadRoute(target, this.baseUrl);
+    if (!route) throw new Error("Hue managed upload failed");
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error("deadline");
     const signal = AbortSignal.timeout(remaining);
@@ -432,7 +436,7 @@ class InvocationApi {
       };
       // Signed writes must not be replayed by fetch, redirect handling or a
       // reused-socket retry. A lost response is settled by Hue's verified read.
-      const request = (new URL(url).protocol === "https:" ? httpsRequest : httpRequest)(
+      const request = (target.protocol === "https:" ? httpsRequest : httpRequest)(
         url,
         {
           method: "PUT",
@@ -440,6 +444,7 @@ class InvocationApi {
           signal,
           maxHeaderSize: 16 * 1024,
           headers: { ...headers, "content-length": String(data.byteLength) },
+          ...(route.addresses ? pinnedTo(route.addresses) : {}),
         },
         (response) => {
           activeResponse = response;

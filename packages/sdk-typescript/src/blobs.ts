@@ -4,6 +4,7 @@ import { context, type HrTime } from "@opentelemetry/api";
 import { suppressTracing } from "@opentelemetry/core";
 import { suppressHttpCapture } from "./http-capture.js";
 import { isLoopbackHost } from "./config.js";
+import { pinnedTo, uploadRoute, type UploadRoute } from "./upload-target.js";
 import {
   digestPart,
   hashInlineFiles,
@@ -911,6 +912,16 @@ export class BlobUploader {
     size: number,
     deadline: number,
   ): Promise<"stored" | "expired" | "failed" | "changed" | { retryAfter: number | undefined }> {
+    let route: UploadRoute | undefined;
+    try {
+      // An application's dns instrumentation must not trace the uploader's own lookup.
+      route = await context.with(suppressTracing(context.active()), () =>
+        uploadRoute(grant.url, this.options.baseUrl, this.options.allowInsecureHttp),
+      );
+    } catch {
+      return { retryAfter: undefined };
+    }
+    if (!route) return "failed";
     const reply = await this.request(
       "PUT",
       grant.url,
@@ -919,6 +930,7 @@ export class BlobUploader {
       deadline,
       MAX_ERROR_RESPONSE_BYTES,
       size,
+      route.addresses,
     );
     if (isByteSource(value) && value.changed) return "changed";
     if (!reply) return { retryAfter: undefined };
@@ -947,6 +959,7 @@ export class BlobUploader {
     deadline: number,
     maxResponseBytes: number,
     length?: number,
+    addresses?: UploadRoute["addresses"],
   ): Promise<Reply | undefined> {
     if (this.closed || deadline <= Date.now()) return undefined;
     let http: typeof import("node:http");
@@ -992,7 +1005,12 @@ export class BlobUploader {
               // Uploads are the SDK's own export traffic: an http instrumentation must not trace them.
               request = http.request(
                 url,
-                { method, headers: requestHeaders, agent: false },
+                {
+                  method,
+                  headers: requestHeaders,
+                  agent: false,
+                  ...(addresses ? pinnedTo(addresses) : {}),
+                },
                 (response: IncomingMessage) => {
                   const chunks: Buffer[] = [];
                   let size = 0;
