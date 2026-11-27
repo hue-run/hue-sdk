@@ -467,7 +467,7 @@ describe("hue login", () => {
       `# local settings\nOTHER=1\nexport HUE_API_KEY=${KEY}\nHUE_BASE_URL=${ORIGIN}\nTRAILING=yes\nHUE_MCP_KEY=${KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
     );
     expect(await mode(envPath)).toBe(0o600);
-    expect(forced.stdout).toContain("--env-file config/.env.local");
+    expect(forced.stdout).toContain("--env-path config/.env.local");
   });
 
   test("--env-path creates a new env file that --env-file cannot name under Node", async () => {
@@ -556,6 +556,24 @@ describe("hue login", () => {
     expect(await readFile(join(root, ".gitignore"), "utf8")).toBe(".env.hue\n");
     const check = spawnSync("git", ["check-ignore", "-q", ".env.hue"], { cwd: root });
     expect(check.status).toBe(0);
+  });
+
+  test("warns when the env file is already tracked by git even with --gitignore", async () => {
+    const root = await temporaryRoot();
+    expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
+    await writeFile(join(root, ".env.hue"), "OTHER=1\n");
+    expect(spawnSync("git", ["add", ".env.hue"], { cwd: root }).status).toBe(0);
+
+    const result = await login(["--origin", ORIGIN, "--keys", "evaluations", "--gitignore"], {
+      cwd: root,
+      lines: [EVAL_KEY],
+      env: shellEnv,
+    });
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain("Warning: .env.hue is already tracked by git");
+    expect(result.stderr).toContain("git rm --cached .env.hue");
+    expect(result.stdout).not.toContain("Added .env.hue to .gitignore.");
+    await expect(lstat(join(root, ".gitignore"))).rejects.toThrow();
   });
 
   test("a login protects the env file it wrote and adds no rule when nothing was stored", async () => {

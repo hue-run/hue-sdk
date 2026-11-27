@@ -175,17 +175,22 @@ hue login --origin https://staging.hue.run --env-path .env.staging
 ```
 
 `--env-path <path>` writes another env file, creating it when missing. `--env-file <path>` is
-accepted too, but Node 22 and 24 read that flag from the whole command line and exit with
-`node: <path>: not found` before `hue` runs when the file does not exist yet.
+accepted too, but prefer `--env-path`: Node 22 and 24 parse `--env-file` from the whole command line
+at startup, exit with `node: <path>: not found` before `hue` runs when the file does not exist yet,
+and apply any `NODE_OPTIONS` (such as `--require` preloads) contained in that file.
 
-The env file is written with mode `0600` through a temporary file and an atomic rename. Other
+The env file is written with mode `0600` (applied on the open file descriptor before closing)
+through a temporary file and an atomic rename. On Windows, POSIX `0600` mode bits are not enforced,
+so the file is protected only by its directory permissions. Other
 lines are preserved; a symlink or a non-regular file is refused; an existing different value is
 replaced only with `--force`. Empty values, whitespace and URLs are refused before any request.
 The production MCP server is available only at `https://mcp.hue.run/mcp`. `hue login` uses
 `https://mcp.staging.hue.run/mcp` with `https://staging.hue.run` and `<origin>/api/mcp` for other
 development or preview origins; plain HTTP origins are accepted for loopback test servers only.
 Output names variables and lengths (`Stored the key (NN chars) as HUE_API_KEY and HUE_MCP_KEY`),
-never values. When git does not ignore the env file, the command warns; `--gitignore` appends the
+never values. When git already tracks the env file, the command warns and does not claim
+`--gitignore` protected it (untrack it with `git rm --cached <path>`). When git does not ignore an
+untracked env file, the command warns; `--gitignore` appends the
 file name to the `.gitignore` next to it. Exit codes: `0` stored, `1` failed, `2` usage error, `130`
 interrupted.
 

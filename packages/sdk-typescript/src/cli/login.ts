@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, chmod, lstat, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { access, lstat, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
@@ -499,11 +499,11 @@ async function writePrivateFile(path: string, text: string, mode: number): Promi
     );
     try {
       await handle.writeFile(text, "utf8");
+      await handle.chmod(mode);
       await handle.sync();
     } finally {
       await handle.close();
     }
-    await chmod(temporary, mode);
     await rejectSymlink(path);
     await rename(temporary, path);
   } catch (error) {
@@ -564,14 +564,23 @@ async function insideGitRepository(directory: string): Promise<boolean> {
   }
 }
 
-type IgnoreStatus = "ignored" | "not-ignored" | "outside-repository" | "unknown";
+type IgnoreStatus = "tracked" | "ignored" | "not-ignored" | "outside-repository" | "unknown";
 
 async function gitIgnoreStatus(envPath: string, env: NodeJS.ProcessEnv): Promise<IgnoreStatus> {
   const directory = dirname(envPath);
   if (!(await insideGitRepository(directory))) return "outside-repository";
   const git = await findExecutable("git", env);
   if (!git) return "unknown";
-  const code = await runQuiet(git, ["check-ignore", "-q", "--", basename(envPath)], directory, env);
+  const name = basename(envPath);
+  const trackedCode = await runQuiet(
+    git,
+    ["ls-files", "--error-unmatch", "--", name],
+    directory,
+    env,
+  );
+  if (trackedCode === 0) return "tracked";
+  if (trackedCode !== 1) return "unknown";
+  const code = await runQuiet(git, ["check-ignore", "-q", "--", name], directory, env);
   if (code === 0) return "ignored";
   if (code === 1) return "not-ignored";
   return "unknown";
@@ -788,7 +797,11 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
   if (stored.length) {
     const ignorePath = join(dirname(envPath), ".gitignore");
     const status = await gitIgnoreStatus(envPath, env);
-    if (status === "not-ignored") {
+    if (status === "tracked") {
+      stderr.write(
+        `Warning: ${envDisplay} is already tracked by git; adding it to .gitignore will not stop git from committing it. Run "git rm --cached ${envDisplay}" to untrack it.\n`,
+      );
+    } else if (status === "not-ignored") {
       if (parsed.values.gitignore) {
         try {
           await appendIgnoreRule(ignorePath, basename(envPath));
@@ -820,7 +833,7 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
     );
   if (stored.includes("evaluations"))
     steps.push(
-      `hue eval --set "<eval set>" ${await detectEvalAgent(cwd)}${envDisplay === DEFAULT_ENV_FILE ? "" : ` --env-file ${envDisplay}`}`,
+      `hue eval --set "<eval set>" ${await detectEvalAgent(cwd)}${envDisplay === DEFAULT_ENV_FILE ? "" : ` --env-path ${envDisplay}`}`,
     );
   if (steps.length > 0) {
     out("Next steps:");
